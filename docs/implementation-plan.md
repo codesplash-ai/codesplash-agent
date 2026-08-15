@@ -1,7 +1,8 @@
 # AI Agent CLI Implementation Plan
 
-**Status:** Proposed  
+**Status:** Milestone 0 complete — Milestone 1 next
 **Reviewed:** 2026-08-14  
+**Progress updated:** 2026-08-15
 **Source:** [`docs/agent-plan.md`](./agent-plan.md)
 
 ## 1. Recommended direction
@@ -11,11 +12,74 @@ Build a Codex-first OpenTUI application, then add Claude Code as an official-CLI
 The first useful release should provide:
 
 - a native Codex chat experience with streaming text, tool activity, diffs, approvals, interrupt, and resume;
-- a Claude Code launcher that temporarily hands the terminal to the official interactive CLI, with embedded PTY rendering added only after a terminal-emulation spike succeeds;
+- a Claude Code launcher that temporarily hands the terminal to the official interactive CLI; the Milestone 0
+  embedded-terminal spike did not pass, so PTY embedding is not part of v1;
 - one application controller and view model, but provider-specific transports and capabilities;
 - durable local session metadata without reading, copying, or owning provider credentials.
 
 Do not put native Claude stream-JSON mode, custom tools, an MCP marketplace, subagents, SSH serving, or single-file cross-platform binaries on the v1 critical path.
+
+### Implementation progress
+
+| Milestone | Status | Current result |
+|---|---|---|
+| 0 — Protocol and packaging spikes | **Complete** | Real Codex approval/interrupt/restart/resume/second-turn smoke passed; Claude terminal handoff and restoration passed; embedded PTY was rejected for v1; emitted and compiled macOS arm64 builds passed. |
+| 1 — Core and Codex vertical slice | **Next; started early** | The live-session driver, normalized event stream, and process boundary exist. The next task is opening the native Codex chat when Enter is pressed on Codex. |
+| 2 — Durable sessions and safety | Started early | Versioned platform config paths, atomic TOML writes, and persisted system/dark/light theme preference now exist. Session durability follows the Codex vertical slice. |
+| 3 — Claude official-CLI surface | Started early | The homescreen performs official diagnostics and Enter launches Claude through the tested real-terminal handoff. Session metadata and polish remain. |
+| 4 — Cockpit completion | Not started | Deferred until both engine surfaces are proven. |
+| 5 — Alpha distribution | Not started | A macOS arm64 Bun-compiled executable passed the Milestone 0 smoke and is the internal-alpha format; release automation and the target matrix remain. |
+| 6 — Optional native Claude/extensibility | Deferred | Requires a fresh authentication/product decision. |
+
+Current Milestone 0 checklist:
+
+- [x] Select Bun 1.3+ and record the single-package decision in ADR 0001.
+- [x] Scaffold TypeScript, Biome, Bun tests, React, and exact OpenTUI dependencies.
+- [x] Define provider-independent engine/event contracts and a pure reducer.
+- [x] Add offline reducer tests and a synthetic Markdown/diff/approval fixture.
+- [x] Emit a runnable development build and smoke-test the CLI help path.
+- [x] Visually exercise the OpenTUI fixture and verify terminal restoration.
+- [x] Implement the Codex app-server JSON-RPC transport and fixture tests.
+- [x] Generate/version the supported Codex app-server protocol types.
+- [x] Run a quota-free real smoke check for initialize and account state against Codex CLI 0.147.0.
+- [x] Prove approval, interrupt, and resume wiring against a fake app-server child process.
+- [x] Add the branded provider home screen, exact Ocean & Heat dark/light palettes, keyboard focus between provider rows and footer actions, and persisted theme switching.
+- [x] Prove declined approval, interrupt, process restart/resume, and a post-resume second turn through the
+      real Codex app-server.
+- [x] Implement Claude full-terminal handoff with terminal restoration and test normal exit, `SIGINT`, forced
+      termination, and the installed official CLI.
+- [x] Run the embedded-terminal spike and reject it for v1 after the Bun/`node-pty` transport failed; retain
+      `libghostty-vt` as the preferred emulator candidate if the feature is revisited.
+- [x] Build and run both emitted JavaScript and a Bun-compiled macOS arm64 executable, including a real
+      OpenTUI open/quit smoke.
+
+### Milestone 0 completion checkpoint — 2026-08-15
+
+The repository is ready for its Milestone 0 commit. The checkpoint contains:
+
+- the Bun single-package scaffold, pinned OpenTUI React runtime, strict TypeScript, Biome, and Bun tests;
+- the provider-independent engine/event contracts, reducer, and synthetic OpenTUI fixture;
+- the Codex app-server process/JSON-RPC boundary, generated Codex 0.147.0 protocol types, normalizer,
+  live-session driver, quota-free probe, offline integration tests, and a passing real approval, interrupt,
+  restart/resume, and post-resume turn smoke;
+- the Claude official-CLI driver, real-terminal handoff, signal forwarding, terminal-mode restoration, and
+  automated normal-exit/`SIGINT`/forced-termination coverage;
+- the production homescreen with live Codex and Claude diagnostics, keyboard navigation across the agent
+  panel and footer, terminal restoration, and the CodeSplash terminal lockup;
+- exact Ocean & Heat dark/light semantic palettes sourced from `codesplash-website/docs/BRAND.md`, terminal
+  theme detection, an atomic persisted theme override in the platform config directory, responsive branding,
+  and the approved agent/footer navigation;
+- ADR 0003's evidence-based `terminal-handoff` decision and a successfully opened/quitted 70 MB Bun-compiled
+  macOS arm64 executable.
+
+The synthetic `--fixture` screen is still a development surface; the production homescreen does not yet
+open a native Codex chat. That is no longer a Milestone 0 blocker: it is the first Milestone 1 vertical-slice
+task. Continue in this order:
+
+1. make Enter on authenticated Codex open a native `CodexSession`;
+2. connect the normalized event stream to the production transcript and status line;
+3. add the multiline composer, approval modal, and `Esc` interrupt;
+4. prove a complete interactive second turn through the production TUI.
 
 ## 2. Review of the source plan
 
@@ -27,6 +91,20 @@ Do not put native Claude stream-JSON mode, custom tools, an MCP marketplace, sub
 - Provider schemas must remain inside adapters.
 - A de-risking spike should precede the full scaffold.
 - Exact dependency pins and recorded protocol fixtures are necessary because OpenTUI and both CLIs change quickly.
+
+### Reference-source policy
+
+This is an original CodeSplash implementation, but upstream source is the design reference rather than a
+black-box dependency:
+
+- Follow OpenTUI's Bun-first runtime, renderer lifecycle, React reconciler, and component patterns. Keep the
+  application view-model outside OpenTUI so a 0.x rendering change stays local.
+- Follow pi's separation between a live session, its ordered event stream, and its UI; its steering/follow-up
+  queues and tree-shaped JSONL sessions are the reference when those milestones arrive.
+- Preserve pi's bias toward a small core. Provider-specific protocol breadth stays in adapters and generated
+  types rather than growing the shared event contract without a real consumer.
+- Reimplement the ideas in this repository and cover them with local contract fixtures. Do not couple to
+  undocumented source internals or copy an upstream package graph before this project needs it.
 
 ### Change before implementation
 
@@ -42,7 +120,7 @@ Do not put native Claude stream-JSON mode, custom tools, an MCP marketplace, sub
 
 6. **Separate usage from cost.** Codex subscription events report token usage but do not provide a meaningful per-turn dollar cost. The status UI should show tokens, quota/rate-limit information when available, and provider-reported estimated cost only when the provider supplies one.
 
-7. **Move compiled binaries out of the MVP gate.** OpenTUI ships native components, and an embedded PTY adds another native dependency. Prove `bun build --compile` on every target before promising a five-platform single-binary release. Start with a Bun/npm package or platform archive.
+7. **Move compiled binaries out of the MVP gate.** OpenTUI ships native components, and an embedded PTY adds another native dependency. Prove the chosen packaging approach on every target before promising a five-platform single-binary release. Start with an npm package or platform archive.
 
 8. **Revalidate Claude policy at release time.** Current Anthropic documentation distinguishes ordinary individual Claude Code/Agent SDK usage from developers shipping products and says product integrations should use API-key authentication. V1 should use the official interactive CLI for subscription access. Any native Agent SDK or stream-JSON mode belongs behind a separate policy/product decision and must never read or replay `~/.claude` credentials.
 
@@ -161,31 +239,31 @@ Use atomic metadata replacement, `0600` file permissions where supported, and a 
 ## 5. Proposed repository layout
 
 ```text
-apps/
-  cli/
-    src/main.ts
-packages/
+src/
+  cli.tsx
   core/
-    src/engine.ts
-    src/events.ts
-    src/reducer.ts
-    src/config.ts
-    src/sessions.ts
-  engine-codex/
-    src/app-server-client.ts
-    src/driver.ts
-    src/normalize.ts
-    src/generated/          # versioned app-server protocol types
-  engine-claude/
-    src/driver.ts
-    src/handoff.ts
-    src/pty.ts              # created only if the spike passes
+    engine.ts
+    events.ts
+    reducer.ts
+    config.ts
+    sessions.ts
+  engines/
+    codex/
+      app-server-client.ts
+      driver.ts
+      normalize.ts
+      generated/           # versioned app-server protocol types
+    claude/
+      driver.ts
+      handoff.ts
+      pty.ts               # created only if the spike passes
   tui/
-    src/app.tsx
-    src/components/
-    src/keymap.ts
-    src/theme.ts
+    app.tsx
+    components/
+    keymap.ts
+    theme.ts
 tests/
+  core/
   fixtures/codex/
   fixtures/claude/
   integration/
@@ -193,7 +271,12 @@ docs/
   adr/
 ```
 
-Use a Bun workspace, TypeScript strict mode, Biome, and Bun test. Pin the initial OpenTUI packages to the same exact release; the current reviewed release is `0.5.3` and requires React `>=19.2.0`. Require a tested Codex CLI range beginning with the reviewed `0.147.0` protocol, rather than assuming any installed version works.
+Use one Bun package, TypeScript strict mode, Biome, and Bun's test runner. Bun follows OpenTUI's primary
+runtime path; portable APIs at core and engine boundaries keep the exception contained. Avoid
+workspace/package boundaries until a second independently built application exists. Extract packages only
+when ownership, release cadence, or reuse requires it. Pin the initial OpenTUI packages to the same exact
+release; the current reviewed release is `0.5.3` and requires React `>=19.2.0`. Require a tested Codex CLI
+range beginning with the reviewed `0.147.0` protocol, rather than assuming any installed version works.
 
 ## 6. Milestones
 
@@ -203,7 +286,7 @@ Use a Bun workspace, TypeScript strict mode, Biome, and Bun test. Pin the initia
 
 Tasks:
 
-1. Scaffold the Bun workspace and a minimal OpenTUI React screen using exact dependency pins.
+1. Scaffold the single-package Bun project and a minimal OpenTUI React screen using exact dependency pins.
 2. Render synthetic streaming Markdown, a diff, a textarea, and an approval modal from recorded in-memory events.
 3. Implement a disposable JSON-RPC client for `codex app-server --stdio`:
    - initialize and read capabilities/account state;
@@ -213,16 +296,30 @@ Tasks:
    - resume the thread after restarting the app-server process.
 4. Generate and check in app-server TypeScript protocol types from the minimum supported Codex CLI. Record the generator command and version in an ADR.
 5. Test Claude full-terminal handoff, terminal restoration on normal exit, `SIGINT`, and forced child termination.
-6. Prototype embedded Claude with `node-pty` plus a headless VT emulator and a minimal cell-grid renderer. Do not connect it to a paid model during this test; use a shell fixture that emits cursor movement, colors, alternate-screen transitions, resize events, and bracketed paste.
-7. Attempt a compiled build with OpenTUI and the selected process dependencies on macOS. Record whether bundling native libraries works; do not postpone this discovery to release week.
+6. Prototype embedded Claude with a Bun-compatible PTY binding (test `node-pty` first), a headless VT
+   emulator, and a minimal cell-grid renderer. Do not connect it to a paid model during this test; use a
+   shell fixture that emits cursor movement, colors, alternate-screen transitions, resize events, and
+   bracketed paste.
+7. Build and run the emitted Bun application with OpenTUI and the selected process dependencies on macOS.
+   Prototype Bun-compiled executables and platform archives separately; do not postpone native packaging
+   discovery to release week.
 
 Exit gates:
 
-- Codex approval and interrupt round trips work through app-server.
-- OpenTUI can render the expected event rate without visible input lag.
-- Terminal state is restored after every tested child-process exit path.
-- The team chooses either `terminal-handoff` or `embedded-pty` as the Claude v1 surface based on measured fidelity.
-- The distribution format for the first alpha is decided from an actual build result.
+- [x] Codex approval and interrupt round trips work through app-server.
+- [x] OpenTUI renders the synthetic event stream without visible input lag.
+- [x] Terminal state is restored after every tested child-process exit path.
+- [x] Claude v1 uses `terminal-handoff`. The embedded spike failed at the Bun/PTY transport boundary before a
+      reliable cell renderer could be built; see ADR 0003.
+- [x] The first internal alpha uses a Bun-compiled executable per platform. The macOS arm64 executable was
+      built, opened the production OpenTUI homescreen, and restored the terminal on quit. Cross-platform
+      release artifacts remain gated on the Milestone 5 target matrix.
+
+**Result (2026-08-15): complete.** Codex CLI `0.147.0` passed initialize/account diagnostics and a live
+declined-approval, interrupt, app-server restart/resume, and post-resume `RESUME_OK` turn. Claude Code
+`2.1.228` passed the real-terminal `--version` handoff; fake-child tests cover normal exit, `SIGINT`, forced
+termination, signal-listener cleanup, and restoration. The PTY spike used `node-pty` `1.1.0` and
+`@xterm/headless` `6.0.0`; its evidence and the `libghostty-vt` revisit path are recorded in ADR 0003.
 
 If app-server fails the stability gate, fall back to `@openai/codex-sdk` for a reduced alpha with `runStreamed()`, resume, abort-signal interrupt, and a non-interactive approval policy. Do not fake an approval UI that the transport cannot answer.
 
@@ -375,10 +472,14 @@ A realistic daily-driver alpha is therefore 5–7 weeks with Claude handoff, or 
 
 ## 10. Decisions recorded for implementation
 
+- **Runtime and package manager:** Bun 1.3+, following OpenTUI's primary runtime path. Other CodeSplash apps
+  remain on Node; ADR 0001 records why this terminal application is the exception.
+- **Repository shape:** one package with `src/core`, `src/engines`, and `src/tui`; introduce `apps/` or workspace packages only when a second independently built artifact exists.
 - **UI reconciler:** React.
 - **Primary native engine:** Codex app-server v2, gated by the Milestone 0 spike.
 - **Codex SDK role:** reduced-capability fallback and reference implementation, not the approval-capable primary transport.
-- **Claude v1 mode:** official interactive CLI through terminal handoff; embedded PTY only if its spike passes.
+- **Claude v1 mode:** official interactive CLI through terminal handoff; the embedded PTY spike failed and is
+  excluded from v1.
 - **Claude native stream mode:** deferred pending product/authentication decision.
 - **Persistence:** provider-native context plus app-owned metadata and coalesced JSONL UI history.
 - **Initial distribution:** evidence-driven package/archive; compiled binaries are not assumed.
@@ -393,6 +494,9 @@ V1 is complete when a clean supported machine can install the CLI, run diagnosti
 - [OpenAI Codex SDK](https://developers.openai.com/codex/sdk/)
 - [OpenAI Codex authentication](https://developers.openai.com/codex/auth/)
 - [Codex TypeScript SDK source](https://github.com/openai/codex/tree/main/sdk/typescript)
+- [OpenTUI source and development guide](https://github.com/anomalyco/opentui)
+- [pi agent loop source](https://github.com/earendil-works/pi/tree/main/packages/agent/src)
+- [pi session format](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/session.md)
 - [Anthropic legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)
 - [Claude Code programmatic/headless mode](https://code.claude.com/docs/en/headless)
 - [OpenTUI repository and packages](https://github.com/anomalyco/opentui)
