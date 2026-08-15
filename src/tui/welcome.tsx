@@ -13,7 +13,7 @@ import {
   wordmarkCodeSplash,
 } from "./brand.ts"
 
-export type WelcomeAction = "login-codex" | "launch-claude" | "quit"
+export type WelcomeAction = "login-codex" | "open-codex" | "launch-claude" | "quit"
 
 type AgentChoice = "codex" | "claude"
 type FooterChoice = "theme" | "recheck" | "quit"
@@ -150,6 +150,15 @@ export function WelcomeApp({
         if (choice === "codex" && !providers.codex?.authenticated) {
           onAction("login-codex")
         }
+        if (choice === "codex" && providers.codex?.authenticated && providers.codex.compatible !== false) {
+          onAction("open-codex")
+        }
+        if (choice === "codex" && providers.codex?.authenticated && providers.codex.compatible === false) {
+          setProviders((current) => ({
+            ...current,
+            error: current.codex?.detail ?? "The installed Codex CLI version is not supported.",
+          }))
+        }
         if (choice === "claude") onAction("launch-claude")
         return
       }
@@ -278,7 +287,7 @@ function ProviderRow({
   versionOnly?: boolean
 }) {
   const state = checking && !probe ? "Checking…" : providerLabel(probe, versionOnly)
-  const connected = Boolean(probe?.available && probe.authenticated !== false)
+  const connected = Boolean(probe?.available && probe.authenticated !== false && probe.compatible !== false)
   const statusColor = connected ? palette.accent : palette.muted
   const marker = !probe || checking ? "◌" : connected ? "●" : "○"
 
@@ -304,7 +313,10 @@ function footerLabel(choice: FooterChoice): string {
 function providerLabel(probe: EngineProbe | undefined, versionOnly = false): string {
   if (!probe) return "Not checked"
   if (!probe.available) return probe.detail ?? "Not installed"
-  if (versionOnly) return probe.version ? `v${probe.version.replace(/^v/, "")}` : "Available"
+  if (versionOnly) {
+    const version = probe.version ? `v${probe.version.replace(/^v/, "")}` : "Available"
+    return probe.compatible === false ? `${version} · unsupported` : version
+  }
   const detail = (probe.authenticated === false ? "Login required" : probe.detail)?.replace(
     /^ChatGPT pro$/i,
     "ChatGPT Pro",

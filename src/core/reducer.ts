@@ -19,6 +19,7 @@ export type PendingRequest = {
 
 export type AppViewState = {
   engine?: EngineId
+  model?: string
   sessionStatus: SessionStatus
   turnStatus: TurnStatus
   transcript: TranscriptItem[]
@@ -28,6 +29,9 @@ export type AppViewState = {
     inputTokens?: number
     cachedInputTokens?: number
     outputTokens?: number
+    contextTokens?: number
+    totalTokens?: number
+    modelContextWindow?: number
     estimatedCostUsd?: number
   }
   warnings: string[]
@@ -64,7 +68,11 @@ export function reduceAgentEvent(state: AppViewState, event: AgentEvent): AppVie
 
   switch (event.kind) {
     case "session.status":
-      return { ...next, sessionStatus: event.payload.status }
+      return {
+        ...next,
+        sessionStatus: event.payload.status,
+        model: event.payload.model ?? state.model,
+      }
     case "turn.started":
       return { ...next, sessionStatus: "running", turnStatus: "running", error: undefined }
     case "turn.completed":
@@ -110,6 +118,16 @@ export function reduceAgentEvent(state: AppViewState, event: AgentEvent): AppVie
           event.payload.id,
           () => ({ id: event.payload.id, kind: "reasoning", text: event.payload.text, status: "running" }),
           (item) => ({ ...item, text: item.text + event.payload.text }),
+        ),
+      }
+    case "reasoning.completed":
+      return {
+        ...next,
+        transcript: upsertTranscriptItem(
+          state.transcript,
+          event.payload.id,
+          () => ({ id: event.payload.id, kind: "reasoning", text: "", status: "completed" }),
+          (item) => ({ ...item, status: "completed" }),
         ),
       }
     case "item.updated":

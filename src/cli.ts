@@ -4,13 +4,15 @@ function printHelp() {
   process.stdout.write(`CodeSplash Agent
 
 Usage:
-  agent [--fixture]
+  agent [path]
+  agent --fixture
   agent --codex-smoke
   agent --codex-live-smoke
   agent --claude-handoff-smoke
   agent --help
 
 Options:
+  path           Project directory (defaults to the current directory)
   --fixture      Render the synthetic OpenTUI development fixture
   --codex-smoke  Check Codex app-server startup, protocol, and account state without running a model
   --codex-live-smoke
@@ -54,8 +56,14 @@ async function main(): Promise<void> {
     return
   }
 
+  const unknownOption = args.find((argument) => argument.startsWith("-"))
+  if (unknownOption) throw new Error(`Unknown option ${unknownOption}`)
+  if (args.length > 1) throw new Error("Expected at most one project path")
+
+  const { inspectProject } = await import("./core/preflight.ts")
+  const project = await inspectProject(args[0] ?? process.cwd())
   const { runWelcome } = await import("./tui/run-welcome.tsx")
-  await runWelcome()
+  await runWelcome(project)
 }
 
 try {

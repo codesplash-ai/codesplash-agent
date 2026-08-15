@@ -1,10 +1,11 @@
 import { createCliRenderer, type ThemeMode } from "@opentui/core"
 import { createRoot } from "@opentui/react"
-import { loadConfig, saveConfig, type ThemePreference } from "../core/index.ts"
+import { loadConfig, type ProjectPreflight, saveConfig, type ThemePreference } from "../core/index.ts"
 import { ClaudeDriver } from "../engines/claude/index.ts"
+import { runCodexSession } from "./run-codex-session.tsx"
 import { type WelcomeAction, WelcomeApp } from "./welcome.tsx"
 
-export async function runWelcome(): Promise<void> {
+export async function runWelcome(project: ProjectPreflight): Promise<void> {
   let config = await loadConfig()
 
   while (true) {
@@ -16,7 +17,16 @@ export async function runWelcome(): Promise<void> {
 
     if (action === "launch-claude") {
       try {
-        await new ClaudeDriver().handoff(process.cwd())
+        await new ClaudeDriver().handoff(project.cwd)
+      } catch (error) {
+        process.stderr.write(`agent: ${error instanceof Error ? error.message : String(error)}\n`)
+      }
+      continue
+    }
+
+    if (action === "open-codex") {
+      try {
+        await runCodexSession(project, config.theme)
       } catch (error) {
         process.stderr.write(`agent: ${error instanceof Error ? error.message : String(error)}\n`)
       }
@@ -42,7 +52,11 @@ async function renderWelcome(
   themePreference: ThemePreference,
   onThemePreferenceChange: (theme: ThemePreference) => Promise<void>,
 ): Promise<WelcomeAction> {
-  const renderer = await createCliRenderer({ exitOnCtrlC: false, targetFps: 60 })
+  const renderer = await createCliRenderer({
+    exitOnCtrlC: false,
+    targetFps: 60,
+    useKittyKeyboard: { disambiguate: true, alternateKeys: true },
+  })
   const detectedTheme: ThemeMode = (await renderer.waitForThemeMode(300)) ?? "dark"
 
   return new Promise((resolve) => {

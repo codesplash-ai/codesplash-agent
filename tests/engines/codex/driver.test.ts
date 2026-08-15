@@ -38,6 +38,11 @@ describe("CodexDriver", () => {
 
     try {
       expect(session.nativeSessionId).toBe("thread-1")
+      const ready = await nextEvent(
+        events,
+        (event) => event.kind === "session.status" && event.payload.status === "ready",
+      )
+      expect(ready.kind === "session.status" && ready.payload.model).toBe("gpt-test")
       await session.send({ text: "request approval" })
 
       const request = await nextEvent(events, (event) => event.kind === "request.opened")
@@ -77,5 +82,36 @@ describe("CodexDriver", () => {
     } finally {
       await session.close()
     }
+  })
+
+  test("normalizes streaming output and accepts a second turn", async () => {
+    const session = await openSession()
+    const events = session.events[Symbol.asyncIterator]()
+
+    try {
+      await session.send({ text: "stream" })
+      const firstCompleted = await nextEvent(events, (event) => event.kind === "turn.completed")
+      expect(firstCompleted.kind === "turn.completed" && firstCompleted.payload.status).toBe("completed")
+
+      await session.send({ text: "stream" })
+      const secondCompleted = await nextEvent(events, (event) => event.kind === "turn.completed")
+      expect(secondCompleted.kind === "turn.completed" && secondCompleted.payload.status).toBe("completed")
+    } finally {
+      await session.close()
+    }
+  })
+
+  test("reports a child crash as a recoverable redacted event", async () => {
+    const session = await openSession()
+    const events = session.events[Symbol.asyncIterator]()
+
+    await session.send({ text: "crash" })
+    const crashed = await nextEvent(events, (event) => event.kind === "error")
+    expect(crashed.kind === "error" && crashed.payload.recoverable).toBe(true)
+    expect(crashed.kind === "error" && crashed.payload.message).toContain("status 17")
+    expect(crashed.kind === "error" && crashed.payload.message).toContain("[REDACTED]")
+    expect(crashed.kind === "error" && crashed.payload.message).not.toContain("fake-secret-token-value")
+
+    await session.close()
   })
 })

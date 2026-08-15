@@ -30,13 +30,14 @@ export type TurnStatus = "idle" | "running" | "completed" | "interrupted" | "fai
 export type ItemStatus = "running" | "completed" | "failed"
 
 export type AgentEvent =
-  | EventOf<"session.status", { status: SessionStatus; detail?: string }>
+  | EventOf<"session.status", { status: SessionStatus; detail?: string; model?: string }>
   | EventOf<"turn.started", Record<string, never>>
   | EventOf<"turn.completed", { status: Exclude<TurnStatus, "idle" | "running"> }>
   | EventOf<"user.message", { id: string; text: string }>
   | EventOf<"message.delta", { id: string; text: string }>
   | EventOf<"message.completed", { id: string; text?: string }>
   | EventOf<"reasoning.delta", { id: string; text: string }>
+  | EventOf<"reasoning.completed", { id: string }>
   | EventOf<"item.updated", { id: string; label: string; output?: string; status: ItemStatus }>
   | EventOf<"plan.updated", { steps: Array<{ text: string; completed: boolean }> }>
   | EventOf<"diff.updated", { id: string; path?: string; unified: string }>
@@ -47,7 +48,15 @@ export type AgentEvent =
   | EventOf<"request.resolved", { id: string; decision: string }>
   | EventOf<
       "usage.updated",
-      { inputTokens?: number; cachedInputTokens?: number; outputTokens?: number; estimatedCostUsd?: number }
+      {
+        inputTokens?: number
+        cachedInputTokens?: number
+        outputTokens?: number
+        contextTokens?: number
+        totalTokens?: number
+        modelContextWindow?: number
+        estimatedCostUsd?: number
+      }
     >
   | EventOf<"warning", { message: string }>
   | EventOf<"error", { message: string; recoverable: boolean }>

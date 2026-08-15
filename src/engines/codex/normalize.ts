@@ -81,6 +81,14 @@ export class CodexEventNormalizer {
       }
       case "item/started": {
         const params = raw as ItemStartedNotification
+        if (params.item.type === "reasoning") {
+          return [
+            this.#event(notification.method, raw, ids({ ...params, itemId: params.item.id }), {
+              kind: "reasoning.delta",
+              payload: { id: params.item.id, text: "" },
+            }),
+          ]
+        }
         const item = normalizeItem(params.item, "running")
         return item
           ? [this.#event(notification.method, raw, ids({ ...params, itemId: params.item.id }), item, true)]
@@ -93,6 +101,14 @@ export class CodexEventNormalizer {
             this.#event(notification.method, raw, ids({ ...params, itemId: params.item.id }), {
               kind: "message.completed",
               payload: { id: params.item.id, text: params.item.text },
+            }),
+          ]
+        }
+        if (params.item.type === "reasoning") {
+          return [
+            this.#event(notification.method, raw, ids({ ...params, itemId: params.item.id }), {
+              kind: "reasoning.completed",
+              payload: { id: params.item.id },
             }),
           ]
         }
@@ -136,6 +152,9 @@ export class CodexEventNormalizer {
               inputTokens: params.tokenUsage.last.inputTokens,
               cachedInputTokens: params.tokenUsage.last.cachedInputTokens,
               outputTokens: params.tokenUsage.last.outputTokens,
+              contextTokens: params.tokenUsage.last.totalTokens,
+              totalTokens: params.tokenUsage.total.totalTokens,
+              modelContextWindow: params.tokenUsage.modelContextWindow ?? undefined,
             },
           }),
         ]

@@ -1,3 +1,4 @@
+import { redactSensitiveText } from "../../core/redaction.ts"
 import { JsonRpcConnection, type JsonRpcConnectionOptions, type JsonRpcTransport } from "./json-rpc.ts"
 
 export type CodexAppServerProcessOptions = {
@@ -64,7 +65,7 @@ export function spawnCodexAppServer(options: CodexAppServerProcessOptions = {}):
   return {
     connection,
     exited: child.exited,
-    getStderr: () => stderr.text,
+    getStderr: () => redactSensitiveText(stderr.text, { ...process.env, ...options.env }),
     close: () => connection.close(),
   }
 }

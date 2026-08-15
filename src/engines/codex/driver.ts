@@ -8,6 +8,7 @@ import {
   type EngineProbe,
   type EngineSession,
   type OpenSessionOptions,
+  redactSensitiveText,
 } from "../../core/index.ts"
 import { CodexAppServerClient, SUPPORTED_CODEX_CLI_VERSION } from "./app-server-client.ts"
 import type { CodexAppServerProcessOptions } from "./app-server-process.ts"
@@ -48,26 +49,40 @@ export class CodexDriver implements EngineDriver {
   async probe(): Promise<EngineProbe> {
     let client: CodexAppServerClient | undefined
     try {
-      const versionProcess = Bun.spawn(["codex", "--version"], { stdout: "pipe", stderr: "pipe" })
-      const [versionOutput, exitCode] = await Promise.all([
+      const binary = this.processOptions.binary ?? Bun.which("codex")
+      if (!binary) return { available: false, detail: "Codex CLI is not installed" }
+
+      const versionProcess = Bun.spawn([binary, "--version"], {
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const [versionOutput, versionError, exitCode] = await Promise.all([
         new Response(versionProcess.stdout).text(),
+        new Response(versionProcess.stderr).text(),
         versionProcess.exited,
       ])
-      if (exitCode !== 0) return { available: false, detail: "codex --version failed" }
+      if (exitCode !== 0) {
+        return {
+          available: false,
+          detail: redactSensitiveText(versionError.trim()) || "codex --version failed",
+        }
+      }
 
       const version = versionOutput.trim().match(/\d+\.\d+\.\d+/)?.[0]
-      client = new CodexAppServerClient()
+      const compatible = version === SUPPORTED_CODEX_CLI_VERSION
+      client = new CodexAppServerClient({ ...this.processOptions, binary })
       await client.initialize()
       const account = await client.readAccount()
       const accountLabel = describeAccount(account.account)
       return {
         available: true,
         authenticated: account.account !== null,
+        compatible,
         version,
-        detail:
-          version === SUPPORTED_CODEX_CLI_VERSION
-            ? accountLabel
-            : `${accountLabel} · protocol baseline is ${SUPPORTED_CODEX_CLI_VERSION}`,
+        detail: compatible
+          ? accountLabel
+          : `${accountLabel} · protocol baseline is ${SUPPORTED_CODEX_CLI_VERSION}`,
       }
     } catch (error) {
       return { available: false, detail: error instanceof Error ? error.message : String(error) }
@@ -108,6 +123,7 @@ class CodexSession implements EngineSession {
   readonly #unsubscribeNotification: () => void
   #threadId: string | undefined
   #turnId: string | undefined
+  #model: string | undefined
   #closed = false
 
   constructor(
@@ -140,22 +156,53 @@ class CodexSession implements EngineSession {
       ),
     )
 
-    void client.process.connection.waitForClose().then(() => {
-      if (!this.#closed) {
-        this.#eventQueue.push(
-          this.#normalizer.event(
-            "process/exited",
-            undefined,
-            { threadId: this.#threadId },
-            {
-              kind: "error",
-              payload: { message: "Codex app-server process exited", recoverable: true },
-            },
-          ),
-        )
-      }
-      this.#eventQueue.end()
-    })
+    void Promise.all([client.process.connection.waitForClose(), client.process.exited]).then(
+      ([, exitCode]) => {
+        if (!this.#closed) {
+          const diagnostics = client.process.getStderr().trim()
+          for (const [requestId, pending] of this.#pendingRequests) {
+            pending.reject(new Error("Codex app-server exited while awaiting approval"))
+            this.#eventQueue.push(
+              this.#normalizer.event(
+                "process/requestCancelled",
+                undefined,
+                { threadId: this.#threadId, turnId: this.#turnId, requestId },
+                { kind: "request.resolved", payload: { id: requestId, decision: "cancel" } },
+              ),
+            )
+          }
+          this.#pendingRequests.clear()
+          this.#eventQueue.push(
+            this.#normalizer.event(
+              "process/exited",
+              undefined,
+              { threadId: this.#threadId, turnId: this.#turnId },
+              { kind: "session.status", payload: { status: "failed" } },
+            ),
+          )
+          this.#eventQueue.push(
+            this.#normalizer.event(
+              "process/exited",
+              undefined,
+              { threadId: this.#threadId },
+              {
+                kind: "error",
+                payload: {
+                  message: [
+                    `Codex app-server exited with status ${exitCode}`,
+                    diagnostics ? diagnostics.split(/\r?\n/).at(-1) : undefined,
+                  ]
+                    .filter(Boolean)
+                    .join(": "),
+                  recoverable: true,
+                },
+              },
+            ),
+          )
+        }
+        this.#eventQueue.end()
+      },
+    )
   }
 
   get localSessionId(): string {
@@ -182,6 +229,7 @@ class CodexSession implements EngineSession {
         params,
       )
       this.#threadId = response.thread.id
+      this.#model = response.model
     } else {
       const params: ThreadStartParams = { ...common, ephemeral: false }
       const response = await this.client.process.connection.request<ThreadStartResponse>(
@@ -189,6 +237,7 @@ class CodexSession implements EngineSession {
         params,
       )
       this.#threadId = response.thread.id
+      this.#model = response.model
     }
 
     this.#eventQueue.push(
@@ -198,7 +247,7 @@ class CodexSession implements EngineSession {
         { threadId: this.#threadId },
         {
           kind: "session.status",
-          payload: { status: "ready" },
+          payload: { status: "ready", model: this.#model },
         },
       ),
     )
@@ -224,6 +273,7 @@ class CodexSession implements EngineSession {
     const params: TurnStartParams = {
       threadId,
       input: toCodexInput(input),
+      summary: "auto",
     }
     const response = await this.client.process.connection.request<TurnStartResponse>("turn/start", params)
     this.#turnId = response.turn.id

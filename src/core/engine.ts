@@ -16,6 +16,7 @@ export type EngineCapabilities = {
 export type EngineProbe = {
   available: boolean
   authenticated?: boolean
+  compatible?: boolean
   version?: string
   detail?: string
 }

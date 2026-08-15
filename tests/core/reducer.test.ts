@@ -31,6 +31,24 @@ describe("reduceAgentEvent", () => {
     ])
   })
 
+  test("marks reasoning as complete without replacing its streamed text", () => {
+    let state = reduceAgentEvent(
+      initialAppViewState,
+      createAgentEvent(
+        { ...base, sequence: 0 },
+        { kind: "reasoning.delta", payload: { id: "r1", text: "Inspecting files" } },
+      ),
+    )
+    state = reduceAgentEvent(
+      state,
+      createAgentEvent({ ...base, sequence: 1 }, { kind: "reasoning.completed", payload: { id: "r1" } }),
+    )
+
+    expect(state.transcript).toEqual([
+      { id: "r1", kind: "reasoning", text: "Inspecting files", status: "completed" },
+    ])
+  })
+
   test("ignores duplicate and out-of-order events", () => {
     const state = reduceAgentEvent(
       initialAppViewState,
@@ -74,5 +92,22 @@ describe("reduceAgentEvent", () => {
     )
 
     expect(state.pendingRequest).toBeUndefined()
+  })
+
+  test("keeps a recoverable process failure visible as failed session state", () => {
+    let state = reduceAgentEvent(
+      initialAppViewState,
+      createAgentEvent({ ...base, sequence: 0 }, { kind: "session.status", payload: { status: "failed" } }),
+    )
+    state = reduceAgentEvent(
+      state,
+      createAgentEvent(
+        { ...base, sequence: 1 },
+        { kind: "error", payload: { message: "process exited", recoverable: true } },
+      ),
+    )
+
+    expect(state.sessionStatus).toBe("failed")
+    expect(state.error).toEqual({ message: "process exited", recoverable: true })
   })
 })

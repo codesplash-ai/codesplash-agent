@@ -1,0 +1,10 @@
+{"method":"turn/started","params":{"threadId":"thread-redacted","turn":{"id":"turn-redacted","status":"inProgress","items":[],"error":null}}}
+{"method":"item/started","params":{"threadId":"thread-redacted","turnId":"turn-redacted","item":{"type":"reasoning","id":"item-reasoning","summary":[],"content":[]}}}
+{"method":"item/reasoning/summaryTextDelta","params":{"threadId":"thread-redacted","turnId":"turn-redacted","itemId":"item-reasoning","delta":"Inspecting the workspace.","summaryIndex":0}}
+{"method":"item/completed","params":{"threadId":"thread-redacted","turnId":"turn-redacted","item":{"type":"reasoning","id":"item-reasoning","summary":["Inspecting the workspace."],"content":[]}}}
+{"method":"item/started","params":{"threadId":"thread-redacted","turnId":"turn-redacted","item":{"type":"commandExecution","id":"item-command","command":"pwd","cwd":"<WORKSPACE>","processId":null,"status":"inProgress","commandActions":[],"aggregatedOutput":"","exitCode":null,"durationMs":null}}}
+{"method":"item/agentMessage/delta","params":{"threadId":"thread-redacted","turnId":"turn-redacted","itemId":"item-message","delta":"The workspace is ready."}}
+{"method":"turn/diff/updated","params":{"threadId":"thread-redacted","turnId":"turn-redacted","diff":"--- a/example.ts\n+++ b/example.ts\n@@ -1 +1 @@\n-old\n+new"}}
+{"method":"thread/tokenUsage/updated","params":{"threadId":"thread-redacted","turnId":"turn-redacted","tokenUsage":{"total":{"inputTokens":120,"cachedInputTokens":20,"outputTokens":12,"reasoningOutputTokens":0,"totalTokens":132},"last":{"inputTokens":120,"cachedInputTokens":20,"outputTokens":12,"reasoningOutputTokens":0,"totalTokens":132},"modelContextWindow":258400}}}
+{"method":"item/completed","params":{"threadId":"thread-redacted","turnId":"turn-redacted","item":{"type":"agentMessage","id":"item-message","text":"The workspace is ready.","phase":null}}}
+{"method":"turn/completed","params":{"threadId":"thread-redacted","turn":{"id":"turn-redacted","status":"completed","items":[],"error":null}}}

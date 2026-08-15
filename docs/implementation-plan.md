@@ -1,7 +1,7 @@
 # AI Agent CLI Implementation Plan
 
-**Status:** Milestone 0 complete — Milestone 1 next
-**Reviewed:** 2026-08-14  
+**Status:** Milestones 0–1 complete — Milestone 2 next
+**Reviewed:** 2026-08-15
 **Progress updated:** 2026-08-15
 **Source:** [`docs/agent-plan.md`](./agent-plan.md)
 
@@ -24,8 +24,8 @@ Do not put native Claude stream-JSON mode, custom tools, an MCP marketplace, sub
 | Milestone | Status | Current result |
 |---|---|---|
 | 0 — Protocol and packaging spikes | **Complete** | Real Codex approval/interrupt/restart/resume/second-turn smoke passed; Claude terminal handoff and restoration passed; embedded PTY was rejected for v1; emitted and compiled macOS arm64 builds passed. |
-| 1 — Core and Codex vertical slice | **Next; started early** | The live-session driver, normalized event stream, and process boundary exist. The next task is opening the native Codex chat when Enter is pressed on Codex. |
-| 2 — Durable sessions and safety | Started early | Versioned platform config paths, atomic TOML writes, and persisted system/dark/light theme preference now exist. Session durability follows the Codex vertical slice. |
+| 1 — Core and Codex vertical slice | **Complete** | The production Codex TUI is live-dogfooded for streamed prompts, tool/diff activity, repeated turns, model/context status, and long-session navigation. Real app-server and integration coverage prove approvals, interrupt, resume, crash recovery, and redaction. |
+| 2 — Durable sessions and safety | **Next; started early** | Versioned platform config paths, atomic TOML writes, and persisted system/dark/light theme preference already exist. Session durability is next. |
 | 3 — Claude official-CLI surface | Started early | The homescreen performs official diagnostics and Enter launches Claude through the tested real-terminal handoff. Session metadata and polish remain. |
 | 4 — Cockpit completion | Not started | Deferred until both engine surfaces are proven. |
 | 5 — Alpha distribution | Not started | A macOS arm64 Bun-compiled executable passed the Milestone 0 smoke and is the internal-alpha format; release automation and the target matrix remain. |
@@ -72,14 +72,34 @@ The repository is ready for its Milestone 0 commit. The checkpoint contains:
 - ADR 0003's evidence-based `terminal-handoff` decision and a successfully opened/quitted 70 MB Bun-compiled
   macOS arm64 executable.
 
-The synthetic `--fixture` screen is still a development surface; the production homescreen does not yet
-open a native Codex chat. That is no longer a Milestone 0 blocker: it is the first Milestone 1 vertical-slice
-task. Continue in this order:
+The synthetic `--fixture` screen remains a development surface. Milestone 1 has a separate production
+Codex screen and controller and is complete; Milestone 2 begins with durable session metadata and resume UX.
 
-1. make Enter on authenticated Codex open a native `CodexSession`;
-2. connect the normalized event stream to the production transcript and status line;
-3. add the multiline composer, approval modal, and `Esc` interrupt;
-4. prove a complete interactive second turn through the production TUI.
+### Milestone 1 completion checkpoint — 2026-08-15
+
+- [x] Make Enter on authenticated, protocol-compatible Codex open a native `CodexSession`.
+- [x] Keep raw provider payloads inside the controller/adapter boundary and expose reduced view state to React.
+- [x] Render normalized user/assistant messages, reasoning, tools, diffs, plans, usage, warnings, and errors.
+- [x] Add the multiline composer (`Enter` send, `Shift+Enter` newline), approval modal, and `Esc` interrupt.
+- [x] Add `agent [path]` working-directory validation plus Git branch/dirty-state diagnostics.
+- [x] Gate the native screen on binary presence, authentication, and the pinned Codex `0.147.0` baseline.
+- [x] Redact credential-shaped stderr and surface child crashes as recoverable, native-thread resume actions.
+- [x] Cover approval, interrupt, normalized streaming output, a second turn, process crash, redaction, controller
+      isolation, preflight, and a redacted protocol fixture in offline tests.
+- [x] Open and close the production Codex screen against the installed app-server without a model turn and
+      verify terminal restoration.
+- [x] Polish the production conversation surface with stable streaming updates, a borderless transcript,
+      an Enter-send multiline composer, theme-correct cursor/input colors, latest/section navigation, a
+      toggleable conversation outline, and live model/context status.
+- [x] Dogfood the authenticated production TUI through streamed prompts, tool and diff activity, repeated
+      turns, long-output scrolling, outline navigation, composer editing, and light-theme visual refinement.
+- [x] Prove approval decisions, interrupt, restart/resume, and a post-resume second turn against the real
+      app-server, with the production controller/UI command paths covered by offline integration tests.
+
+**Result:** complete and ready for the Milestone 1 commit. The core/UI boundary remains provider-independent;
+raw Codex payloads stay inside the adapter; crashes recover without corrupting the terminal; and all automated
+checks remain quota-free. The dogfood session supplied the production rendering/input acceptance that cannot be
+meaningfully covered by the fake app-server alone.
 
 ## 2. Review of the source plan
 
@@ -344,9 +364,15 @@ Tasks:
 
 Exit gates:
 
-- A user can start a Codex thread, see streaming output and tool progress, approve or deny a request, interrupt the turn, and send a second turn.
-- Provider payloads never reach React components.
-- A crashed app-server produces a recoverable UI state rather than corrupting the terminal.
+- [x] A user can start a Codex thread, see streaming output and tool progress, approve or deny a request,
+      interrupt the turn, and send a second turn.
+- [x] Provider payloads never reach React components.
+- [x] A crashed app-server produces a recoverable UI state rather than corrupting the terminal.
+
+**Result (2026-08-15): complete.** Production-TUI dogfooding covered authenticated streaming, tools, diffs,
+repeated turns, input behavior, status data, scrolling, and outline navigation. Real app-server smoke coverage
+proved declined approval, interrupt, restart/resume, and a post-resume turn; fake-process integration tests
+cover both approval decisions plus the production controller paths without consuming quota in CI.
 
 ### Milestone 2 — Durable sessions and safety
 
