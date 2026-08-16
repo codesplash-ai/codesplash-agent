@@ -1,6 +1,7 @@
 # AI Agent CLI Implementation Plan
 
-**Status:** Milestones 0–4 implemented — manual dogfood pending for 2–4, Milestone 5 next
+**Status:** Milestones 0–5 implemented — manual dogfood pending for 2–4; first public release awaits the
+repo-public migration steps
 **Reviewed:** 2026-08-15
 **Progress updated:** 2026-08-16
 **Source:** [`docs/agent-plan.md`](./agent-plan.md)
@@ -28,7 +29,7 @@ Do not put native Claude stream-JSON mode, custom tools, an MCP marketplace, sub
 | 2 — Durable sessions and safety | **Implemented** | Sessions persist as coalesced JSONL plus atomic metadata, resume through a project-scoped picker backed by `thread/resume` with reconciliation, and policy/`--no-history`/full-access/signal handling are in place with all four exit gates covered by offline tests. The manual dogfood checklist remains before calling the milestone closed. |
 | 3 — Claude official-CLI surface | **Implemented** | Diagnostics-only probe, tested real-terminal handoff, and launch metadata: the app supplies its own session ID through the documented `--session-id` flag, resumes with `--resume` from an engine-scoped picker, and stores no terminal output. Manual dogfood of a real login/permissions/slash-command/resume pass remains. |
 | 4 — Cockpit completion | **Implemented** | Slash commands (`/new /resume /engine /model /permissions /history /help /quit`), an F1 keyboard-help overlay, a paginated model picker with per-turn switching, rate-limit status, actionable error hints, and compact small-terminal layout are in. Copy relies on terminal-native selection; screen-reader layouts remain a residual. |
-| 5 — Alpha distribution | Not started | A macOS arm64 Bun-compiled executable passed the Milestone 0 smoke and is the internal-alpha format; release automation and the target matrix remain. |
+| 5 — Alpha distribution | **Implemented** | Versioned BUSL-1.1 package with `--version`/`--doctor`, release build script (compile → smoke → archive → SHA-256), full CI matrix (macOS arm64/x64, Linux x64/arm64, Windows experimental), tag-triggered release workflow publishing GitHub Releases + npm + Homebrew tap, CHANGELOG, and a release checklist. The macOS arm64 artifact passed a real local build/checksum/doctor smoke. First public release awaits the user-run migration: repo public, tap repo, `NPM_TOKEN`/`TAP_GITHUB_TOKEN`, tag `v0.1.0-alpha.1`. |
 | 6 — Optional native Claude/extensibility | Deferred | Requires a fresh authentication/product decision. |
 
 Current Milestone 0 checklist:
@@ -558,9 +559,39 @@ Tasks:
 
 Exit gates:
 
-- A clean machine can install, pass diagnostics, launch both surfaces, and uninstall without leaving application-owned credentials.
-- Unsupported provider versions fail with an upgrade/downgrade instruction.
-- Release artifacts are reproducible and checksummed.
+- [x] A clean machine can install, pass diagnostics, launch both surfaces, and uninstall without leaving
+      application-owned credentials: three install channels documented in the README with uninstall paths;
+      `agent --doctor` provides the non-interactive diagnostics; the app stores no credentials by
+      construction. The clean-machine walkthrough itself is a release-checklist item.
+- [x] Unsupported provider versions fail with an upgrade/downgrade instruction: the Codex probe now reports
+      "requires Codex CLI 0.147.0 — install with: npm i -g @openai/codex@0.147.0", surfaced by the welcome
+      screen and `--doctor`.
+- [x] Release artifacts are reproducible and checksummed: pinned Bun 1.3.14 + frozen lockfile builds, SHA-256
+      per artifact plus a combined SHA256SUMS on the release, verified in the local smoke.
+
+### Milestone 5 implementation checkpoint — 2026-08-16
+
+- [x] Package released-ready: version `0.1.0-alpha.1`, `private` removed, BUSL-1.1 license (Change Date
+      2030-08-16 → Apache-2.0), repository metadata, npm `files` whitelist, `publishConfig.access: public`.
+- [x] `agent --version` and `agent --doctor` (runtime, config/data paths, Git, both engine probes; always
+      exits 0 — findings, not failures). `src/version.ts` is test-enforced against package.json.
+- [x] `bun run release:build`: compiles via ADR 0003's proven `bun build src/cli.ts --compile`, self-smokes
+      `--version`, archives binary+LICENSE+README, emits `.sha256`. Verified locally on macOS arm64:
+      checksum validated, extracted binary passed `--version` and `--doctor` against real engines.
+- [x] CI workflow: five-target matrix (Windows `continue-on-error`), pinned Bun, frozen lockfile, quota-free
+      `bun run check`, compiled-binary launch smoke, artifact upload.
+- [x] Release workflow on `v*` tags: per-target build+smoke (failed targets produce no artifacts —
+      advertise-only-passing), GitHub Release with CHANGELOG notes + SHA256SUMS, npm publish and Homebrew tap
+      update that skip with a notice until secrets exist.
+- [x] Homebrew formula template (`packaging/homebrew/codesplash-agent.rb`) rendered and pushed to
+      `codesplash-ai/homebrew-tap` by the release workflow; installs the binary as `agent`.
+- [x] README (install/uninstall/rollback/security posture/platform table), CHANGELOG, release checklist with
+      policy/license/protocol revalidation, and `docs/private/` (gitignored) for company-sensitive material.
+
+**Remaining — user-run migration before the first public release:** review tracked docs for anything that
+belongs in `docs/private/`; flip the repo public; create `codesplash-ai/homebrew-tap`; add `NPM_TOKEN` and
+`TAP_GITHUB_TOKEN` secrets; confirm the npm name is free; complete the M2–M4 dogfood checklists; tag
+`v0.1.0-alpha.1`.
 
 ### Milestone 6 — Optional native Claude mode and extensibility
 

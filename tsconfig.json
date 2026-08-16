@@ -20,5 +20,5 @@
     "target": "ES2024",
     "types": ["bun", "node", "react"]
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "tests/**/*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "tests/**/*.ts", "tests/**/*.tsx", "scripts/**/*.ts"]
 }

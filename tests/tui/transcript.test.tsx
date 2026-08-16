@@ -39,7 +39,7 @@ describe("Codex transcript", () => {
     const positions: Array<number | { x: number; y: number }> = []
     const scrollbox = {
       stickyScroll: false,
-      stickyStart: undefined,
+      stickyStart: undefined as "bottom" | "top" | "left" | "right" | undefined,
       scrollTo(position: number | { x: number; y: number }) {
         positions.push(position)
       },

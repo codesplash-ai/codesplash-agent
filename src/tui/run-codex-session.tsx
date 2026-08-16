@@ -1,4 +1,4 @@
-import { createCliRenderer, type ThemeMode } from "@opentui/core"
+import { createCliRenderer, type KittyKeyboardOptions, type ThemeMode } from "@opentui/core"
 import { createRoot } from "@opentui/react"
 import type {
   AppViewState,
@@ -36,6 +36,13 @@ export type CodexSessionRunOptions = {
 
 /** How the session screen ended: "new" and "resume-picker" ask the caller to reopen. */
 export type CodexRunOutcome = "home" | "quit" | "new" | "resume-picker"
+
+/** Preserve modifiers on Enter so the composer can distinguish Shift+Enter from Enter. */
+export const codexKeyboardOptions = {
+  disambiguate: true,
+  alternateKeys: true,
+  allKeysAsEscapes: true,
+} satisfies KittyKeyboardOptions
 
 export async function runCodexSession(
   project: ProjectPreflight,
@@ -190,7 +197,7 @@ async function renderCodexSession(
   const renderer = await createCliRenderer({
     exitOnCtrlC: false,
     targetFps: 60,
-    useKittyKeyboard: { disambiguate: true, alternateKeys: true },
+    useKittyKeyboard: codexKeyboardOptions,
   })
   const detectedTheme: ThemeMode = (await renderer.waitForThemeMode(300)) ?? "dark"
   const theme = themePreference === "system" ? detectedTheme : themePreference

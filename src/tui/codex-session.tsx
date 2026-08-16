@@ -93,7 +93,10 @@ export function composerRows(terminalHeight: number): number {
 
 /** The plan panel yields its rows to the transcript on small terminals. */
 export function showPlanPanel(terminalHeight: number, planSteps: number): boolean {
-  return planSteps > 0 && terminalHeight >= 20
+  // Besides the plan itself, the cockpit needs 18 rows for its chrome, composer,
+  // and at least one transcript row. Hiding the panel is preferable to letting
+  // Yoga shrink its text rows onto the same terminal line.
+  return planSteps > 0 && terminalHeight >= planSteps + 18
 }
 
 export function formatRateLimit(state: AppViewState): { text: string; critical: boolean } | undefined {
@@ -123,7 +126,9 @@ export const composerPlaceholder = " Ask the agent… Enter sends; Shift+Enter a
 export const composerKeyBindings = [
   { name: "return", action: "submit" },
   { name: "kpenter", action: "submit" },
-  { name: "linefeed", action: "submit" },
+  // Terminals without modified-key reporting commonly encode Shift+Enter as LF
+  // while ordinary Enter remains CR ("return"). Treat LF as the newline fallback.
+  { name: "linefeed", action: "newline" },
   { name: "return", shift: true, action: "newline" },
   { name: "kpenter", shift: true, action: "newline" },
   { name: "linefeed", shift: true, action: "newline" },
@@ -250,7 +255,7 @@ export function CodexSessionApp({
   const [state, setState] = useState(controller.state)
   const [commandError, setCommandError] = useState<string>()
   const [selectedOutlineId, setSelectedOutlineId] = useState<string>()
-  const [outlineVisible, setOutlineVisible] = useState(true)
+  const [outlineVisible, setOutlineVisible] = useState(false)
   const [overlay, setOverlay] = useState<OverlayState>()
   const syntaxStyle = useMemo(() => createSyntaxStyle(palette), [palette])
   const styledComposerPlaceholder = useMemo(() => createComposerPlaceholder(palette), [palette])
@@ -589,10 +594,22 @@ export function CodexSessionApp({
       {showPlanPanel(terminalHeight, state.plan.length) ? (
         <box
           title="Plan"
-          style={{ width: "100%", border: true, borderColor: palette.border, paddingLeft: 1 }}
+          style={{
+            width: "100%",
+            height: state.plan.length + 2,
+            flexShrink: 0,
+            border: true,
+            borderColor: palette.border,
+            paddingLeft: 1,
+          }}
         >
           {state.plan.map((step, index) => (
-            <text key={`${index}:${step.text}`} fg={step.completed ? palette.muted : palette.foreground}>
+            <text
+              key={`${index}:${step.text}`}
+              fg={step.completed ? palette.muted : palette.foreground}
+              wrapMode="none"
+              style={{ height: 1, flexShrink: 0 }}
+            >
               {step.completed ? "✓" : "·"} {step.text}
             </text>
           ))}

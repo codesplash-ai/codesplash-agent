@@ -85,7 +85,7 @@ export class CodexDriver implements EngineDriver {
         version,
         detail: compatible
           ? accountLabel
-          : `${accountLabel} · protocol baseline is ${SUPPORTED_CODEX_CLI_VERSION}`,
+          : `${accountLabel} · requires Codex CLI ${SUPPORTED_CODEX_CLI_VERSION} — install with: npm i -g @openai/codex@${SUPPORTED_CODEX_CLI_VERSION}`,
       }
     } catch (error) {
       return { available: false, detail: error instanceof Error ? error.message : String(error) }

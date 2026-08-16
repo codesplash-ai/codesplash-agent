@@ -1,0 +1,139 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, label: macos-arm64, experimental: false }
+          - { os: macos-13, label: macos-x64, experimental: false }
+          - { os: ubuntu-latest, label: linux-x64, experimental: false }
+          - { os: ubuntu-24.04-arm, label: linux-arm64, experimental: false }
+          - { os: windows-latest, label: windows-x64, experimental: true }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Check
+        run: bun run check
+
+      # release:build compiles, launch-smokes (--version), archives, and checksums.
+      # A target that fails its smoke produces no artifact and is not advertised.
+      - name: Build release artifact
+        run: bun run release:build
+
+      - name: Launch smoke (POSIX)
+        if: runner.os != 'Windows'
+        run: |
+          ./out/agent --version
+          ./out/agent --doctor
+
+      - name: Launch smoke (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          .\out\agent.exe --version
+          .\out\agent.exe --doctor
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.label }}
+          path: |
+            out/agent-*.tar.gz
+            out/agent-*.zip
+            out/agent-*.sha256
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Assemble SHA256SUMS
+        run: |
+          cd artifacts
+          cat ./*.sha256 > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes_file=$(mktemp)
+          awk "/^## ${GITHUB_REF_NAME#v}/{flag=1;next}/^## /{flag=0}flag" CHANGELOG.md > "$notes_file" || true
+          if [ ! -s "$notes_file" ]; then echo "See CHANGELOG.md" > "$notes_file"; fi
+          gh release create "$GITHUB_REF_NAME" \
+            --title "codesplash-agent $GITHUB_REF_NAME" \
+            --notes-file "$notes_file" \
+            artifacts/agent-* artifacts/SHA256SUMS
+
+      - name: Publish to npm
+        if: env.NPM_TOKEN != ''
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
+          npm publish --access public
+
+      - name: Notice when npm publish was skipped
+        if: env.NPM_TOKEN == ''
+        run: echo "::notice::NPM_TOKEN secret not set — npm publish skipped"
+
+      - name: Update Homebrew tap
+        if: env.TAP_GITHUB_TOKEN != ''
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          arm_sha=$(awk '/darwin-arm64/{print $1}' artifacts/SHA256SUMS)
+          x64_sha=$(awk '/darwin-x64/{print $1}' artifacts/SHA256SUMS)
+          linux_x64_sha=$(awk '/linux-x64/{print $1}' artifacts/SHA256SUMS)
+          linux_arm_sha=$(awk '/linux-arm64/{print $1}' artifacts/SHA256SUMS)
+          git clone "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/codesplash-ai/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          sed -e "s/{{VERSION}}/${version}/g" \
+              -e "s/{{SHA256_DARWIN_ARM64}}/${arm_sha}/g" \
+              -e "s/{{SHA256_DARWIN_X64}}/${x64_sha}/g" \
+              -e "s/{{SHA256_LINUX_X64}}/${linux_x64_sha}/g" \
+              -e "s/{{SHA256_LINUX_ARM64}}/${linux_arm_sha}/g" \
+              packaging/homebrew/codesplash-agent.rb > tap/Formula/codesplash-agent.rb
+          cd tap
+          git config user.name "codesplash-release-bot"
+          git config user.email "release-bot@codesplash.ai"
+          git add Formula/codesplash-agent.rb
+          git commit -m "codesplash-agent ${version}"
+          git push
+
+      - name: Notice when tap update was skipped
+        if: env.TAP_GITHUB_TOKEN == ''
+        run: echo "::notice::TAP_GITHUB_TOKEN secret not set — Homebrew tap update skipped"

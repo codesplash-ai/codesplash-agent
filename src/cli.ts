@@ -7,6 +7,8 @@ function printHelp() {
 
 Usage:
   agent [path] [--no-history] [--sandbox <mode>] [--full-access]
+  agent --doctor
+  agent --version
   agent --fixture
   agent --codex-smoke
   agent --codex-live-smoke
@@ -15,6 +17,8 @@ Usage:
 
 Options:
   path           Project directory (defaults to the current directory)
+  --doctor       Print non-interactive diagnostics (runtime, engines, auth, paths) and exit
+  --version      Print the application version and exit
   --no-history   Do not write session metadata or event history for this run
   --sandbox <mode>
                  Override the configured Codex sandbox: read-only or workspace-write
@@ -67,6 +71,18 @@ async function main(): Promise<void> {
 
   if (args.includes("--help") || args.includes("-h")) {
     printHelp()
+    return
+  }
+
+  if (args.includes("--version") || args.includes("-v")) {
+    const { APP_VERSION } = await import("./version.ts")
+    process.stdout.write(`${APP_VERSION}\n`)
+    return
+  }
+
+  if (args.includes("--doctor")) {
+    const { runDoctor } = await import("./doctor.ts")
+    await runDoctor()
     return
   }
 

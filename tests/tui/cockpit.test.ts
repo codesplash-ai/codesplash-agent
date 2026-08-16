@@ -51,6 +51,12 @@ describe("cockpit status and layout", () => {
     expect(showPlanPanel(24, 0)).toBe(false)
   })
 
+  test("hides plans that cannot fit without overlapping their rows", () => {
+    expect(showPlanPanel(20, 4)).toBe(false)
+    expect(showPlanPanel(21, 4)).toBe(false)
+    expect(showPlanPanel(22, 4)).toBe(true)
+  })
+
   test("formats rate-limit usage and flags near-exhaustion", () => {
     expect(formatRateLimit(initialAppViewState)).toBeUndefined()
     const relaxed = {

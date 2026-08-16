@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { RGBA, TextareaRenderable } from "@opentui/core"
+import { buildKittyKeyboardFlags, RGBA, TextareaRenderable } from "@opentui/core"
 import { createTestRenderer } from "@opentui/core/testing"
 import { brandThemes } from "../../src/tui/brand.ts"
 import {
@@ -8,8 +8,14 @@ import {
   composerPlaceholder,
   createComposerPlaceholder,
 } from "../../src/tui/codex-session.tsx"
+import { codexKeyboardOptions } from "../../src/tui/run-codex-session.tsx"
 
 describe("Codex composer", () => {
+  test("requests modified Enter keys as distinguishable escape sequences", () => {
+    const flags = buildKittyKeyboardFlags(codexKeyboardOptions)
+    expect(flags & 8).toBe(8)
+  })
+
   test("keeps the full placeholder visible when the cursor owns the first cell", async () => {
     const setup = await createTestRenderer({ width: 70, height: 3 })
     const textarea = new TextareaRenderable(setup.renderer, {
@@ -77,6 +83,33 @@ describe("Codex composer", () => {
       setup.mockInput.pressKey("j", { ctrl: true })
       await setup.mockInput.typeText("third")
       expect(textarea.plainText).toBe("first\nsecond\nthird")
+
+      setup.mockInput.pressEnter()
+      await setup.flush()
+      expect(submissions).toBe(1)
+    } finally {
+      setup.renderer.destroy()
+    }
+  })
+
+  test("treats a raw line-feed as the Shift+Enter newline fallback", async () => {
+    const setup = await createTestRenderer({ width: 70, height: 4 })
+    let submissions = 0
+    const textarea = new TextareaRenderable(setup.renderer, {
+      width: 70,
+      height: 4,
+      keyBindings: composerKeyBindings,
+      onSubmit: () => submissions++,
+    })
+    setup.renderer.root.add(textarea)
+
+    try {
+      textarea.focus()
+      await setup.mockInput.typeText("first")
+      setup.mockInput.pressKey("LINEFEED")
+      await setup.mockInput.typeText("second")
+      expect(textarea.plainText).toBe("first\nsecond")
+      expect(submissions).toBe(0)
 
       setup.mockInput.pressEnter()
       await setup.flush()
