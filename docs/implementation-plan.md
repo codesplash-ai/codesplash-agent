@@ -1,6 +1,6 @@
 # AI Agent CLI Implementation Plan
 
-**Status:** Milestones 0–3 implemented — manual dogfood pending for 2–3, Milestone 4 next
+**Status:** Milestones 0–4 implemented — manual dogfood pending for 2–4, Milestone 5 next
 **Reviewed:** 2026-08-15
 **Progress updated:** 2026-08-16
 **Source:** [`docs/agent-plan.md`](./agent-plan.md)
@@ -27,7 +27,7 @@ Do not put native Claude stream-JSON mode, custom tools, an MCP marketplace, sub
 | 1 — Core and Codex vertical slice | **Complete** | The production Codex TUI is live-dogfooded for streamed prompts, tool/diff activity, repeated turns, model/context status, and long-session navigation. Real app-server and integration coverage prove approvals, interrupt, resume, crash recovery, and redaction. |
 | 2 — Durable sessions and safety | **Implemented** | Sessions persist as coalesced JSONL plus atomic metadata, resume through a project-scoped picker backed by `thread/resume` with reconciliation, and policy/`--no-history`/full-access/signal handling are in place with all four exit gates covered by offline tests. The manual dogfood checklist remains before calling the milestone closed. |
 | 3 — Claude official-CLI surface | **Implemented** | Diagnostics-only probe, tested real-terminal handoff, and launch metadata: the app supplies its own session ID through the documented `--session-id` flag, resumes with `--resume` from an engine-scoped picker, and stores no terminal output. Manual dogfood of a real login/permissions/slash-command/resume pass remains. |
-| 4 — Cockpit completion | Not started | Deferred until both engine surfaces are proven. |
+| 4 — Cockpit completion | **Implemented** | Slash commands (`/new /resume /engine /model /permissions /history /help /quit`), an F1 keyboard-help overlay, a paginated model picker with per-turn switching, rate-limit status, actionable error hints, and compact small-terminal layout are in. Copy relies on terminal-native selection; screen-reader layouts remain a residual. |
 | 5 — Alpha distribution | Not started | A macOS arm64 Bun-compiled executable passed the Milestone 0 smoke and is the internal-alpha format; release automation and the target matrix remain. |
 | 6 — Optional native Claude/extensibility | Deferred | Requires a fresh authentication/product decision. |
 
@@ -508,9 +508,41 @@ Tasks:
 
 Exit gates:
 
-- All important state is visible without opening logs.
-- Every command is keyboard accessible and has a discoverable binding.
-- The UI remains usable at 80x24 and after rapid resize.
+- [x] All important state is visible without opening logs: the header shows project and Git state; the status
+      line shows engine, model, context remaining, the persistent sandbox badge, rate-limit usage (destructive
+      styling at ≥90%), and session status; `/permissions` and `/history` surface policy and storage location.
+- [x] Every command is keyboard accessible and has a discoverable binding: the composer accepts all seven M4
+      slash commands plus `/help`, F1 toggles a keyboard-and-commands overlay, and the idle status line points
+      at both ("/help commands · F1 keys").
+- [x] The UI remains usable at 80x24: the outline already yields below 96 columns; below 20 rows the composer
+      compacts to 3 rows and the plan panel yields to the transcript. Rapid-resize behavior rides OpenTUI's
+      SIGWINCH handling and is on the manual dogfood checklist.
+
+### Milestone 4 implementation checkpoint — 2026-08-16
+
+- [x] Slash commands parsed in the composer (`parseSlashCommand`): `/new` and `/resume` re-enter the session
+      flow through typed run outcomes, `/engine` returns to the welcome screen, `/quit` exits the app, and
+      unknown commands are flagged instead of being sent as prompts. `/resume` refuses politely when history is
+      disabled.
+- [x] Model picker: `EngineSession` gained optional `listModels`/`setModel` (capability-checked by the
+      controller, blocked mid-turn); Codex implements them via paginated `model/list` (hidden models dropped)
+      and a per-turn `turn/start` model override that Codex carries forward; `/model` opens an interactive
+      overlay and `/model <id>` switches directly, with the switch reflected in session status and persisted.
+- [x] Rate limits: `account/rateLimits/updated` normalizes into `usage.updated` (`usedPercent`, label, reset
+      time) and renders in the status line.
+- [x] Overlays: keyboard help (F1 or `/help`), permissions, history, and model selection, all Esc-dismissable,
+      suppressing composer focus and the approval modal while open.
+- [x] Error recovery hints map auth, quota/rate-limit, and protocol-version failures to actionable next steps
+      appended to the error line; welcome-screen gating for missing/incompatible/unauthenticated binaries was
+      already in place.
+- [x] Small-terminal layout helpers (`composerRows`, `showPlanPanel`) with tests.
+- Residuals deferred: screen-reader-friendly layouts (no OpenTUI accessibility surface today); copy relies on
+  terminal-native selection rather than an in-app copy binding; both move to the Milestone 5 polish list.
+
+**Remaining before the milestone commit is closed — manual dogfood checklist:** exercise every slash command in
+a real authenticated session including `/model` switching mid-conversation; verify the rate-limit segment
+against real account data; resize rapidly and run at 80x24; confirm overlays and approval modal never fight for
+keys.
 
 ### Milestone 5 — Alpha distribution
 

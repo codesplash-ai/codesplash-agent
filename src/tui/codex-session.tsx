@@ -14,6 +14,7 @@ import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type {
   AppViewState,
+  EngineModel,
   PendingRequest,
   ProjectPreflight,
   SessionController,
@@ -23,7 +24,98 @@ import type {
 import { defaultSessionPolicy, suspendToShell } from "../core/index.ts"
 import type { BrandPalette } from "./brand.ts"
 
-export type CodexSessionAction = "home" | "reconnect"
+export type CodexSessionAction = "home" | "reconnect" | "new" | "resume-picker" | "quit"
+
+export type SlashCommandName =
+  | "help"
+  | "new"
+  | "resume"
+  | "engine"
+  | "model"
+  | "permissions"
+  | "history"
+  | "quit"
+
+export type ParsedSlashCommand =
+  | { name: SlashCommandName; argument?: string }
+  | { name: "unknown"; raw: string }
+
+const slashCommandNames: readonly SlashCommandName[] = [
+  "help",
+  "new",
+  "resume",
+  "engine",
+  "model",
+  "permissions",
+  "history",
+  "quit",
+]
+
+/** Returns undefined for ordinary prompts; commands start with "/" and a known word. */
+export function parseSlashCommand(text: string): ParsedSlashCommand | undefined {
+  const trimmed = text.trim()
+  if (!trimmed.startsWith("/")) return undefined
+  const [word = "", ...rest] = trimmed.slice(1).split(/\s+/)
+  const name = word.toLowerCase() as SlashCommandName
+  if (!slashCommandNames.includes(name)) return { name: "unknown", raw: trimmed }
+  return { name, argument: rest.join(" ") || undefined }
+}
+
+export const slashCommandHelp: ReadonlyArray<{ command: string; description: string }> = [
+  { command: "/new", description: "Start a fresh Codex session in this project" },
+  { command: "/resume", description: "Open the session picker" },
+  { command: "/engine", description: "Back to the engine screen (welcome)" },
+  { command: "/model [name]", description: "List models, or switch for the next turn" },
+  { command: "/permissions", description: "Show the sandbox and approval policy" },
+  { command: "/history", description: "Show where this session is stored" },
+  { command: "/help", description: "Toggle this overlay (also F1)" },
+  { command: "/quit", description: "Quit the app" },
+]
+
+export const keyboardHelpEntries: ReadonlyArray<{ keys: string; action: string }> = [
+  { keys: "Enter", action: "Send the prompt" },
+  { keys: "Shift+Enter / Ctrl+J", action: "Insert a newline" },
+  { keys: "Esc", action: "Interrupt the running turn / close overlay" },
+  { keys: "A · S · D · C", action: "Answer an approval request" },
+  { keys: "Ctrl+L", action: "Jump to the latest output" },
+  { keys: "Ctrl+O", action: "Toggle the conversation outline" },
+  { keys: "⌥↑ / ⌥↓", action: "Jump between outline sections" },
+  { keys: "Ctrl+R", action: "Reconnect after a recoverable error" },
+  { keys: "Ctrl+Z", action: "Suspend to the shell (fg resumes)" },
+  { keys: "F1", action: "Toggle keyboard help" },
+  { keys: "Ctrl+Q / Ctrl+C", action: "Back to the welcome screen" },
+]
+
+/** Rows the composer should occupy; small terminals get a compact composer. */
+export function composerRows(terminalHeight: number): number {
+  return terminalHeight < 20 ? 3 : 5
+}
+
+/** The plan panel yields its rows to the transcript on small terminals. */
+export function showPlanPanel(terminalHeight: number, planSteps: number): boolean {
+  return planSteps > 0 && terminalHeight >= 20
+}
+
+export function formatRateLimit(state: AppViewState): { text: string; critical: boolean } | undefined {
+  const rateLimit = state.usage.rateLimit
+  if (!rateLimit) return undefined
+  const percent = Math.max(0, Math.min(100, Math.round(rateLimit.usedPercent)))
+  return {
+    text: `${rateLimit.label ? `${rateLimit.label} ` : ""}limit ${percent}% used`,
+    critical: percent >= 90,
+  }
+}
+
+/** Actionable next step for provider failures that have a known recovery. */
+export function errorRecoveryHint(message: string): string | undefined {
+  if (/auth|unauthorized|401|login/i.test(message))
+    return "Reauthenticate from the welcome screen (codex login)"
+  if (/rate.?limit|quota|429|usage limit/i.test(message))
+    return "Provider limit reached — wait for the reset shown above"
+  if (/version|protocol|unsupported/i.test(message))
+    return "Install Codex CLI 0.147.0 (pinned protocol baseline)"
+  return undefined
+}
 
 /** The leading cell is reserved for OpenTUI's cursor while the empty composer is focused. */
 export const composerPlaceholder = " Ask the agent… Enter sends; Shift+Enter adds a line"
@@ -119,11 +211,26 @@ export function createComposerPlaceholder(palette: BrandPalette): StyledText {
   return new StyledText([fg(palette.muted)(bg(palette.secondary)(composerPlaceholder))])
 }
 
+type ModelOverlayState = {
+  models: EngineModel[]
+  selected: number
+  loading: boolean
+  error?: string
+}
+
+type OverlayState =
+  | { kind: "help" }
+  | { kind: "permissions" }
+  | { kind: "history" }
+  | { kind: "models"; state: ModelOverlayState }
+
 type CodexSessionAppProps = {
   controller: SessionController
   palette: BrandPalette
   project: ProjectPreflight
   policy?: SessionPolicy
+  /** Directory of the persisted session, or undefined when history is disabled. */
+  historyLocation?: string
   onAction(action: CodexSessionAction): void
 }
 
@@ -132,10 +239,11 @@ export function CodexSessionApp({
   palette,
   project,
   policy = defaultSessionPolicy,
+  historyLocation,
   onAction,
 }: CodexSessionAppProps) {
   const renderer = useRenderer()
-  const { width: terminalWidth } = useTerminalDimensions()
+  const { width: terminalWidth, height: terminalHeight } = useTerminalDimensions()
   const textareaRef = useRef<TextareaRenderable>(null)
   const resetCursorBlinkRef = useRef<() => void>(() => {})
   const scrollboxRef = useRef<ScrollBoxRenderable>(null)
@@ -143,6 +251,7 @@ export function CodexSessionApp({
   const [commandError, setCommandError] = useState<string>()
   const [selectedOutlineId, setSelectedOutlineId] = useState<string>()
   const [outlineVisible, setOutlineVisible] = useState(true)
+  const [overlay, setOverlay] = useState<OverlayState>()
   const syntaxStyle = useMemo(() => createSyntaxStyle(palette), [palette])
   const styledComposerPlaceholder = useMemo(() => createComposerPlaceholder(palette), [palette])
   const scrollbarOptions = useMemo(() => createScrollbarOptions(palette), [palette])
@@ -234,6 +343,91 @@ export function CodexSessionApp({
     setOutlineVisible((visible) => !visible)
   }, [])
 
+  const selectModel = useCallback(
+    (model: EngineModel) => {
+      setOverlay(undefined)
+      void runCommand(() => controller.setModel(model.id))
+    },
+    [controller, runCommand],
+  )
+
+  const openModelOverlay = useCallback(() => {
+    if (!controller.canSwitchModels) {
+      setCommandError("This engine has no model picker")
+      return
+    }
+    setOverlay({ kind: "models", state: { models: [], selected: 0, loading: true } })
+    controller.listModels().then(
+      (models) =>
+        setOverlay((current) =>
+          current?.kind === "models"
+            ? {
+                kind: "models",
+                state: {
+                  models,
+                  selected: Math.max(
+                    0,
+                    models.findIndex((model) => model.isDefault),
+                  ),
+                  loading: false,
+                },
+              }
+            : current,
+        ),
+      (error) =>
+        setOverlay((current) =>
+          current?.kind === "models"
+            ? {
+                kind: "models",
+                state: {
+                  models: [],
+                  selected: 0,
+                  loading: false,
+                  error: error instanceof Error ? error.message : String(error),
+                },
+              }
+            : current,
+        ),
+    )
+  }, [controller])
+
+  const runSlashCommand = useCallback(
+    (command: ParsedSlashCommand) => {
+      switch (command.name) {
+        case "unknown":
+          setCommandError(`Unknown command ${command.raw.split(/\s+/)[0]} — try /help`)
+          return
+        case "help":
+          setOverlay((current) => (current?.kind === "help" ? undefined : { kind: "help" }))
+          return
+        case "new":
+          onAction("new")
+          return
+        case "resume":
+          if (!historyLocation) setCommandError("History is disabled for this run — nothing to resume")
+          else onAction("resume-picker")
+          return
+        case "engine":
+          onAction("home")
+          return
+        case "quit":
+          onAction("quit")
+          return
+        case "permissions":
+          setOverlay({ kind: "permissions" })
+          return
+        case "history":
+          setOverlay({ kind: "history" })
+          return
+        case "model":
+          if (command.argument) void runCommand(() => controller.setModel(command.argument as string))
+          else openModelOverlay()
+          return
+      }
+    },
+    [controller, historyLocation, onAction, openModelOverlay, runCommand],
+  )
+
   useKeyboard((key) => {
     if (key.ctrl && (key.name === "c" || key.name === "q")) {
       key.preventDefault()
@@ -244,6 +438,44 @@ export function CodexSessionApp({
     if (key.ctrl && key.name === "z") {
       key.preventDefault()
       suspendToShell(renderer)
+      return
+    }
+
+    if (key.name === "f1") {
+      key.preventDefault()
+      setOverlay((current) => (current?.kind === "help" ? undefined : { kind: "help" }))
+      return
+    }
+
+    if (overlay) {
+      if (key.name === "escape") {
+        key.preventDefault()
+        setOverlay(undefined)
+        return
+      }
+      if (overlay.kind === "models" && !overlay.state.loading && overlay.state.models.length > 0) {
+        if (key.name === "up" || key.name === "down") {
+          key.preventDefault()
+          const direction = key.name === "up" ? -1 : 1
+          setOverlay({
+            kind: "models",
+            state: {
+              ...overlay.state,
+              selected: Math.max(
+                0,
+                Math.min(overlay.state.models.length - 1, overlay.state.selected + direction),
+              ),
+            },
+          })
+          return
+        }
+        if (key.name === "return" || key.name === "enter") {
+          key.preventDefault()
+          const model = overlay.state.models[overlay.state.selected]
+          if (model) selectModel(model)
+          return
+        }
+      }
       return
     }
 
@@ -288,7 +520,12 @@ export function CodexSessionApp({
 
   const context = formatContextRemaining(state)
   const git = formatGit(project)
-  const error = commandError ?? state.error?.message ?? state.warnings.at(-1)
+  const rateLimit = formatRateLimit(state)
+  const errorHint = state.error ? errorRecoveryHint(state.error.message) : undefined
+  const error =
+    commandError ??
+    (state.error ? `${state.error.message}${errorHint ? ` — ${errorHint}` : ""}` : state.warnings.at(-1))
+  const composerHeight = composerRows(terminalHeight)
 
   return (
     <box style={{ height: "100%", backgroundColor: palette.background, padding: 1, gap: 1 }}>
@@ -349,7 +586,7 @@ export function CodexSessionApp({
         </text>
       </box>
 
-      {state.plan.length > 0 ? (
+      {showPlanPanel(terminalHeight, state.plan.length) ? (
         <box
           title="Plan"
           style={{ width: "100%", border: true, borderColor: palette.border, paddingLeft: 1 }}
@@ -365,7 +602,7 @@ export function CodexSessionApp({
       <box
         style={{
           width: "100%",
-          height: 5,
+          height: composerHeight,
           flexDirection: "row",
           backgroundColor: palette.secondary,
           paddingTop: 1,
@@ -378,7 +615,7 @@ export function CodexSessionApp({
         </text>
         <textarea
           ref={textareaRef}
-          focused={!state.pendingRequest && !state.error?.recoverable}
+          focused={!overlay && !state.pendingRequest && !state.error?.recoverable}
           placeholder={styledComposerPlaceholder}
           textColor={palette.foreground}
           placeholderColor={palette.muted}
@@ -393,6 +630,13 @@ export function CodexSessionApp({
           onSubmit={() => {
             const text = textareaRef.current?.plainText.trim() ?? ""
             if (!text) return
+            const command = parseSlashCommand(text)
+            if (command) {
+              setCommandError(undefined)
+              textareaRef.current?.setText("")
+              runSlashCommand(command)
+              return
+            }
             void runCommand(() => controller.send({ text })).then((sent) => {
               if (sent) textareaRef.current?.setText("")
             })
@@ -408,11 +652,125 @@ export function CodexSessionApp({
             {context ? ` · ${context}` : ""} ·{" "}
           </text>
           <PolicyBadge policy={policy} palette={palette} />
+          {rateLimit ? (
+            <text fg={rateLimit.critical ? palette.destructive : palette.accent}> · {rateLimit.text}</text>
+          ) : null}
           <text fg={palette.accent}> · {state.sessionStatus}</text>
         </box>
       </box>
 
-      <Approval request={state.pendingRequest} palette={palette} />
+      <SessionOverlay overlay={overlay} palette={palette} policy={policy} historyLocation={historyLocation} />
+      <Approval request={overlay ? undefined : state.pendingRequest} palette={palette} />
+    </box>
+  )
+}
+
+function SessionOverlay({
+  overlay,
+  palette,
+  policy,
+  historyLocation,
+}: {
+  overlay: OverlayState | undefined
+  palette: BrandPalette
+  policy: SessionPolicy
+  historyLocation?: string
+}) {
+  if (!overlay) return null
+
+  const frame = {
+    position: "absolute" as const,
+    width: "84%" as const,
+    left: "8%" as const,
+    top: 2,
+    zIndex: 30,
+    border: true,
+    borderColor: palette.action,
+    backgroundColor: palette.popover,
+    padding: 1,
+  }
+
+  if (overlay.kind === "help") {
+    return (
+      <box title="Keyboard & commands · Esc closes" style={frame}>
+        <text fg={palette.accent}>
+          <b>Keys</b>
+        </text>
+        {keyboardHelpEntries.map((entry) => (
+          <text key={entry.keys} fg={palette.foreground}>
+            {entry.keys.padEnd(24)} {entry.action}
+          </text>
+        ))}
+        <text fg={palette.accent} style={{ marginTop: 1 }}>
+          <b>Commands</b>
+        </text>
+        {slashCommandHelp.map((entry) => (
+          <text key={entry.command} fg={palette.foreground}>
+            {entry.command.padEnd(24)} {entry.description}
+          </text>
+        ))}
+      </box>
+    )
+  }
+
+  if (overlay.kind === "permissions") {
+    const danger = policy.sandbox === "danger-full-access"
+    return (
+      <box title="Permissions · Esc closes" style={frame}>
+        <box style={{ height: 1, flexDirection: "row" }}>
+          <text fg={palette.foreground}>Sandbox: </text>
+          <PolicyBadge policy={policy} palette={palette} />
+        </box>
+        <text fg={palette.foreground}>Approvals: {policy.approvalPolicy}</text>
+        <text fg={danger ? palette.destructive : palette.muted} style={{ marginTop: 1 }}>
+          {danger
+            ? "No sandbox is active for this session. Every approval is final."
+            : "Change with --sandbox/--full-access flags or [codex] config; applies to the next session."}
+        </text>
+      </box>
+    )
+  }
+
+  if (overlay.kind === "history") {
+    return (
+      <box title="Session history · Esc closes" style={frame}>
+        {historyLocation ? (
+          <>
+            <text fg={palette.foreground}>This session is stored at:</text>
+            <text fg={palette.accent}>{historyLocation}</text>
+            <text fg={palette.muted} style={{ marginTop: 1 }}>
+              Coalesced events only — no raw provider payloads. Disable with --no-history or [history] enabled
+              = false.
+            </text>
+          </>
+        ) : (
+          <text fg={palette.foreground}>History is disabled for this run; nothing is written to disk.</text>
+        )}
+      </box>
+    )
+  }
+
+  const { models, selected, loading, error } = overlay.state
+  return (
+    <box title="Switch model · ↑↓ Enter · Esc closes" style={frame}>
+      {loading ? <text fg={palette.muted}>Loading models…</text> : null}
+      {error ? <text fg={palette.destructive}>{error}</text> : null}
+      {models.map((model, index) => {
+        const active = index === selected
+        return (
+          <box key={model.id} style={{ height: 1, flexDirection: "row" }}>
+            <text fg={active ? palette.action : palette.foreground}>
+              {active ? "› " : "  "}
+              {model.displayName}
+              {model.isDefault ? " (default)" : ""}
+            </text>
+            {model.description ? <text fg={palette.muted}> — {model.description}</text> : null}
+          </box>
+        )
+      })}
+      {!loading && !error && models.length === 0 ? (
+        <text fg={palette.muted}>No models reported by the provider.</text>
+      ) : null}
     </box>
   )
 }
@@ -653,7 +1011,7 @@ function approvalChoiceForKey(name: string, request: PendingRequest): string | u
 function statusHelp(state: AppViewState): string {
   if (state.error?.recoverable) return "Ctrl+R reconnect · Ctrl+Q home"
   if (state.turnStatus === "running") return "Esc interrupt · Ctrl+Q home"
-  return "Enter send · Shift+Enter newline · Ctrl+Q home"
+  return "Enter send · /help commands · F1 keys"
 }
 
 export function formatContextRemaining(state: AppViewState): string | undefined {

@@ -1,4 +1,4 @@
-import type { EngineDecision, EngineSession, UserInput } from "./engine.ts"
+import type { EngineDecision, EngineModel, EngineSession, UserInput } from "./engine.ts"
 import type { AgentEvent } from "./events.ts"
 import type { AppViewState } from "./reducer.ts"
 import { initialAppViewState, reduceAgentEvent } from "./reducer.ts"
@@ -61,6 +61,24 @@ export class SessionController {
     if (this.#closed || this.#state.turnStatus !== "running") return
     if (!this.#session.capabilities.interrupt) throw new Error("This engine cannot interrupt a running turn")
     await this.#session.interrupt()
+  }
+
+  get canSwitchModels(): boolean {
+    return typeof this.#session.setModel === "function" && typeof this.#session.listModels === "function"
+  }
+
+  async listModels(): Promise<EngineModel[]> {
+    if (this.#closed) throw new Error("Session is closed")
+    if (!this.#session.listModels) throw new Error("This engine does not list models")
+    return this.#session.listModels()
+  }
+
+  async setModel(model: string): Promise<void> {
+    if (this.#closed) throw new Error("Session is closed")
+    if (!this.#session.setModel) throw new Error("This engine cannot switch models")
+    if (this.#state.turnStatus === "running")
+      throw new Error("Wait for the current turn before switching models")
+    await this.#session.setModel(model)
   }
 
   async close(): Promise<void> {

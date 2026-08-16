@@ -1,5 +1,5 @@
 /** Pure projection from the ordered engine event stream to renderable application state. */
-import type { AgentEvent, EngineId, ItemStatus, SessionStatus, TurnStatus } from "./events.ts"
+import type { AgentEvent, EngineId, ItemStatus, RateLimitUsage, SessionStatus, TurnStatus } from "./events.ts"
 
 export type TranscriptItem = {
   id: string
@@ -33,6 +33,7 @@ export type AppViewState = {
     totalTokens?: number
     modelContextWindow?: number
     estimatedCostUsd?: number
+    rateLimit?: RateLimitUsage
   }
   warnings: string[]
   error?: { message: string; recoverable: boolean }

@@ -1,4 +1,5 @@
 import { type AgentEvent, type AgentEventInput, createAgentEvent, type ItemStatus } from "../../core/index.ts"
+import type { AccountRateLimitsUpdatedNotification } from "./generated/v2/AccountRateLimitsUpdatedNotification.ts"
 import type { AgentMessageDeltaNotification } from "./generated/v2/AgentMessageDeltaNotification.ts"
 import type { ErrorNotification } from "./generated/v2/ErrorNotification.ts"
 import type { ItemCompletedNotification } from "./generated/v2/ItemCompletedNotification.ts"
@@ -162,6 +163,29 @@ export class CodexEventNormalizer {
               modelContextWindow: params.tokenUsage.modelContextWindow ?? undefined,
             },
           }),
+        ]
+      }
+      case "account/rateLimits/updated": {
+        const params = raw as AccountRateLimitsUpdatedNotification
+        const window = params.rateLimits.primary ?? params.rateLimits.secondary
+        if (!window) return []
+        return [
+          this.#event(
+            notification.method,
+            raw,
+            {},
+            {
+              kind: "usage.updated",
+              payload: {
+                rateLimit: {
+                  usedPercent: window.usedPercent,
+                  label: params.rateLimits.limitName ?? params.rateLimits.planType ?? undefined,
+                  resetsAt:
+                    window.resetsAt === null ? undefined : new Date(window.resetsAt * 1000).toISOString(),
+                },
+              },
+            },
+          ),
         ]
       }
       case "warning": {

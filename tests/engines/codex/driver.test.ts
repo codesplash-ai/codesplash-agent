@@ -201,6 +201,62 @@ describe("CodexDriver", () => {
     }
   })
 
+  test("lists models across pages, dropping hidden entries", async () => {
+    const session = await openSession()
+    try {
+      expect(await session.listModels?.()).toEqual([
+        { id: "gpt-test", displayName: "GPT Test", description: "Default model", isDefault: true },
+        { id: "gpt-test-mini", displayName: "GPT Test Mini", description: "Fast", isDefault: false },
+      ])
+    } finally {
+      await session.close()
+    }
+  })
+
+  test("applies a switched model to the next turn and reports it in session status", async () => {
+    const session = await openSession()
+    const events = session.events[Symbol.asyncIterator]()
+
+    try {
+      await nextEvent(events, (event) => event.kind === "session.status" && event.payload.status === "ready")
+      await session.setModel?.("gpt-test-mini")
+      const statusUpdate = await nextEvent(
+        events,
+        (event) => event.kind === "session.status" && event.payload.model === "gpt-test-mini",
+      )
+      expect(statusUpdate.providerEvent).toBe("client/modelSelected")
+
+      await session.send({ text: "stream" })
+      const modelEcho = await nextEvent(
+        events,
+        (event) => event.kind === "warning" && event.payload.message.startsWith("model:"),
+      )
+      expect(modelEcho.kind === "warning" && modelEcho.payload.message).toBe("model:gpt-test-mini")
+    } finally {
+      await session.close()
+    }
+  })
+
+  test("normalizes rate-limit updates into usage events", async () => {
+    const session = await openSession()
+    const events = session.events[Symbol.asyncIterator]()
+
+    try {
+      await session.send({ text: "rate-limit" })
+      const usage = await nextEvent(
+        events,
+        (event) => event.kind === "usage.updated" && event.payload.rateLimit !== undefined,
+      )
+      expect(usage.kind === "usage.updated" && usage.payload.rateLimit).toEqual({
+        usedPercent: 42,
+        label: "weekly",
+        resetsAt: new Date(1_755_400_000 * 1000).toISOString(),
+      })
+    } finally {
+      await session.close()
+    }
+  })
+
   test("reports a child crash as a recoverable redacted event", async () => {
     const session = await openSession()
     const events = session.events[Symbol.asyncIterator]()

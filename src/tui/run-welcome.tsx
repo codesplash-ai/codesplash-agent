@@ -12,6 +12,7 @@ import {
   type ProjectPreflight,
   projectIdFor,
   registerCleanup,
+  type SessionMeta,
   saveConfig,
   type ThemePreference,
 } from "../core/index.ts"
@@ -44,7 +45,7 @@ export async function runWelcome(
 
     if (action === "open-codex") {
       try {
-        await openCodex(project, config, options)
+        if ((await openCodex(project, config, options)) === "quit") return
       } catch (error) {
         process.stderr.write(`agent: ${error instanceof Error ? error.message : String(error)}\n`)
       }
@@ -71,30 +72,42 @@ export async function runWelcome(
   }
 }
 
-async function openCodex(project: ProjectPreflight, config: AgentConfig, options: AppOptions): Promise<void> {
+async function openCodex(
+  project: ProjectPreflight,
+  config: AgentConfig,
+  options: AppOptions,
+): Promise<"done" | "quit"> {
   const policy = effectiveSessionPolicy(config, options)
   const historyEnabled = effectiveHistoryEnabled(config, options)
 
-  if (!historyEnabled) {
-    await runCodexSession(project, config.theme, { policy, historyEnabled })
-    return
-  }
+  let resume: SessionMeta | undefined
+  let skipPicker = !historyEnabled
 
-  const sessions = (await listProjectSessions(projectIdFor(project.cwd))).filter(
-    (meta) => meta.engine === "codex",
-  )
-  if (sessions.length === 0) {
-    await runCodexSession(project, config.theme, { policy, historyEnabled })
-    return
-  }
+  while (true) {
+    if (!skipPicker) {
+      const sessions = (await listProjectSessions(projectIdFor(project.cwd))).filter(
+        (meta) => meta.engine === "codex",
+      )
+      resume = undefined
+      if (sessions.length > 0) {
+        const choice = await renderSessionPicker(sessions, config.theme)
+        if (choice.type === "back") return "done"
+        if (choice.type === "resume") resume = choice.meta
+      }
+    }
+    skipPicker = false
 
-  const choice = await renderSessionPicker(sessions, config.theme)
-  if (choice.type === "back") return
-  await runCodexSession(project, config.theme, {
-    policy,
-    historyEnabled,
-    resume: choice.type === "resume" ? choice.meta : undefined,
-  })
+    const outcome = await runCodexSession(project, config.theme, { policy, historyEnabled, resume })
+    if (outcome === "quit") return "quit"
+    if (outcome === "new") {
+      // Skip the picker and open a fresh session directly.
+      resume = undefined
+      skipPicker = true
+      continue
+    }
+    if (outcome === "resume-picker") continue
+    return "done"
+  }
 }
 
 async function renderWelcome(

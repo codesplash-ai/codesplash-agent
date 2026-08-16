@@ -34,18 +34,21 @@ export type CodexSessionRunOptions = {
   store?: SessionStore
 }
 
+/** How the session screen ended: "new" and "resume-picker" ask the caller to reopen. */
+export type CodexRunOutcome = "home" | "quit" | "new" | "resume-picker"
+
 export async function runCodexSession(
   project: ProjectPreflight,
   themePreference: ThemePreference,
   options: CodexSessionRunOptions = {},
-): Promise<void> {
+): Promise<CodexRunOutcome> {
   const policy = options.policy ?? defaultSessionPolicy
   const historyEnabled = options.historyEnabled ?? true
 
   // Full access is never sticky: every session open re-confirms, resume included.
   if (policy.sandbox === "danger-full-access") {
     const confirmed = await renderFullAccessConfirmation(themePreference)
-    if (!confirmed) return
+    if (!confirmed) return "home"
   }
 
   const localSessionId = options.resume?.localSessionId ?? crypto.randomUUID()
@@ -53,6 +56,7 @@ export async function runCodexSession(
   let nativeSessionId = options.resume?.nativeSessionId
 
   let recorder: SessionRecorder | undefined
+  let historyLocation: string | undefined
   let initialState = freshState()
   let firstSequence = 0
 
@@ -62,6 +66,7 @@ export async function runCodexSession(
       const handle = await store.open(projectId, localSessionId)
       const { events } = await readSessionEvents(handle.directory)
       recorder = new SessionRecorder(handle)
+      historyLocation = handle.directory
       recorder.seedFromHistory(events)
       for (const event of events) initialState = reduceAgentEvent(initialState, event)
       initialState = clearTransientState(initialState)
@@ -82,6 +87,7 @@ export async function runCodexSession(
         approvalPolicy: policy.approvalPolicy,
       })
       recorder = new SessionRecorder(handle)
+      historyLocation = handle.directory
     }
   }
 
@@ -138,8 +144,8 @@ export async function runCodexSession(
       })
 
       try {
-        const action = await renderCodexSession(controller, project, themePreference, policy)
-        if (action !== "reconnect") return
+        const action = await renderCodexSession(controller, project, themePreference, policy, historyLocation)
+        if (action !== "reconnect") return action
       } finally {
         unregisterCleanup()
         await controller.close()
@@ -179,6 +185,7 @@ async function renderCodexSession(
   project: ProjectPreflight,
   themePreference: ThemePreference,
   policy: SessionPolicy,
+  historyLocation: string | undefined,
 ): Promise<CodexSessionAction> {
   const renderer = await createCliRenderer({
     exitOnCtrlC: false,
@@ -205,6 +212,7 @@ async function renderCodexSession(
         palette={brandThemes[theme]}
         project={project}
         policy={policy}
+        historyLocation={historyLocation}
         onAction={finish}
       />,
     )

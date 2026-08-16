@@ -25,6 +25,12 @@ type EventOf<Kind extends string, Payload> = AgentEventEnvelope & {
   payload: Payload
 }
 
+export type RateLimitUsage = {
+  usedPercent: number
+  label?: string
+  resetsAt?: string
+}
+
 export type SessionStatus = "starting" | "ready" | "running" | "waiting" | "closed" | "failed"
 export type TurnStatus = "idle" | "running" | "completed" | "interrupted" | "failed"
 export type ItemStatus = "running" | "completed" | "failed"
@@ -56,6 +62,7 @@ export type AgentEvent =
         totalTokens?: number
         modelContextWindow?: number
         estimatedCostUsd?: number
+        rateLimit?: RateLimitUsage
       }
     >
   | EventOf<"warning", { message: string }>

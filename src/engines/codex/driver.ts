@@ -7,6 +7,7 @@ import {
   type EngineCapabilities,
   type EngineDecision,
   type EngineDriver,
+  type EngineModel,
   type EngineProbe,
   type EngineSession,
   type OpenSessionOptions,
@@ -126,6 +127,7 @@ class CodexSession implements EngineSession {
   #threadId: string | undefined
   #turnId: string | undefined
   #model: string | undefined
+  #modelOverride: string | undefined
   #closed = false
 
   constructor(
@@ -298,6 +300,34 @@ class CodexSession implements EngineSession {
     }
   }
 
+  async listModels(): Promise<EngineModel[]> {
+    this.#requireThread()
+    const models = await this.client.listModels()
+    return models.map((model) => ({
+      id: model.id,
+      displayName: model.displayName,
+      description: model.description || undefined,
+      isDefault: model.isDefault,
+    }))
+  }
+
+  /** Applies to the next `turn/start`, which Codex carries forward to subsequent turns. */
+  async setModel(model: string): Promise<void> {
+    this.#requireThread()
+    if (this.#turnId) throw new Error("Wait for the current turn before switching models")
+
+    this.#modelOverride = model
+    this.#model = model
+    this.#eventQueue.push(
+      this.#normalizer.event(
+        "client/modelSelected",
+        undefined,
+        { threadId: this.#threadId },
+        { kind: "session.status", payload: { status: "ready", model } },
+      ),
+    )
+  }
+
   async send(input: CoreUserInput): Promise<void> {
     const threadId = this.#requireThread()
     if (this.#turnId) throw new Error("A Codex turn is already running")
@@ -319,9 +349,11 @@ class CodexSession implements EngineSession {
       threadId,
       input: toCodexInput(input),
       summary: "auto",
+      model: this.#modelOverride,
     }
     const response = await this.client.process.connection.request<TurnStartResponse>("turn/start", params)
     this.#turnId = response.turn.id
+    this.#modelOverride = undefined
   }
 
   async resolveRequest(requestId: string, decision: EngineDecision): Promise<void> {

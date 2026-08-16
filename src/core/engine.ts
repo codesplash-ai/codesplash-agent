@@ -55,6 +55,13 @@ export type EngineDecision = {
   data?: unknown
 }
 
+export type EngineModel = {
+  id: string
+  displayName: string
+  description?: string
+  isDefault: boolean
+}
+
 export interface EngineSession {
   readonly localSessionId: string
   readonly nativeSessionId?: string
@@ -64,6 +71,10 @@ export interface EngineSession {
   resolveRequest(requestId: string, decision: EngineDecision): Promise<void>
   interrupt(): Promise<void>
   close(): Promise<void>
+  /** Lists selectable models; absent when the engine has no model picker. */
+  listModels?(): Promise<EngineModel[]>
+  /** Switches the model for subsequent turns; absent when the engine cannot switch. */
+  setModel?(model: string): Promise<void>
 }
 
 export interface EngineDriver {

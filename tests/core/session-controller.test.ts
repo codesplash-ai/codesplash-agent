@@ -102,6 +102,42 @@ describe("SessionController", () => {
     await controller.close()
   })
 
+  test("gates model switching on engine capability and turn state", async () => {
+    const plainSession = new FakeSession()
+    const plainController = new SessionController(plainSession)
+    expect(plainController.canSwitchModels).toBe(false)
+    await expect(plainController.setModel("gpt-x")).rejects.toThrow("cannot switch models")
+    await expect(plainController.listModels()).rejects.toThrow("does not list models")
+    await plainController.close()
+
+    const modelSession = new FakeSession() as FakeSession & {
+      listModels(): Promise<Array<{ id: string; displayName: string; isDefault: boolean }>>
+      setModel(model: string): Promise<void>
+      selected: string[]
+    }
+    modelSession.selected = []
+    modelSession.listModels = async () => [{ id: "gpt-x", displayName: "GPT X", isDefault: true }]
+    modelSession.setModel = async (model: string) => {
+      modelSession.selected.push(model)
+    }
+    const controller = new SessionController(modelSession)
+    controller.start()
+    expect(controller.canSwitchModels).toBe(true)
+    expect(await controller.listModels()).toEqual([{ id: "gpt-x", displayName: "GPT X", isDefault: true }])
+    await controller.setModel("gpt-x")
+    expect(modelSession.selected).toEqual(["gpt-x"])
+
+    modelSession.queue.push(
+      createAgentEvent(
+        { engine: "codex", localSessionId: modelSession.localSessionId, sequence: 0 },
+        { kind: "turn.started", payload: {} },
+      ),
+    )
+    await eventually(() => expect(controller.state.turnStatus).toBe("running"))
+    await expect(controller.setModel("gpt-y")).rejects.toThrow("current turn")
+    await controller.close()
+  })
+
   test("coalesces rapid streaming deltas into stable view updates", async () => {
     const session = new FakeSession()
     const controller = new SessionController(session)

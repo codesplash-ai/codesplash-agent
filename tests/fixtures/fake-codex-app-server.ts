@@ -88,10 +88,55 @@ function handleMessage(message: {
     return
   }
 
+  if (message.method === "model/list") {
+    const cursor = message.params?.cursor
+    if (cursor === "page-2") {
+      send({
+        id: message.id,
+        result: {
+          data: [
+            {
+              id: "gpt-test-mini",
+              displayName: "GPT Test Mini",
+              description: "Fast",
+              hidden: false,
+              isDefault: false,
+            },
+            { id: "gpt-secret", displayName: "Hidden", description: "", hidden: true, isDefault: false },
+          ],
+          nextCursor: null,
+        },
+      })
+      return
+    }
+    send({
+      id: message.id,
+      result: {
+        data: [
+          {
+            id: "gpt-test",
+            displayName: "GPT Test",
+            description: "Default model",
+            hidden: false,
+            isDefault: true,
+          },
+        ],
+        nextCursor: "page-2",
+      },
+    })
+    return
+  }
+
   if (message.method === "turn/start") {
     if (message.params?.summary !== "auto") {
       send({ id: message.id, error: { code: -32602, message: "reasoning summary must be auto" } })
       return
+    }
+    if (typeof message.params?.model === "string") {
+      send({
+        method: "warning",
+        params: { threadId: String(message.params?.threadId), message: `model:${message.params.model}` },
+      })
     }
     const threadId = String(message.params?.threadId)
     const input = message.params?.input as Array<{ text?: string }> | undefined
@@ -167,6 +212,30 @@ function handleMessage(message: {
           threadId,
           turnId,
           item: { type: "agentMessage", id: `message-${turnCount}`, text: "Done", phase: null },
+        },
+      })
+      send({
+        method: "turn/completed",
+        params: { threadId, turn: { id: turnId, status: "completed" } },
+      })
+      return
+    }
+
+    if (text === "rate-limit") {
+      send({
+        method: "account/rateLimits/updated",
+        params: {
+          rateLimits: {
+            limitId: null,
+            limitName: "weekly",
+            primary: { usedPercent: 42, windowDurationMins: 10080, resetsAt: 1755400000 },
+            secondary: null,
+            credits: null,
+            individualLimit: null,
+            spendControlReached: null,
+            planType: "plus",
+            rateLimitReachedType: null,
+          },
         },
       })
       send({
