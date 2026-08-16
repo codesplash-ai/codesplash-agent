@@ -30,11 +30,13 @@ export function formatRelativeTime(iso: string, now: Date = new Date()): string 
 
 export function sandboxBadge(meta: SessionMeta): string {
   if (meta.sandbox === "danger-full-access") return "FULL ACCESS"
-  return meta.sandbox
+  if (meta.sandbox) return meta.sandbox
+  return meta.engine === "claude" ? "official CLI" : ""
 }
 
+/** Pickers are engine-scoped, so a native session ID is the only resume requirement. */
 export function isResumableSession(meta: SessionMeta): boolean {
-  return meta.engine === "codex" && Boolean(meta.nativeSessionId)
+  return Boolean(meta.nativeSessionId)
 }
 
 type SessionPickerAppProps = {
@@ -119,11 +121,9 @@ export function SessionPickerApp({ sessions, palette, onAction }: SessionPickerA
             <PickerRow
               key={meta.localSessionId}
               label={meta.title ?? "Untitled session"}
-              detail={[
-                formatRelativeTime(meta.updatedAt),
-                displaySessionStatus(meta),
-                sandboxBadge(meta),
-              ].join(" · ")}
+              detail={[formatRelativeTime(meta.updatedAt), displaySessionStatus(meta), sandboxBadge(meta)]
+                .filter(Boolean)
+                .join(" · ")}
               danger={meta.sandbox === "danger-full-access"}
               palette={palette}
               selected={selected === index + 1}

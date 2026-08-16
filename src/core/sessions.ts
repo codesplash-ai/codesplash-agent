@@ -18,8 +18,9 @@ export type SessionMeta = {
   updatedAt: string
   lastStatus: SessionStatus
   lastSequence: number
-  sandbox: SandboxMode
-  approvalPolicy: ApprovalPolicy
+  /** Codex-only; Claude launches own their permission model inside the official CLI. */
+  sandbox?: SandboxMode
+  approvalPolicy?: ApprovalPolicy
 }
 
 export type SessionEventsRead = {
@@ -241,8 +242,8 @@ function isSessionMeta(value: unknown): value is SessionMeta {
     typeof value.updatedAt === "string" &&
     typeof value.lastStatus === "string" &&
     typeof value.lastSequence === "number" &&
-    typeof value.sandbox === "string" &&
-    typeof value.approvalPolicy === "string"
+    (value.sandbox === undefined || typeof value.sandbox === "string") &&
+    (value.approvalPolicy === undefined || typeof value.approvalPolicy === "string")
   )
 }
 

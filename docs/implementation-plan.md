@@ -1,6 +1,6 @@
 # AI Agent CLI Implementation Plan
 
-**Status:** Milestones 0–2 implemented — Milestone 2 manual dogfood pending, Milestone 3 next
+**Status:** Milestones 0–3 implemented — manual dogfood pending for 2–3, Milestone 4 next
 **Reviewed:** 2026-08-15
 **Progress updated:** 2026-08-16
 **Source:** [`docs/agent-plan.md`](./agent-plan.md)
@@ -26,7 +26,7 @@ Do not put native Claude stream-JSON mode, custom tools, an MCP marketplace, sub
 | 0 — Protocol and packaging spikes | **Complete** | Real Codex approval/interrupt/restart/resume/second-turn smoke passed; Claude terminal handoff and restoration passed; embedded PTY was rejected for v1; emitted and compiled macOS arm64 builds passed. |
 | 1 — Core and Codex vertical slice | **Complete** | The production Codex TUI is live-dogfooded for streamed prompts, tool/diff activity, repeated turns, model/context status, and long-session navigation. Real app-server and integration coverage prove approvals, interrupt, resume, crash recovery, and redaction. |
 | 2 — Durable sessions and safety | **Implemented** | Sessions persist as coalesced JSONL plus atomic metadata, resume through a project-scoped picker backed by `thread/resume` with reconciliation, and policy/`--no-history`/full-access/signal handling are in place with all four exit gates covered by offline tests. The manual dogfood checklist remains before calling the milestone closed. |
-| 3 — Claude official-CLI surface | Started early | The homescreen performs official diagnostics and Enter launches Claude through the tested real-terminal handoff. Session metadata and polish remain. |
+| 3 — Claude official-CLI surface | **Implemented** | Diagnostics-only probe, tested real-terminal handoff, and launch metadata: the app supplies its own session ID through the documented `--session-id` flag, resumes with `--resume` from an engine-scoped picker, and stores no terminal output. Manual dogfood of a real login/permissions/slash-command/resume pass remains. |
 | 4 — Cockpit completion | Not started | Deferred until both engine surfaces are proven. |
 | 5 — Alpha distribution | Not started | A macOS arm64 Bun-compiled executable passed the Milestone 0 smoke and is the internal-alpha format; release automation and the target matrix remain. |
 | 6 — Optional native Claude/extensibility | Deferred | Requires a fresh authentication/product decision. |
@@ -461,9 +461,37 @@ Tasks:
 
 Exit gates:
 
-- Claude Code behaves exactly as it does in a normal terminal for login, permissions, slash commands, and resume.
-- Exiting or crashing Claude always restores the parent terminal and cockpit.
-- Switching engines cannot accidentally send a prompt to the wrong live process.
+- [x] Claude Code behaves exactly as it does in a normal terminal for login, permissions, slash commands, and
+      resume: the handoff inherits stdio and passes at most one documented flag (`--session-id` on new launches,
+      `--resume <id>` on resume). Real-terminal dogfood of that pass is on the manual checklist.
+- [x] Exiting or crashing Claude always restores the parent terminal and cockpit (existing normal-exit,
+      `SIGINT`, forced-termination, and abort coverage; restoration runs in a `finally`).
+- [x] Switching engines cannot accidentally send a prompt to the wrong live process: session pickers are
+      engine-scoped, the Codex controller is closed before control returns to the welcome loop, and the Claude
+      handoff is synchronous — the cockpit never has two live engine processes accepting input.
+
+### Milestone 3 implementation checkpoint — 2026-08-16
+
+- [x] `ClaudeDriver.probe()` uses `claude --version` and `claude auth status --json` only; the Claude engine
+      contains no home-directory access and never reads `~/.claude` or copies OAuth tokens.
+- [x] Launch metadata (`engine: "claude"`) records into the shared session store: `SessionMeta.sandbox`/
+      `approvalPolicy` became optional because Claude owns its permission model inside the official CLI; picker
+      rows badge Claude sessions as "official CLI".
+- [x] The native session ID is stronger than the plan required: instead of parsing documented CLI *output*, the
+      app generates the UUID itself and passes it through the documented `--session-id` flag, so resume via
+      `--resume <id>` needs no output parsing at all.
+- [x] Launch status tracking: metadata reads "running" while Claude owns the terminal, then `closed` (exit 0) or
+      `failed`; a killed cockpit leaves a resumable "interrupted" row. No `events.jsonl` is ever created for
+      Claude launches — terminal output is never recorded.
+- [x] `--no-history` skips all Claude session recording and launches the CLI bare.
+- [x] Embedded PTY remains excluded per the Milestone 0 decision (ADR 0003).
+- [x] Offline tests cover flag construction, metadata lifecycle across launch/resume/failure against a fake
+      `claude` binary that records its argv, non-resumable metadata rejection, and picker badges/resumability.
+
+**Remaining before the milestone commit is closed — manual dogfood checklist:** launch real Claude Code from
+the cockpit, exercise login state, permissions prompts, a slash command, and `/quit`; relaunch and resume the
+same session from the picker and confirm the conversation continues; confirm the cockpit and terminal restore
+after exit and after killing Claude externally.
 
 ### Milestone 4 — Cockpit completion
 

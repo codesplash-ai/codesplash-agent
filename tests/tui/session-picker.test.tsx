@@ -48,11 +48,15 @@ describe("session picker", () => {
     expect(sandboxBadge(makeMeta({ sandbox: "danger-full-access" }))).toBe("FULL ACCESS")
     expect(sandboxBadge(makeMeta({ sandbox: "read-only" }))).toBe("read-only")
     expect(sandboxBadge(makeMeta())).toBe("workspace-write")
+    expect(sandboxBadge(makeMeta({ engine: "claude", sandbox: undefined }))).toBe("official CLI")
   })
 
-  test("only Codex sessions with a provider thread are resumable", () => {
+  test("sessions of either engine resume when they carry a native session ID", () => {
     expect(isResumableSession(makeMeta())).toBe(true)
     expect(isResumableSession(makeMeta({ nativeSessionId: undefined }))).toBe(false)
-    expect(isResumableSession(makeMeta({ engine: "claude" }))).toBe(false)
+    expect(isResumableSession(makeMeta({ engine: "claude", sandbox: undefined }))).toBe(true)
+    expect(
+      isResumableSession(makeMeta({ engine: "claude", sandbox: undefined, nativeSessionId: undefined })),
+    ).toBe(false)
   })
 })

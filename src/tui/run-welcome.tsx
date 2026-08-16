@@ -15,7 +15,7 @@ import {
   saveConfig,
   type ThemePreference,
 } from "../core/index.ts"
-import { ClaudeDriver } from "../engines/claude/index.ts"
+import { launchClaude } from "./run-claude.ts"
 import { runCodexSession } from "./run-codex-session.tsx"
 import { renderSessionPicker } from "./session-picker.tsx"
 import { type WelcomeAction, WelcomeApp } from "./welcome.tsx"
@@ -34,13 +34,10 @@ export async function runWelcome(
     if (action === "quit") return
 
     if (action === "launch-claude") {
-      const release = deferSignalExit()
       try {
-        await new ClaudeDriver().handoff(project.cwd)
+        await launchClaude(project, config, options)
       } catch (error) {
         process.stderr.write(`agent: ${error instanceof Error ? error.message : String(error)}\n`)
-      } finally {
-        release()
       }
       continue
     }
@@ -83,7 +80,9 @@ async function openCodex(project: ProjectPreflight, config: AgentConfig, options
     return
   }
 
-  const sessions = await listProjectSessions(projectIdFor(project.cwd))
+  const sessions = (await listProjectSessions(projectIdFor(project.cwd))).filter(
+    (meta) => meta.engine === "codex",
+  )
   if (sessions.length === 0) {
     await runCodexSession(project, config.theme, { policy, historyEnabled })
     return
