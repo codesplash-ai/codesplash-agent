@@ -1,0 +1,6 @@
+# Biome enforces LF; keep checkouts identical on every platform (Windows runners
+# otherwise apply core.autocrlf and fail format:check on carriage returns).
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.gif binary

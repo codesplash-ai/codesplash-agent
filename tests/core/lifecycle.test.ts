@@ -72,31 +72,35 @@ describe("lifecycle", () => {
     releaseAgain()
   })
 
-  test("a parent that exits without cleanup SIGKILLs its registered children", async () => {
-    const fixture = new URL("../fixtures/orphan-parent.ts", import.meta.url)
-    const parent = Bun.spawn([process.execPath, fixture.pathname], {
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-    })
-    const [output, exitCode] = await Promise.all([new Response(parent.stdout).text(), parent.exited])
-    expect(exitCode).toBe(0)
-    const childPid = Number(output.trim())
-    expect(Number.isInteger(childPid)).toBe(true)
+  // The fixture spawns the POSIX `sleep` binary; Windows has no equivalent on PATH.
+  test.skipIf(process.platform === "win32")(
+    "a parent that exits without cleanup SIGKILLs its registered children",
+    async () => {
+      const fixture = new URL("../fixtures/orphan-parent.ts", import.meta.url)
+      const parent = Bun.spawn([process.execPath, fixture.pathname], {
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const [output, exitCode] = await Promise.all([new Response(parent.stdout).text(), parent.exited])
+      expect(exitCode).toBe(0)
+      const childPid = Number(output.trim())
+      expect(Number.isInteger(childPid)).toBe(true)
 
-    // Signal 0 probes liveness; ESRCH means the child is gone. Zombie reaping can lag
-    // a moment, so poll briefly.
-    let alive = true
-    for (let attempt = 0; attempt < 20 && alive; attempt++) {
-      try {
-        process.kill(childPid, 0)
-        await Bun.sleep(25)
-      } catch {
-        alive = false
+      // Signal 0 probes liveness; ESRCH means the child is gone. Zombie reaping can lag
+      // a moment, so poll briefly.
+      let alive = true
+      for (let attempt = 0; attempt < 20 && alive; attempt++) {
+        try {
+          process.kill(childPid, 0)
+          await Bun.sleep(25)
+        } catch {
+          alive = false
+        }
       }
-    }
-    expect(alive).toBe(false)
-  })
+      expect(alive).toBe(false)
+    },
+  )
 
   test("suspendToShell suspends the renderer, delivers SIGTSTP, and resumes on SIGCONT", () => {
     const calls: string[] = []

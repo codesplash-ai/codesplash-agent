@@ -35,6 +35,9 @@ async function writeFakeClaude(
   return { binary, argsFile }
 }
 
+/** The fake `claude` is a /bin/sh script; the spawn-based tests are POSIX-only. */
+const posixTest = test.skipIf(process.platform === "win32")
+
 describe("claude launch surface", () => {
   test("builds only documented CLI flags for launch and resume", () => {
     expect(claudeLaunchArgs("uuid-1", false)).toEqual(["--session-id", "uuid-1"])
@@ -61,7 +64,7 @@ describe("claude launch surface", () => {
     expect(meta.lastSequence).toBe(-1)
   })
 
-  test("records a launch, passes --session-id, and marks a clean exit closed", async () => {
+  posixTest("records a launch, passes --session-id, and marks a clean exit closed", async () => {
     const root = await temporaryDirectory("codesplash-agent-claude-")
     const binDir = await temporaryDirectory("codesplash-agent-claude-bin-")
     const { binary, argsFile } = await writeFakeClaude(binDir, 0)
@@ -90,7 +93,7 @@ describe("claude launch surface", () => {
     ).toBe(false)
   })
 
-  test("resumes with --resume against the stored native session ID", async () => {
+  posixTest("resumes with --resume against the stored native session ID", async () => {
     const root = await temporaryDirectory("codesplash-agent-claude-")
     const binDir = await temporaryDirectory("codesplash-agent-claude-bin-")
     const { binary, argsFile } = await writeFakeClaude(binDir, 0)
@@ -111,7 +114,7 @@ describe("claude launch surface", () => {
     expect(after?.localSessionId).toBe(meta.localSessionId)
   })
 
-  test("marks a non-zero exit failed and surfaces the exit code", async () => {
+  posixTest("marks a non-zero exit failed and surfaces the exit code", async () => {
     const root = await temporaryDirectory("codesplash-agent-claude-")
     const binDir = await temporaryDirectory("codesplash-agent-claude-bin-")
     const { binary } = await writeFakeClaude(binDir, 3)
