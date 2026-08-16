@@ -126,8 +126,13 @@ export function reduceAgentEvent(state: AppViewState, event: AgentEvent): AppVie
         transcript: upsertTranscriptItem(
           state.transcript,
           event.payload.id,
-          () => ({ id: event.payload.id, kind: "reasoning", text: "", status: "completed" }),
-          (item) => ({ ...item, status: "completed" }),
+          () => ({
+            id: event.payload.id,
+            kind: "reasoning",
+            text: event.payload.text ?? "",
+            status: "completed",
+          }),
+          (item) => ({ ...item, text: event.payload.text ?? item.text, status: "completed" }),
         ),
       }
     case "item.updated":

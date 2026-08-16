@@ -1,8 +1,8 @@
 # AI Agent CLI Implementation Plan
 
-**Status:** Milestones 0–1 complete — Milestone 2 next
+**Status:** Milestones 0–2 implemented — Milestone 2 manual dogfood pending, Milestone 3 next
 **Reviewed:** 2026-08-15
-**Progress updated:** 2026-08-15
+**Progress updated:** 2026-08-16
 **Source:** [`docs/agent-plan.md`](./agent-plan.md)
 
 ## 1. Recommended direction
@@ -25,7 +25,7 @@ Do not put native Claude stream-JSON mode, custom tools, an MCP marketplace, sub
 |---|---|---|
 | 0 — Protocol and packaging spikes | **Complete** | Real Codex approval/interrupt/restart/resume/second-turn smoke passed; Claude terminal handoff and restoration passed; embedded PTY was rejected for v1; emitted and compiled macOS arm64 builds passed. |
 | 1 — Core and Codex vertical slice | **Complete** | The production Codex TUI is live-dogfooded for streamed prompts, tool/diff activity, repeated turns, model/context status, and long-session navigation. Real app-server and integration coverage prove approvals, interrupt, resume, crash recovery, and redaction. |
-| 2 — Durable sessions and safety | **Next; started early** | Versioned platform config paths, atomic TOML writes, and persisted system/dark/light theme preference already exist. Session durability is next. |
+| 2 — Durable sessions and safety | **Implemented** | Sessions persist as coalesced JSONL plus atomic metadata, resume through a project-scoped picker backed by `thread/resume` with reconciliation, and policy/`--no-history`/full-access/signal handling are in place with all four exit gates covered by offline tests. The manual dogfood checklist remains before calling the milestone closed. |
 | 3 — Claude official-CLI surface | Started early | The homescreen performs official diagnostics and Enter launches Claude through the tested real-terminal handoff. Session metadata and polish remain. |
 | 4 — Cockpit completion | Not started | Deferred until both engine surfaces are proven. |
 | 5 — Alpha distribution | Not started | A macOS arm64 Bun-compiled executable passed the Milestone 0 smoke and is the internal-alpha format; release automation and the target matrix remain. |
@@ -100,6 +100,50 @@ Codex screen and controller and is complete; Milestone 2 begins with durable ses
 raw Codex payloads stay inside the adapter; crashes recover without corrupting the terminal; and all automated
 checks remain quota-free. The dogfood session supplied the production rendering/input acceptance that cannot be
 meaningfully covered by the fake app-server alone.
+
+### Milestone 2 implementation checkpoint — 2026-08-16
+
+- [x] Split platform data from config paths (`dataDirectory()`, `CODESPLASH_AGENT_DATA_DIR` override) and grew
+      the versioned config to `theme`, `[history].enabled`, and `[codex].sandbox`/`approvalPolicy`, written by an
+      internal TOML serializer (Bun has no stringify; its parser also swaps the `\t`/`\f` short escapes, so the
+      serializer emits `\uXXXX` forms) and validated with aggregated, actionable errors.
+- [x] `danger-full-access` is rejected as a persisted config default; `--full-access` is the only route to it and
+      re-confirms (typed `yes`) on every session open, resume included. The status line shows a permanent policy
+      badge — `FULL ACCESS` on the destructive background in danger mode — and picker rows carry the same badge.
+- [x] Session store at `sessions/<project-id>/<local-session-id>/meta.json` + `events.jsonl` (0700 dirs, 0600
+      files, atomic metadata replacement). Project IDs are truncated SHA-256 of the canonical cwd.
+- [x] `SessionRecorder` taps the controller ahead of reduction: per-token deltas are coalesced into completion
+      events (one empty-text marker per item preserves live transcript ordering on replay), `raw` provider
+      payloads are always stripped, lines are bounded at 256 KiB, and `reasoning.completed` gained an optional
+      `text` payload so reasoning survives replay.
+- [x] Torn final JSONL lines are dropped on read and healed by truncation before the next append; corrupt
+      interior lines are skipped without discarding the intact history after them.
+- [x] Project-scoped resume picker; replay folds the persisted log through the pure reducer into the controller's
+      initial state, then attaches via `thread/resume` with `firstSequence` continuing the log monotonically.
+      Provider turns missing locally are synthesized from `thread.turns` via the shared item normalizer
+      (`knownTurnIds` suppresses duplicates); a dead provider thread falls back to a fresh `thread/start` with a
+      persistent warning while keeping the replayed transcript. Ctrl+R reconnect now restores the transcript too.
+- [x] Resume never silently escalates policy: the effective sandbox comes from config/flags, not from the stored
+      session metadata, so a full-access session resumed without `--full-access` runs workspace-write.
+- [x] CLI grew `--no-history` (recorder never constructed, nothing written), `--sandbox <mode>`, and
+      `--full-access`, with flag > config > default precedence and unit-tested parsing; `cli.ts` main is guarded
+      by `import.meta.main` so the parser is importable by tests.
+- [x] App-level SIGINT/SIGTERM handlers run cleanups newest-first (renderer restore → controller close →
+      recorder flush), a second signal skips straight to child SIGKILL, spawned app-servers are SIGKILLed by a
+      synchronous exit handler if orphaned, signal exits are deferred while Claude handoff or `codex login` owns
+      the terminal, and Ctrl+Z suspends the TUI to the shell with SIGCONT resume.
+
+Exit-gate coverage (all quota-free): the resume round-trip integration test proves restart → `thread/resume`
+with zero `turn/start` and a transcript identical to the live session; the store tests prove torn-line recovery
+and healing; the history-safety tests crash the fake child mid-turn with credential-shaped stderr and assert no
+secret substrings and no `raw` keys in `events.jsonl` or `meta.json`, plus that a no-recorder run creates
+nothing under the data directory; the safety-indicator tests assert the full-access badge and confirmation
+semantics in both palettes.
+
+**Remaining before the milestone commit is closed — manual dogfood checklist:** resume a real authenticated
+session after an app restart; Ctrl+Z then `fg` from welcome and from a live session; external SIGTERM mid-turn
+restores the terminal and leaves a resumable "interrupted" session; resize during streaming; `--full-access`
+confirmation, badge visibility across states, and Esc abort; `--no-history` leaves no session directory.
 
 ## 2. Review of the source plan
 
@@ -390,10 +434,13 @@ Tasks:
 
 Exit gates:
 
-- A session resumes after app restart without replaying the user prompt.
-- Truncated final JSONL lines recover cleanly.
-- No credential content is written by the application.
-- Dangerous modes are visually persistent, not one-time notices.
+- [x] A session resumes after app restart without replaying the user prompt (resume round-trip integration
+      test: `thread/resume` observed, zero `turn/start`, transcript equality).
+- [x] Truncated final JSONL lines recover cleanly (torn-line drop on read, truncation heal before append).
+- [x] No credential content is written by the application (credential-stderr crash sweep over both files, `raw`
+      never persisted, tokens never enter metadata, `--no-history` writes nothing).
+- [x] Dangerous modes are visually persistent, not one-time notices (permanent status-line badge asserted in
+      both palettes, picker badges, per-open typed confirmation).
 
 ### Milestone 3 — Claude official-CLI surface
 

@@ -1,10 +1,12 @@
 #!/usr/bin/env bun
 
+import type { AppOptions } from "./core/app-options.ts"
+
 function printHelp() {
   process.stdout.write(`CodeSplash Agent
 
 Usage:
-  agent [path]
+  agent [path] [--no-history] [--sandbox <mode>] [--full-access]
   agent --fixture
   agent --codex-smoke
   agent --codex-live-smoke
@@ -13,6 +15,10 @@ Usage:
 
 Options:
   path           Project directory (defaults to the current directory)
+  --no-history   Do not write session metadata or event history for this run
+  --sandbox <mode>
+                 Override the configured Codex sandbox: read-only or workspace-write
+  --full-access  Run Codex without a sandbox after an explicit confirmation (dangerous)
   --fixture      Render the synthetic OpenTUI development fixture
   --codex-smoke  Check Codex app-server startup, protocol, and account state without running a model
   --codex-live-smoke
@@ -22,7 +28,41 @@ Options:
 `)
 }
 
+export function parseAppArguments(args: string[]): { path?: string; options: AppOptions } {
+  const options: AppOptions = { noHistory: false, fullAccess: false }
+  let path: string | undefined
+
+  for (let index = 0; index < args.length; index++) {
+    const argument = args[index] as string
+    if (argument === "--no-history") {
+      options.noHistory = true
+    } else if (argument === "--full-access") {
+      options.fullAccess = true
+    } else if (argument === "--sandbox" || argument.startsWith("--sandbox=")) {
+      const value = argument.includes("=") ? argument.slice("--sandbox=".length) : args[++index]
+      if (value === "read-only" || value === "workspace-write") {
+        options.sandboxOverride = value
+      } else if (value === "danger-full-access") {
+        throw new Error("Use --full-access to run without a sandbox; it requires confirmation")
+      } else {
+        throw new Error(`--sandbox expects read-only or workspace-write, got ${value ?? "nothing"}`)
+      }
+    } else if (argument.startsWith("-")) {
+      throw new Error(`Unknown option ${argument}`)
+    } else if (path === undefined) {
+      path = argument
+    } else {
+      throw new Error("Expected at most one project path")
+    }
+  }
+
+  return { path, options }
+}
+
 async function main(): Promise<void> {
+  const { installSignalHandlers } = await import("./core/lifecycle.ts")
+  installSignalHandlers()
+
   const args = process.argv.slice(2)
 
   if (args.includes("--help") || args.includes("-h")) {
@@ -56,20 +96,20 @@ async function main(): Promise<void> {
     return
   }
 
-  const unknownOption = args.find((argument) => argument.startsWith("-"))
-  if (unknownOption) throw new Error(`Unknown option ${unknownOption}`)
-  if (args.length > 1) throw new Error("Expected at most one project path")
+  const { path, options } = parseAppArguments(args)
 
   const { inspectProject } = await import("./core/preflight.ts")
-  const project = await inspectProject(args[0] ?? process.cwd())
+  const project = await inspectProject(path ?? process.cwd())
   const { runWelcome } = await import("./tui/run-welcome.tsx")
-  await runWelcome(project)
+  await runWelcome(project, options)
 }
 
-try {
-  await main()
-} catch (error) {
-  const message = error instanceof Error ? error.message : String(error)
-  process.stderr.write(`agent: ${message}\n`)
-  process.exitCode = 1
+if (import.meta.main) {
+  try {
+    await main()
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    process.stderr.write(`agent: ${message}\n`)
+    process.exitCode = 1
+  }
 }

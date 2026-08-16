@@ -15,9 +15,14 @@ import type { WarningNotification } from "./generated/v2/WarningNotification.ts"
 import type { JsonRpcNotification } from "./json-rpc.ts"
 
 export class CodexEventNormalizer {
-  #sequence = 0
+  #sequence: number
 
-  constructor(readonly localSessionId: string) {}
+  constructor(
+    readonly localSessionId: string,
+    startSequence = 0,
+  ) {
+    this.#sequence = startSequence
+  }
 
   normalize(notification: JsonRpcNotification): AgentEvent[] {
     const raw = notification.params
@@ -229,7 +234,7 @@ function ids(params: { threadId: string; turnId: string; itemId?: string }) {
   return { threadId: params.threadId, turnId: params.turnId, itemId: params.itemId }
 }
 
-function normalizeItem(item: ThreadItem, fallbackStatus: ItemStatus): AgentEventInput | undefined {
+export function normalizeItem(item: ThreadItem, fallbackStatus: ItemStatus): AgentEventInput | undefined {
   switch (item.type) {
     case "commandExecution":
       return {

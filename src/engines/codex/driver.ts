@@ -1,7 +1,9 @@
 import {
   type AgentEvent,
+  type AgentEventInput,
   AsyncQueue,
   type UserInput as CoreUserInput,
+  defaultSessionPolicy,
   type EngineCapabilities,
   type EngineDecision,
   type EngineDriver,
@@ -23,7 +25,7 @@ import type { TurnStartParams } from "./generated/v2/TurnStartParams.ts"
 import type { TurnStartResponse } from "./generated/v2/TurnStartResponse.ts"
 import type { UserInput } from "./generated/v2/UserInput.ts"
 import type { JsonRpcRequest } from "./json-rpc.ts"
-import { CodexEventNormalizer } from "./normalize.ts"
+import { CodexEventNormalizer, normalizeItem } from "./normalize.ts"
 
 const CODEX_CAPABILITIES: EngineCapabilities = {
   nativeTranscript: true,
@@ -131,7 +133,7 @@ class CodexSession implements EngineSession {
     readonly options: OpenSessionOptions,
   ) {
     this.events = this.#eventQueue
-    this.#normalizer = new CodexEventNormalizer(options.localSessionId)
+    this.#normalizer = new CodexEventNormalizer(options.localSessionId, options.firstSequence ?? 0)
     this.#unsubscribeNotification = client.process.connection.onNotification((notification) => {
       const notificationThreadId = getStringField(notification.params, "threadId")
       if (this.#threadId && notificationThreadId && notificationThreadId !== this.#threadId) return
@@ -214,14 +216,16 @@ class CodexSession implements EngineSession {
   }
 
   async open(): Promise<void> {
+    const policy = this.options.policy ?? defaultSessionPolicy
     const common = {
       cwd: this.options.cwd,
       model: this.options.model,
-      approvalPolicy: "on-request" as const,
+      approvalPolicy: policy.approvalPolicy,
       approvalsReviewer: "user" as const,
-      sandbox: "workspace-write" as const,
+      sandbox: policy.sandbox,
     }
 
+    let resumedThread: ThreadResumeResponse["thread"] | undefined
     if (this.options.nativeSessionId) {
       const params: ThreadResumeParams = { threadId: this.options.nativeSessionId, ...common }
       const response = await this.client.process.connection.request<ThreadResumeResponse>(
@@ -230,6 +234,7 @@ class CodexSession implements EngineSession {
       )
       this.#threadId = response.thread.id
       this.#model = response.model
+      resumedThread = response.thread
     } else {
       const params: ThreadStartParams = { ...common, ephemeral: false }
       const response = await this.client.process.connection.request<ThreadStartResponse>(
@@ -251,6 +256,46 @@ class CodexSession implements EngineSession {
         },
       ),
     )
+
+    if (resumedThread) this.#reconcileResumedTurns(resumedThread)
+  }
+
+  /** Synthesizes events for provider turns missing from local history so both sides converge. */
+  #reconcileResumedTurns(thread: ThreadResumeResponse["thread"]): void {
+    const known = new Set(this.options.knownTurnIds ?? [])
+    for (const turn of thread.turns ?? []) {
+      if (known.has(turn.id)) continue
+
+      const native = { threadId: thread.id, turnId: turn.id }
+      const push = (event: AgentEventInput, itemId?: string, sensitive = false) => {
+        this.#eventQueue.push(
+          this.#normalizer.event("thread/resume", undefined, { ...native, itemId }, event, sensitive),
+        )
+      }
+
+      push({ kind: "turn.started", payload: {} })
+      for (const item of turn.items) {
+        if (item.type === "userMessage") {
+          const text = item.content
+            .map((input) => (input.type === "text" ? input.text : ""))
+            .filter(Boolean)
+            .join("\n")
+          push({ kind: "user.message", payload: { id: item.id, text } }, item.id, true)
+        } else if (item.type === "agentMessage") {
+          push({ kind: "message.completed", payload: { id: item.id, text: item.text } }, item.id, true)
+        } else if (item.type === "reasoning") {
+          const text = (item.summary.length > 0 ? item.summary : item.content).join("\n")
+          push({ kind: "reasoning.completed", payload: { id: item.id, text } }, item.id, true)
+        } else {
+          const normalized = normalizeItem(item, turn.status === "inProgress" ? "failed" : "completed")
+          if (normalized) push(normalized, item.id, true)
+        }
+      }
+      push({
+        kind: "turn.completed",
+        payload: { status: turn.status === "inProgress" ? "failed" : turn.status },
+      })
+    }
   }
 
   async send(input: CoreUserInput): Promise<void> {

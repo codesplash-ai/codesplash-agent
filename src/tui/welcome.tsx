@@ -2,6 +2,7 @@ import type { ThemeMode } from "@opentui/core"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react"
 import { useCallback, useEffect, useState } from "react"
 import type { EngineProbe, ThemePreference } from "../core/index.ts"
+import { suspendToShell } from "../core/index.ts"
 import { ClaudeDriver } from "../engines/claude/index.ts"
 import { CodexDriver } from "../engines/codex/index.ts"
 import {
@@ -105,6 +106,11 @@ export function WelcomeApp({
     if (key.ctrl && key.name === "c") {
       key.preventDefault()
       onAction("quit")
+      return
+    }
+    if (key.ctrl && key.name === "z") {
+      key.preventDefault()
+      suspendToShell(renderer)
       return
     }
     if (key.name === "q" || key.name === "escape") {

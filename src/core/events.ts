@@ -37,7 +37,7 @@ export type AgentEvent =
   | EventOf<"message.delta", { id: string; text: string }>
   | EventOf<"message.completed", { id: string; text?: string }>
   | EventOf<"reasoning.delta", { id: string; text: string }>
-  | EventOf<"reasoning.completed", { id: string }>
+  | EventOf<"reasoning.completed", { id: string; text?: string }>
   | EventOf<"item.updated", { id: string; label: string; output?: string; status: ItemStatus }>
   | EventOf<"plan.updated", { steps: Array<{ text: string; completed: boolean }> }>
   | EventOf<"diff.updated", { id: string; path?: string; unified: string }>

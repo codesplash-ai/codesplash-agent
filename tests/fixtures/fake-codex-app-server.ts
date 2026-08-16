@@ -52,14 +52,39 @@ function handleMessage(message: {
 
   if (message.method === "thread/start") {
     send({ id: message.id, result: { thread: { id: "thread-1" }, model: "gpt-test" } })
+    sendPolicyEcho("thread/start", "thread-1", message.params)
     return
   }
 
   if (message.method === "thread/resume") {
+    const threadId = String(message.params?.threadId)
+    if (threadId === "thread-gone") {
+      send({ id: message.id, error: { code: -32600, message: "thread not found" } })
+      return
+    }
+    const turns =
+      threadId === "thread-existing"
+        ? [
+            {
+              id: "turn-past",
+              status: "completed",
+              items: [
+                {
+                  type: "userMessage",
+                  id: "past-user",
+                  clientId: null,
+                  content: [{ type: "text", text: "earlier prompt", text_elements: [] }],
+                },
+                { type: "agentMessage", id: "past-message", text: "earlier reply", phase: null },
+              ],
+            },
+          ]
+        : []
     send({
       id: message.id,
-      result: { thread: { id: message.params?.threadId }, model: "gpt-test" },
+      result: { thread: { id: threadId, turns }, model: "gpt-test" },
     })
+    sendPolicyEcho("thread/resume", threadId, message.params)
     return
   }
 
@@ -197,4 +222,12 @@ function handleMessage(message: {
 
 function send(message: unknown): void {
   process.stdout.write(`${JSON.stringify(message)}\n`)
+}
+
+/** Echoes the open method and received sandbox/approval policy so tests can assert the plumbing. */
+function sendPolicyEcho(method: string, threadId: string, params: Record<string, unknown> | undefined): void {
+  send({
+    method: "warning",
+    params: { threadId, message: `policy:${method}:${params?.sandbox}:${params?.approvalPolicy}` },
+  })
 }

@@ -1,20 +1,31 @@
 import type { EngineDecision, EngineSession, UserInput } from "./engine.ts"
+import type { AgentEvent } from "./events.ts"
 import type { AppViewState } from "./reducer.ts"
 import { initialAppViewState, reduceAgentEvent } from "./reducer.ts"
 
 export type SessionStateListener = (state: AppViewState) => void
 
+export type SessionControllerOptions = {
+  /** Synchronous per-event tap invoked before reduction (e.g. the session recorder). */
+  onEvent?: (event: AgentEvent) => void
+  /** Starting view state, e.g. a transcript replayed from the persisted event log. */
+  initialState?: AppViewState
+}
+
 /** Owns the engine event stream and exposes only provider-independent view state to renderers. */
 export class SessionController {
   readonly #listeners = new Set<SessionStateListener>()
   readonly #session: EngineSession
-  #state: AppViewState = freshInitialState()
+  readonly #onEvent: ((event: AgentEvent) => void) | undefined
+  #state: AppViewState
   #consumePromise: Promise<void> | undefined
   #notificationTimer: ReturnType<typeof setTimeout> | undefined
   #closed = false
 
-  constructor(session: EngineSession) {
+  constructor(session: EngineSession, options: SessionControllerOptions = {}) {
     this.#session = session
+    this.#onEvent = options.onEvent
+    this.#state = options.initialState ?? freshInitialState()
   }
 
   get state(): AppViewState {
@@ -62,6 +73,7 @@ export class SessionController {
   async #consume(): Promise<void> {
     try {
       for await (const event of this.#session.events) {
+        this.#onEvent?.(event)
         this.#state = reduceAgentEvent(this.#state, event)
         if (event.kind === "message.delta" || event.kind === "reasoning.delta") this.#scheduleNotify()
         else this.#flushNotify()

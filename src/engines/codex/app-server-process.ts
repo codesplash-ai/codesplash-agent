@@ -1,3 +1,4 @@
+import { registerChildProcess } from "../../core/lifecycle.ts"
 import { redactSensitiveText } from "../../core/redaction.ts"
 import { JsonRpcConnection, type JsonRpcConnectionOptions, type JsonRpcTransport } from "./json-rpc.ts"
 
@@ -31,6 +32,9 @@ export function spawnCodexAppServer(options: CodexAppServerProcessOptions = {}):
     stdout: "pipe",
     stderr: "pipe",
   })
+
+  const unregisterChild = registerChildProcess(child)
+  void child.exited.finally(unregisterChild)
 
   const stderr = collectBoundedText(child.stderr, options.maxStderrBytes ?? DEFAULT_STDERR_BYTES)
   const shutdownTimeoutMs = options.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS

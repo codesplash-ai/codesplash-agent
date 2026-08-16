@@ -17,8 +17,10 @@ import type {
   PendingRequest,
   ProjectPreflight,
   SessionController,
+  SessionPolicy,
   TranscriptItem,
 } from "../core/index.ts"
+import { defaultSessionPolicy, suspendToShell } from "../core/index.ts"
 import type { BrandPalette } from "./brand.ts"
 
 export type CodexSessionAction = "home" | "reconnect"
@@ -121,10 +123,17 @@ type CodexSessionAppProps = {
   controller: SessionController
   palette: BrandPalette
   project: ProjectPreflight
+  policy?: SessionPolicy
   onAction(action: CodexSessionAction): void
 }
 
-export function CodexSessionApp({ controller, palette, project, onAction }: CodexSessionAppProps) {
+export function CodexSessionApp({
+  controller,
+  palette,
+  project,
+  policy = defaultSessionPolicy,
+  onAction,
+}: CodexSessionAppProps) {
   const renderer = useRenderer()
   const { width: terminalWidth } = useTerminalDimensions()
   const textareaRef = useRef<TextareaRenderable>(null)
@@ -229,6 +238,12 @@ export function CodexSessionApp({ controller, palette, project, onAction }: Code
     if (key.ctrl && (key.name === "c" || key.name === "q")) {
       key.preventDefault()
       onAction("home")
+      return
+    }
+
+    if (key.ctrl && key.name === "z") {
+      key.preventDefault()
+      suspendToShell(renderer)
       return
     }
 
@@ -387,10 +402,14 @@ export function CodexSessionApp({ controller, palette, project, onAction }: Code
 
       <box style={{ height: 1, flexDirection: "row", justifyContent: "space-between" }}>
         <text fg={error ? palette.destructive : palette.muted}>{error ?? statusHelp(state)}</text>
-        <text fg={palette.accent}>
-          codex{state.model ? `/${state.model}` : ""}
-          {context ? ` · ${context}` : ""} · workspace-write · {state.sessionStatus}
-        </text>
+        <box style={{ height: 1, flexDirection: "row" }}>
+          <text fg={palette.accent}>
+            codex{state.model ? `/${state.model}` : ""}
+            {context ? ` · ${context}` : ""} ·{" "}
+          </text>
+          <PolicyBadge policy={policy} palette={palette} />
+          <text fg={palette.accent}> · {state.sessionStatus}</text>
+        </box>
       </box>
 
       <Approval request={state.pendingRequest} palette={palette} />
@@ -577,6 +596,18 @@ function ConversationOutline({
       </scrollbox>
     </box>
   )
+}
+
+/** Renders in every session state so dangerous modes stay visible, not one-time notices. */
+export function PolicyBadge({ policy, palette }: { policy: SessionPolicy; palette: BrandPalette }) {
+  if (policy.sandbox === "danger-full-access") {
+    return (
+      <text fg={palette.background} bg={palette.destructive}>
+        <b> FULL ACCESS </b>
+      </text>
+    )
+  }
+  return <text fg={palette.accent}>{policy.sandbox}</text>
 }
 
 function Approval({ request, palette }: { request?: PendingRequest; palette: BrandPalette }) {
