@@ -93,25 +93,31 @@ describe("agent config", () => {
     expect(loadConfig(path)).rejects.toThrow("full access requires the --full-access flag per session")
   })
 
+  // The implementation uses node:path.join, so expected values are built the same
+  // way — on Windows hosts the separators are backslashes for every platform arg.
   test("uses the platform config directory and supports a test override", () => {
     expect(configDirectory({ CODESPLASH_AGENT_CONFIG_DIR: "/custom" }, "darwin", "/Users/test")).toBe(
       "/custom",
     )
     expect(configDirectory({}, "darwin", "/Users/test")).toBe(
-      "/Users/test/Library/Application Support/codesplash-agent",
+      join("/Users/test", "Library", "Application Support", "codesplash-agent"),
     )
-    expect(configDirectory({ XDG_CONFIG_HOME: "/xdg" }, "linux", "/home/test")).toBe("/xdg/codesplash-agent")
+    expect(configDirectory({ XDG_CONFIG_HOME: "/xdg" }, "linux", "/home/test")).toBe(
+      join("/xdg", "codesplash-agent"),
+    )
   })
 
   test("uses the platform data directory and supports a test override", () => {
     expect(dataDirectory({ CODESPLASH_AGENT_DATA_DIR: "/data" }, "linux", "/home/test")).toBe("/data")
     expect(dataDirectory({}, "darwin", "/Users/test")).toBe(
-      "/Users/test/Library/Application Support/codesplash-agent",
+      join("/Users/test", "Library", "Application Support", "codesplash-agent"),
     )
     expect(dataDirectory({ XDG_DATA_HOME: "/xdg-data" }, "linux", "/home/test")).toBe(
-      "/xdg-data/codesplash-agent",
+      join("/xdg-data", "codesplash-agent"),
     )
-    expect(dataDirectory({}, "linux", "/home/test")).toBe("/home/test/.local/share/codesplash-agent")
+    expect(dataDirectory({}, "linux", "/home/test")).toBe(
+      join("/home/test", ".local", "share", "codesplash-agent"),
+    )
   })
 })
 

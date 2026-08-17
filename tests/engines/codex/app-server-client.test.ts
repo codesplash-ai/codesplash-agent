@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test"
+import { fileURLToPath } from "node:url"
 import { CodexAppServerClient } from "../../../src/engines/codex/app-server-client.ts"
 
 describe("CodexAppServerClient", () => {
   test("initializes and reads account state through a child process", async () => {
     const fixture = new URL("../../fixtures/fake-codex-app-server.ts", import.meta.url)
     const client = new CodexAppServerClient({
-      command: [process.execPath, fixture.pathname],
+      command: [process.execPath, fileURLToPath(fixture)],
       shutdownTimeoutMs: 100,
     })
 

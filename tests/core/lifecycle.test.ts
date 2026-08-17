@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import { fileURLToPath } from "node:url"
 import {
   deferSignalExit,
   registerChildProcess,
@@ -77,7 +78,7 @@ describe("lifecycle", () => {
     "a parent that exits without cleanup SIGKILLs its registered children",
     async () => {
       const fixture = new URL("../fixtures/orphan-parent.ts", import.meta.url)
-      const parent = Bun.spawn([process.execPath, fixture.pathname], {
+      const parent = Bun.spawn([process.execPath, fileURLToPath(fixture)], {
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",

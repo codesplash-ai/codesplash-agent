@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 import type { AppViewState } from "../../src/core/index.ts"
 import {
   initialAppViewState,
@@ -24,7 +25,7 @@ afterEach(async () => {
 
 function createDriver(): CodexDriver {
   return new CodexDriver({
-    command: [process.execPath, fixture.pathname],
+    command: [process.execPath, fileURLToPath(fixture)],
     shutdownTimeoutMs: 100,
   })
 }

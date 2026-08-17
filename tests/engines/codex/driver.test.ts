@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { fileURLToPath } from "node:url"
 import type { AgentEvent, EngineSession } from "../../../src/core/index.ts"
 import { CodexDriver } from "../../../src/engines/codex/driver.ts"
 
@@ -6,7 +7,7 @@ const fixture = new URL("../../fixtures/fake-codex-app-server.ts", import.meta.u
 
 function createDriver(): CodexDriver {
   return new CodexDriver({
-    command: [process.execPath, fixture.pathname],
+    command: [process.execPath, fileURLToPath(fixture)],
     shutdownTimeoutMs: 100,
   })
 }

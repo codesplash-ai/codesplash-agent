@@ -4,12 +4,14 @@
  * Cross-compilation is deliberately absent — OpenTUI ships native libraries, so each
  * CI runner builds its own target and only smoke-passing targets are advertised.
  */
+
 import { createHash } from "node:crypto"
 import { chmod, mkdir, rm } from "node:fs/promises"
 import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { APP_VERSION } from "../src/version.ts"
 
-const projectRoot = new URL("..", import.meta.url).pathname
+const projectRoot = fileURLToPath(new URL("..", import.meta.url))
 const outDirectory = join(projectRoot, "out")
 const isWindows = process.platform === "win32"
 const binaryName = isWindows ? "agent.exe" : "agent"

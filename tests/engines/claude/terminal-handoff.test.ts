@@ -1,11 +1,15 @@
 import { describe, expect, test } from "bun:test"
+import { fileURLToPath } from "node:url"
 import { runTerminalHandoff } from "../../../src/engines/claude/terminal-handoff.ts"
 
 const fixture = new URL("../../fixtures/fake-terminal-child.ts", import.meta.url)
 
 function fixtureCommand(...args: string[]): string[] {
-  return [process.execPath, fixture.pathname, ...args]
+  return [process.execPath, fileURLToPath(fixture), ...args]
 }
+
+/** SIGINT exit-code conventions and signalCode reporting are POSIX semantics. */
+const posixTest = test.skipIf(process.platform === "win32")
 
 describe("runTerminalHandoff", () => {
   test("returns the child exit status and removes signal handlers", async () => {
@@ -19,7 +23,7 @@ describe("runTerminalHandoff", () => {
     expect(process.listenerCount("SIGINT")).toBe(before)
   })
 
-  test("forwards SIGINT without terminating the parent", async () => {
+  posixTest("forwards SIGINT without terminating the parent", async () => {
     const handoff = runTerminalHandoff({ command: fixtureCommand("wait"), stdio: "ignore" })
     await Bun.sleep(40)
     process.emit("SIGINT")
@@ -29,7 +33,7 @@ describe("runTerminalHandoff", () => {
     expect(result.signalCode).toBeNull()
   })
 
-  test("force kills the child when the handoff is aborted", async () => {
+  posixTest("force kills the child when the handoff is aborted", async () => {
     const controller = new AbortController()
     const handoff = runTerminalHandoff({
       command: fixtureCommand("wait"),

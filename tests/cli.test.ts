@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { fileURLToPath } from "node:url"
 import packageJson from "../package.json"
 import { parseAppArguments } from "../src/cli.ts"
 import { effectiveHistoryEnabled, effectiveSessionPolicy } from "../src/core/app-options.ts"
@@ -49,7 +50,7 @@ describe("version and doctor", () => {
 
   test("--version prints the version and exits cleanly", async () => {
     const child = Bun.spawn([process.execPath, "src/cli.ts", "--version"], {
-      cwd: new URL("..", import.meta.url).pathname,
+      cwd: fileURLToPath(new URL("..", import.meta.url)),
       stdout: "pipe",
       stderr: "pipe",
     })
@@ -60,7 +61,7 @@ describe("version and doctor", () => {
 
   test("--doctor reports diagnostics and always exits 0", async () => {
     const child = Bun.spawn([process.execPath, "src/cli.ts", "--doctor"], {
-      cwd: new URL("..", import.meta.url).pathname,
+      cwd: fileURLToPath(new URL("..", import.meta.url)),
       stdout: "pipe",
       stderr: "pipe",
     })
