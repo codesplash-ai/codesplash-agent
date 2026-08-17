@@ -4,7 +4,7 @@
 repo-public migration steps
 **Reviewed:** 2026-08-15
 **Progress updated:** 2026-08-16
-**Source:** [`docs/agent-plan.md`](./agent-plan.md)
+**Source:** `docs/private/agent-plan.md` (local planning memo, untracked)
 
 ## 1. Recommended direction
 
