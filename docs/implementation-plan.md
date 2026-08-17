@@ -29,7 +29,7 @@ Do not put native Claude stream-JSON mode, custom tools, an MCP marketplace, sub
 | 2 — Durable sessions and safety | **Implemented** | Sessions persist as coalesced JSONL plus atomic metadata, resume through a project-scoped picker backed by `thread/resume` with reconciliation, and policy/`--no-history`/full-access/signal handling are in place with all four exit gates covered by offline tests. The manual dogfood checklist remains before calling the milestone closed. |
 | 3 — Claude official-CLI surface | **Implemented** | Diagnostics-only probe, tested real-terminal handoff, and launch metadata: the app supplies its own session ID through the documented `--session-id` flag, resumes with `--resume` from an engine-scoped picker, and stores no terminal output. Manual dogfood of a real login/permissions/slash-command/resume pass remains. |
 | 4 — Cockpit completion | **Implemented** | Slash commands (`/new /resume /engine /model /permissions /history /help /quit`), an F1 keyboard-help overlay, a paginated model picker with per-turn switching, rate-limit status, actionable error hints, and compact small-terminal layout are in. Copy relies on terminal-native selection; screen-reader layouts remain a residual. |
-| 5 — Alpha distribution | **Implemented** | Versioned BUSL-1.1 package with `--version`/`--doctor`, release build script (compile → smoke → archive → SHA-256), full CI matrix (macOS arm64/x64, Linux x64/arm64, Windows experimental), tag-triggered release workflow publishing GitHub Releases + npm + Homebrew tap, CHANGELOG, and a release checklist. The macOS arm64 artifact passed a real local build/checksum/doctor smoke. First public release awaits the user-run migration: repo public, tap repo, `NPM_TOKEN`/`TAP_GITHUB_TOKEN`, tag `v0.1.0-alpha.1`. |
+| 5 — Alpha distribution | **Implemented** | Versioned BUSL-1.1 package with `--version`/`--doctor`, release build script (compile → smoke → archive → SHA-256), full CI matrix (macOS arm64/x64, Linux x64/arm64, Windows experimental), tag-triggered release workflow publishing GitHub Releases + npm + Homebrew tap, CHANGELOG, and a release checklist. The macOS arm64 artifact passed a real local build/checksum/doctor smoke. First public release awaits the user-run migration: repo public, tap repo, `NPM_TOKEN`/`TAP_GITHUB_TOKEN`, tag `v0.1.0`. |
 | 6 — Optional native Claude/extensibility | Deferred | Requires a fresh authentication/product decision. |
 
 Current Milestone 0 checklist:
@@ -571,7 +571,7 @@ Exit gates:
 
 ### Milestone 5 implementation checkpoint — 2026-08-16
 
-- [x] Package released-ready: version `0.1.0-alpha.1`, `private` removed, BUSL-1.1 license (Change Date
+- [x] Package released-ready: version `0.1.0`, `private` removed, BUSL-1.1 license (Change Date
       2030-08-16 → Apache-2.0), repository metadata, npm `files` whitelist, `publishConfig.access: public`.
 - [x] `agent --version` and `agent --doctor` (runtime, config/data paths, Git, both engine probes; always
       exits 0 — findings, not failures). `src/version.ts` is test-enforced against package.json.
@@ -591,7 +591,7 @@ Exit gates:
 **Remaining — user-run migration before the first public release:** review tracked docs for anything that
 belongs in `docs/private/`; flip the repo public; create `codesplash-ai/homebrew-tap`; add `NPM_TOKEN` and
 `TAP_GITHUB_TOKEN` secrets; confirm the npm name is free; complete the M2–M4 dogfood checklists; tag
-`v0.1.0-alpha.1`.
+`v0.1.0`.
 
 ### Milestone 6 — Optional native Claude mode and extensibility
 

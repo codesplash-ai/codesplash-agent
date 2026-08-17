@@ -1,6 +1,6 @@
 {
   "name": "codesplash-agent",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0",
   "description": "Terminal cockpit for Codex and Claude Code — your AI accounts, one terminal, credentials stay on your machine.",
   "license": "BUSL-1.1",
   "type": "module",
@@ -32,6 +32,11 @@
     "dev": "bun src/cli.ts",
     "format": "biome check --write .",
     "format:check": "biome check .",
+    "preversion": "bun run check",
+    "version": "bun scripts/sync-version.ts && git add src/version.ts",
+    "release:patch": "npm version patch && git push origin HEAD && git push origin --tags",
+    "release:minor": "npm version minor && git push origin HEAD && git push origin --tags",
+    "release:major": "npm version major && git push origin HEAD && git push origin --tags",
     "start": "bun dist/cli.js",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
