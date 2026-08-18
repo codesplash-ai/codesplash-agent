@@ -66,8 +66,10 @@ jobs:
     name: publish release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # gh release create
+      id-token: write # npm trusted publishing (OIDC)
     env:
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
       TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v7
@@ -75,6 +77,11 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
+
+      # npm trusted publishing requires npm >= 11.5.1 and Node >= 22.14.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
 
       - name: Download artifacts
         uses: actions/download-artifact@v8
@@ -100,17 +107,19 @@ jobs:
             --notes-file "$notes_file" \
             artifacts/codesplash-agent-* artifacts/SHA256SUMS
 
-      - name: Publish to npm
-        if: env.NPM_TOKEN != ''
+      # Auth is OIDC trusted publishing (no token): the codesplash-agent package on npm
+      # must list this repo + release.yml as a trusted publisher. Provenance is automatic.
+      - name: Publish to npm (trusted publishing)
         run: |
+          version="${GITHUB_REF_NAME#v}"
+          if npm view "codesplash-agent@${version}" version >/dev/null 2>&1; then
+            echo "::notice::codesplash-agent@${version} already on npm — publish skipped"
+            exit 0
+          fi
+          npm install -g npm@latest
           bun install --frozen-lockfile
           bun run build
-          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
           npm publish --access public
-
-      - name: Notice when npm publish was skipped
-        if: env.NPM_TOKEN == ''
-        run: echo "::notice::NPM_TOKEN secret not set — npm publish skipped"
 
       - name: Update Homebrew tap
         if: env.TAP_GITHUB_TOKEN != ''
