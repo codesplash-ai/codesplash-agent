@@ -6,14 +6,14 @@ function printHelp() {
   process.stdout.write(`CodeSplash Agent
 
 Usage:
-  agent [path] [--no-history] [--sandbox <mode>] [--full-access]
-  agent --doctor
-  agent --version
-  agent --fixture
-  agent --codex-smoke
-  agent --codex-live-smoke
-  agent --claude-handoff-smoke
-  agent --help
+  codesplash [path] [--no-history] [--sandbox <mode>] [--full-access]
+  codesplash --doctor
+  codesplash --version
+  codesplash --fixture
+  codesplash --codex-smoke
+  codesplash --codex-live-smoke
+  codesplash --claude-handoff-smoke
+  codesplash --help
 
 Options:
   path           Project directory (defaults to the current directory)
@@ -125,7 +125,7 @@ if (import.meta.main) {
     await main()
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    process.stderr.write(`agent: ${message}\n`)
+    process.stderr.write(`codesplash: ${message}\n`)
     process.exitCode = 1
   }
 }

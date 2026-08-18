@@ -45,21 +45,21 @@ jobs:
       - name: Launch smoke (POSIX)
         if: runner.os != 'Windows'
         run: |
-          ./out/agent --version
-          ./out/agent --doctor
+          ./out/codesplash --version
+          ./out/codesplash --doctor
 
       - name: Launch smoke (Windows)
         if: runner.os == 'Windows'
         run: |
-          .\out\agent.exe --version
-          .\out\agent.exe --doctor
+          .\out\codesplash.exe --version
+          .\out\codesplash.exe --doctor
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: agent-${{ matrix.label }}
+          name: codesplash-agent-${{ matrix.label }}
           path: |
-            out/agent-*.tar.gz
-            out/agent-*.zip
-            out/agent-*.sha256
+            out/codesplash-agent-*.tar.gz
+            out/codesplash-agent-*.zip
+            out/codesplash-agent-*.sha256
           if-no-files-found: error

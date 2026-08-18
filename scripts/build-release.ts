@@ -14,9 +14,9 @@ import { APP_VERSION } from "../src/version.ts"
 const projectRoot = fileURLToPath(new URL("..", import.meta.url))
 const outDirectory = join(projectRoot, "out")
 const isWindows = process.platform === "win32"
-const binaryName = isWindows ? "agent.exe" : "agent"
+const binaryName = isWindows ? "codesplash.exe" : "codesplash"
 const target = `${process.platform}-${process.arch}`
-const archiveName = `agent-${APP_VERSION}-${target}.${isWindows ? "zip" : "tar.gz"}`
+const archiveName = `codesplash-agent-${APP_VERSION}-${target}.${isWindows ? "zip" : "tar.gz"}`
 
 async function run(command: string[], cwd = projectRoot): Promise<void> {
   const child = Bun.spawn(command, { cwd, stdin: "ignore", stdout: "inherit", stderr: "inherit" })

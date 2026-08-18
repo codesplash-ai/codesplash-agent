@@ -38,7 +38,7 @@ export async function runWelcome(
       try {
         await launchClaude(project, config, options)
       } catch (error) {
-        process.stderr.write(`agent: ${error instanceof Error ? error.message : String(error)}\n`)
+        process.stderr.write(`codesplash: ${error instanceof Error ? error.message : String(error)}\n`)
       }
       continue
     }
@@ -47,14 +47,14 @@ export async function runWelcome(
       try {
         if ((await openCodex(project, config, options)) === "quit") return
       } catch (error) {
-        process.stderr.write(`agent: ${error instanceof Error ? error.message : String(error)}\n`)
+        process.stderr.write(`codesplash: ${error instanceof Error ? error.message : String(error)}\n`)
       }
       continue
     }
 
     const binary = Bun.which("codex")
     if (!binary) {
-      process.stderr.write("agent: Codex CLI is not installed.\n")
+      process.stderr.write("codesplash: Codex CLI is not installed.\n")
       continue
     }
 

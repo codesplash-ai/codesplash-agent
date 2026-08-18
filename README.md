@@ -37,13 +37,13 @@ npm i -g codesplash-agent   # or: bun add -g codesplash-agent
 ### Release binary (no runtime required)
 
 Download the archive for your platform from
-[Releases](https://github.com/codesplash-ai/codesplash-agent/releases), verify it, and put `agent`
+[Releases](https://github.com/codesplash-ai/codesplash-agent/releases), verify it, and put `codesplash`
 on your PATH:
 
 ```sh
-shasum -a 256 -c agent-<version>-<os>-<arch>.tar.gz.sha256
-tar -xzf agent-<version>-<os>-<arch>.tar.gz
-mv agent /usr/local/bin/
+shasum -a 256 -c codesplash-agent-<version>-<os>-<arch>.tar.gz.sha256
+tar -xzf codesplash-agent-<version>-<os>-<arch>.tar.gz
+mv codesplash /usr/local/bin/
 ```
 
 ### Supported platforms
@@ -61,11 +61,11 @@ Only targets that pass real launch smoke tests in CI are advertised. Current sta
 ## Use
 
 ```sh
-agent [path]              # open the cockpit in a project (defaults to cwd)
-agent --doctor            # non-interactive diagnostics: runtime, engines, auth, paths
-agent --no-history        # write no session files this run
-agent --sandbox read-only # override the Codex sandbox (read-only | workspace-write)
-agent --full-access       # run Codex without a sandbox (requires typed confirmation)
+codesplash [path]              # open the cockpit in a project (defaults to cwd)
+codesplash --doctor            # non-interactive diagnostics: runtime, engines, auth, paths
+codesplash --no-history        # write no session files this run
+codesplash --sandbox read-only # override the Codex sandbox (read-only | workspace-write)
+codesplash --full-access       # run Codex without a sandbox (requires typed confirmation)
 ```
 
 Inside a session: `/help` (or F1) shows every key binding and command — `/new`, `/resume`,

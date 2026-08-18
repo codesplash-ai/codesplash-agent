@@ -136,7 +136,7 @@ export class SessionRecorder {
         await task()
       } catch (error) {
         this.#failure = error instanceof Error ? error : new Error(String(error))
-        process.stderr.write(`agent: session history disabled: ${this.#failure.message}\n`)
+        process.stderr.write(`codesplash: session history disabled: ${this.#failure.message}\n`)
       }
     })
   }

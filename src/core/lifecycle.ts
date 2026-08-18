@@ -80,7 +80,7 @@ export async function runCleanups(): Promise<void> {
       await cleanup?.()
     } catch (error) {
       process.stderr.write(
-        `agent: cleanup failed: ${error instanceof Error ? error.message : String(error)}\n`,
+        `codesplash: cleanup failed: ${error instanceof Error ? error.message : String(error)}\n`,
       )
     }
   }
