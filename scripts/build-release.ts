@@ -24,6 +24,67 @@ async function run(command: string[], cwd = projectRoot): Promise<void> {
   if (exitCode !== 0) throw new Error(`${command.join(" ")} exited with status ${exitCode}`)
 }
 
+/**
+ * Developer ID signing + notarization, env-gated so local/unconfigured builds still work
+ * (Bun leaves an ad-hoc signature). Bare executables cannot be stapled — Gatekeeper
+ * verifies the notarization ticket online — so notarizing the binary before archiving
+ * is sufficient. Bun-compiled binaries JIT, hence the entitlements (see the plist).
+ */
+async function signAndNotarizeMacBinary(binaryPath: string): Promise<void> {
+  const identity = process.env.APPLE_SIGNING_IDENTITY
+  if (!identity) {
+    process.stdout.write("APPLE_SIGNING_IDENTITY not set — leaving Bun's ad-hoc signature\n")
+    return
+  }
+
+  const entitlementsPath = join(projectRoot, "packaging", "macos", "entitlements.plist")
+  await run([
+    "codesign",
+    "--force",
+    "--options",
+    "runtime",
+    "--timestamp",
+    "--entitlements",
+    entitlementsPath,
+    "--sign",
+    identity,
+    binaryPath,
+  ])
+  await run(["codesign", "--verify", "--strict", "--verbose=2", binaryPath])
+
+  const { APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID } = process.env
+  if (!APPLE_ID || !APPLE_PASSWORD || !APPLE_TEAM_ID) {
+    process.stdout.write("APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID not set — skipping notarization\n")
+    return
+  }
+
+  const zipPath = `${binaryPath}.notarize.zip`
+  await run(["ditto", "-c", "-k", binaryPath, zipPath])
+  // notarytool's exit code does not reliably reflect an Invalid verdict; assert on output.
+  const submit = Bun.spawn(
+    [
+      "xcrun",
+      "notarytool",
+      "submit",
+      zipPath,
+      "--apple-id",
+      APPLE_ID,
+      "--password",
+      APPLE_PASSWORD,
+      "--team-id",
+      APPLE_TEAM_ID,
+      "--wait",
+    ],
+    { cwd: projectRoot, stdin: "ignore", stdout: "pipe", stderr: "inherit" },
+  )
+  const [submitOutput, submitExit] = await Promise.all([new Response(submit.stdout).text(), submit.exited])
+  process.stdout.write(submitOutput)
+  await rm(zipPath, { force: true })
+  if (submitExit !== 0 || !/status: Accepted/.test(submitOutput)) {
+    throw new Error(`Notarization did not report "status: Accepted" (exit ${submitExit})`)
+  }
+}
+
 async function main(): Promise<void> {
   await rm(outDirectory, { recursive: true, force: true })
   await mkdir(outDirectory, { recursive: true })
@@ -31,6 +92,7 @@ async function main(): Promise<void> {
   const binaryPath = join(outDirectory, binaryName)
   await run(["bun", "build", "src/cli.ts", "--compile", "--outfile", binaryPath])
   if (!isWindows) await chmod(binaryPath, 0o755)
+  if (process.platform === "darwin") await signAndNotarizeMacBinary(binaryPath)
 
   // Launch smoke: the compiled artifact must report the expected version before packaging.
   const smoke = Bun.spawn([binaryPath, "--version"], { stdout: "pipe", stderr: "pipe" })

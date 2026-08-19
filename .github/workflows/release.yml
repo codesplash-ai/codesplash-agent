@@ -12,6 +12,12 @@ jobs:
     name: build ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.experimental }}
+    env:
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     strategy:
       fail-fast: false
       matrix:
@@ -34,6 +40,16 @@ jobs:
 
       - name: Check
         run: bun run check
+
+      # Imports the Developer ID cert into a throwaway keychain and exports
+      # APPLE_SIGNING_IDENTITY; release:build then signs + notarizes the macOS binary.
+      - name: Add macOS signing certificate
+        if: runner.os == 'macOS' && env.MACOS_CERT_P12 != ''
+        run: chmod +x tools/add-macos-cert.sh && . ./tools/add-macos-cert.sh
+
+      - name: Notice when macOS signing was skipped
+        if: runner.os == 'macOS' && env.MACOS_CERT_P12 == ''
+        run: echo "::notice::MACOS_CERT_P12 secret not set — macOS binary ships ad-hoc signed (Gatekeeper will flag browser downloads)"
 
       # release:build compiles, launch-smokes (--version), archives, and checksums.
       # A target that fails its smoke produces no artifact and is not advertised.
