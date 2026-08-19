@@ -1,6 +1,6 @@
 {
   "name": "codesplash-agent",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Terminal cockpit for Codex and Claude Code — your AI accounts, one terminal, credentials stay on your machine.",
   "license": "BUSL-1.1",
   "type": "module",
