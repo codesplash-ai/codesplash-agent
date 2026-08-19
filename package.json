@@ -34,6 +34,7 @@
     "format:check": "biome check .",
     "preversion": "bun run check",
     "version": "bun scripts/sync-version.ts && git add src/version.ts",
+    "release:current": "bun run check && git tag -a \"v$npm_package_version\" -m \"CodeSplash Agent v$npm_package_version\" && git push --atomic origin HEAD \"refs/tags/v$npm_package_version\"",
     "release:patch": "npm version patch && git push origin HEAD && git push origin --tags",
     "release:minor": "npm version minor && git push origin HEAD && git push origin --tags",
     "release:major": "npm version major && git push origin HEAD && git push origin --tags",
