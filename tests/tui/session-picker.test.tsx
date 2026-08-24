@@ -51,12 +51,23 @@ describe("session picker", () => {
     expect(sandboxBadge(makeMeta({ engine: "claude", sandbox: undefined }))).toBe("official CLI")
   })
 
-  test("sessions of either engine resume when they carry a native session ID", () => {
+  test("codex and claude sessions resume when they carry a native session ID", () => {
     expect(isResumableSession(makeMeta())).toBe(true)
     expect(isResumableSession(makeMeta({ nativeSessionId: undefined }))).toBe(false)
     expect(isResumableSession(makeMeta({ engine: "claude", sandbox: undefined }))).toBe(true)
     expect(
       isResumableSession(makeMeta({ engine: "claude", sandbox: undefined, nativeSessionId: undefined })),
     ).toBe(false)
+  })
+
+  test("codesplash sessions are listed but never resumable, even with a native session ID", () => {
+    // The codesplash engine records nativeSessionId === localSessionId, but capabilities.resume
+    // is false: an in-process run has no provider thread to reopen.
+    expect(isResumableSession(makeMeta({ engine: "codesplash", nativeSessionId: "local-1" }))).toBe(false)
+    expect(isResumableSession(makeMeta({ engine: "codesplash", nativeSessionId: undefined }))).toBe(false)
+    expect(displaySessionStatus(makeMeta({ engine: "codesplash", lastStatus: "running" }))).toBe(
+      "interrupted",
+    )
+    expect(sandboxBadge(makeMeta({ engine: "codesplash" }))).toBe("workspace-write")
   })
 })

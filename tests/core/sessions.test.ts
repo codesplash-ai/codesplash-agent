@@ -143,6 +143,27 @@ describe("session store", () => {
     expect(sessions.map((meta) => meta.localSessionId)).toEqual(["good"])
   })
 
+  test("reads back and lists metas for every engine, including codesplash", async () => {
+    const root = await temporaryDirectory()
+    const store = new SessionStore(root)
+    const projectId = projectIdFor("/canonical/project")
+    await store.create(makeMeta({ localSessionId: "codex-session", engine: "codex" }))
+    await store.create(
+      makeMeta({
+        localSessionId: "codesplash-session",
+        engine: "codesplash",
+        updatedAt: "2026-08-17T00:00:00.000Z",
+      }),
+    )
+
+    const sessions = await listProjectSessions(projectId, root)
+    expect(sessions.map((meta) => meta.localSessionId)).toEqual(["codesplash-session", "codex-session"])
+    expect(sessions[0]?.engine).toBe("codesplash")
+
+    const reread = await readSessionMeta(join(root, projectId, "codesplash-session"))
+    expect(reread?.engine).toBe("codesplash")
+  })
+
   test("returns an empty list for a project with no sessions", async () => {
     const root = await temporaryDirectory()
     expect(await listProjectSessions(projectIdFor("/nowhere"), root)).toEqual([])

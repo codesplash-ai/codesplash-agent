@@ -70,6 +70,7 @@ describe("version and doctor", () => {
     expect(output).toContain(`CodeSplash Agent ${APP_VERSION}`)
     expect(output).toContain("codex")
     expect(output).toContain("claude")
+    expect(output).toContain("codesplash")
     expect(output).toContain("config")
     expect(output).toContain("data")
   }, 30000)
@@ -85,11 +86,39 @@ describe("version and doctor", () => {
       git: "available",
       codex: { available: true, authenticated: true, compatible: false, version: "0.150.0" },
       claude: { available: false, detail: "Not installed" },
+      codesplash: {
+        available: false,
+        authenticated: false,
+        version: "9.9.9",
+        detail: "No API keys found — set ANTHROPIC_API_KEY or OPENAI_API_KEY",
+      },
     })
     expect(report).toContain("CodeSplash Agent 9.9.9")
     expect(report).toContain("unsupported version")
     expect(report).toContain("○ Not installed")
+    expect(report).toContain("codesplash ○ No API keys found — set ANTHROPIC_API_KEY or OPENAI_API_KEY")
     expect(report).toContain("defaults; not created yet")
+  })
+
+  test("reports a keyed codesplash engine like the other engines", () => {
+    const report = formatDoctorReport({
+      version: "9.9.9",
+      runtime: "bun 1.3.14",
+      platform: "darwin arm64",
+      configPath: "/tmp/config.toml",
+      configPresent: true,
+      dataDirectory: "/tmp/data",
+      git: "available",
+      codex: { available: true, authenticated: true, version: "0.150.0" },
+      claude: { available: true, authenticated: true, version: "2.0.0" },
+      codesplash: {
+        available: true,
+        authenticated: true,
+        version: "9.9.9",
+        detail: "Anthropic API key · OpenAI API key",
+      },
+    })
+    expect(report).toContain("codesplash ● v9.9.9 · Anthropic API key · OpenAI API key")
   })
 })
 

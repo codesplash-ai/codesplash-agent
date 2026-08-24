@@ -1,5 +1,5 @@
 /** Lossless normalized events consumed by persistence and the TUI reducer. */
-export type EngineId = "codex" | "claude"
+export type EngineId = "codex" | "claude" | "codesplash"
 
 export type NativeEventIds = {
   threadId?: string

@@ -1,6 +1,7 @@
 /** Non-interactive diagnostics: the release smoke and the first thing support asks for. */
 import { configFilePath, dataDirectory, type EngineProbe, inspectProject } from "./core/index.ts"
 import { ClaudeDriver } from "./engines/claude/index.ts"
+import { CodesplashDriver } from "./engines/codesplash/index.ts"
 import { CodexDriver } from "./engines/codex/index.ts"
 import { APP_VERSION } from "./version.ts"
 
@@ -14,12 +15,14 @@ export type DoctorReport = {
   git: string
   codex: EngineProbe
   claude: EngineProbe
+  codesplash: EngineProbe
 }
 
 export async function collectDoctorReport(cwd = process.cwd()): Promise<DoctorReport> {
-  const [codex, claude, project] = await Promise.all([
+  const [codex, claude, codesplash, project] = await Promise.all([
     new CodexDriver().probe(),
     new ClaudeDriver().probe(),
+    new CodesplashDriver().probe(),
     inspectProject(cwd).catch(() => undefined),
   ])
   const configPath = configFilePath()
@@ -34,18 +37,23 @@ export async function collectDoctorReport(cwd = process.cwd()): Promise<DoctorRe
     git: project?.git.available ? "available" : "not available",
     codex,
     claude,
+    codesplash,
   }
 }
 
 export function formatDoctorReport(report: DoctorReport): string {
+  const rows: Array<[string, string]> = [
+    ["runtime", `${report.runtime} (${report.platform})`],
+    ["config", `${report.configPath}${report.configPresent ? "" : " (defaults; not created yet)"}`],
+    ["data", report.dataDirectory],
+    ["git", report.git],
+    ["codex", formatProbe(report.codex)],
+    ["claude", formatProbe(report.claude)],
+    ["codesplash", formatProbe(report.codesplash)],
+  ]
   const lines = [
     `CodeSplash Agent ${report.version}`,
-    `runtime  ${report.runtime} (${report.platform})`,
-    `config   ${report.configPath}${report.configPresent ? "" : " (defaults; not created yet)"}`,
-    `data     ${report.dataDirectory}`,
-    `git      ${report.git}`,
-    `codex    ${formatProbe(report.codex)}`,
-    `claude   ${formatProbe(report.claude)}`,
+    ...rows.map(([label, value]) => `${label.padEnd(11)}${value}`),
   ]
   return `${lines.join("\n")}\n`
 }

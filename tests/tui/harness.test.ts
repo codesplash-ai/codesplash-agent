@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test"
 import { initialAppViewState } from "../../src/core/index.ts"
 import {
   composerRows,
+  engineDisplayName,
+  engineStatusLabel,
   errorRecoveryHint,
   formatRateLimit,
   keyboardHelpEntries,
@@ -9,6 +11,7 @@ import {
   showPlanPanel,
   slashCommandHelp,
 } from "../../src/tui/codex-session.tsx"
+import { createEngineDriver } from "../../src/tui/run-codex-session.tsx"
 
 describe("slash commands", () => {
   test("ordinary prompts are not commands", () => {
@@ -73,5 +76,27 @@ describe("harness status and layout", () => {
     expect(errorRecoveryHint("usage limit reached for plan")).toContain("limit reached")
     expect(errorRecoveryHint("unsupported protocol version")).toContain("0.147.0")
     expect(errorRecoveryHint("some novel explosion")).toBeUndefined()
+  })
+})
+
+describe("engine labels", () => {
+  test("status line shows the session's engine id with the active model selector", () => {
+    expect(engineStatusLabel("codex", undefined)).toBe("codex")
+    expect(engineStatusLabel("codex", "gpt-5.3-codex")).toBe("codex/gpt-5.3-codex")
+    expect(engineStatusLabel("codesplash", undefined)).toBe("codesplash")
+    expect(engineStatusLabel("codesplash", "claude-sonnet-4-5:high")).toBe(
+      "codesplash/claude-sonnet-4-5:high",
+    )
+  })
+
+  test("transcript headers use the human-facing engine name", () => {
+    expect(engineDisplayName("codex")).toBe("Codex")
+    expect(engineDisplayName("claude")).toBe("Claude")
+    expect(engineDisplayName("codesplash")).toBe("CodeSplash")
+  })
+
+  test("the session runner constructs the driver matching the requested engine", () => {
+    expect(createEngineDriver("codex").id).toBe("codex")
+    expect(createEngineDriver("codesplash").id).toBe("codesplash")
   })
 })

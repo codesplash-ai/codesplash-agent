@@ -14,6 +14,7 @@ import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type {
   AppViewState,
+  EngineId,
   EngineModel,
   PendingRequest,
   ProjectPreflight,
@@ -62,8 +63,20 @@ export function parseSlashCommand(text: string): ParsedSlashCommand | undefined 
   return { name, argument: rest.join(" ") || undefined }
 }
 
+/** Human-facing engine name for transcript headers and hints; the status line keeps the raw id. */
+export function engineDisplayName(engine: EngineId): string {
+  if (engine === "codesplash") return "CodeSplash"
+  if (engine === "claude") return "Claude"
+  return "Codex"
+}
+
+/** Status-line engine label: the engine id plus the active model selector, e.g. "codex/gpt-5". */
+export function engineStatusLabel(engine: EngineId, model: string | undefined): string {
+  return `${engine}${model ? `/${model}` : ""}`
+}
+
 export const slashCommandHelp: ReadonlyArray<{ command: string; description: string }> = [
-  { command: "/new", description: "Start a fresh Codex session in this project" },
+  { command: "/new", description: "Start a fresh session in this project" },
   { command: "/resume", description: "Open the session picker" },
   { command: "/engine", description: "Back to the engine screen (welcome)" },
   { command: "/model [name]", description: "List models, or switch for the next turn" },
@@ -237,6 +250,8 @@ type CodexSessionAppProps = {
   policy?: SessionPolicy
   /** Directory of the persisted session, or undefined when history is disabled. */
   historyLocation?: string
+  /** Engine shown in the status line and transcript headers; the flow itself is engine-agnostic. */
+  engine?: EngineId
   onAction(action: CodexSessionAction): void
 }
 
@@ -246,6 +261,7 @@ export function CodexSessionApp({
   project,
   policy = defaultSessionPolicy,
   historyLocation,
+  engine = "codex",
   onAction,
 }: CodexSessionAppProps) {
   const renderer = useRenderer()
@@ -264,6 +280,12 @@ export function CodexSessionApp({
   const outline = useMemo(() => buildTranscriptOutline(state.transcript), [state.transcript])
   const activeOutlineId = selectedOutlineId ?? outline.at(-1)?.id
   const showOutline = outlineVisible && terminalWidth >= 96 && outline.length > 0
+  // CodeSplash sessions cannot resume the model's context (capabilities.resume is false): a
+  // reopen would silently discard everything the model knows, and the in-process loop already
+  // accepts a fresh turn after a failed one — so recoverable errors keep the composer live
+  // instead of offering the Ctrl+R reconnect flow.
+  const supportsReconnect = engine !== "codesplash"
+  const reconnectPending = supportsReconnect && state.error?.recoverable === true
 
   useEffect(() => {
     renderer.setBackgroundColor(palette.background)
@@ -317,7 +339,9 @@ export function CodexSessionApp({
   const resolveRequest = useCallback(
     (choice: string) => {
       const request = state.pendingRequest
-      if (!request || !request.choices.includes(choice)) return
+      // "cancel" resolves every request kind (the engine treats it as a dismissal), including
+      // ask_user questions whose choices list only the model's own options.
+      if (!request || (choice !== "cancel" && !request.choices.includes(choice))) return
       void runCommand(() => controller.resolveRequest(request.id, { choice }))
     },
     [controller, runCommand, state.pendingRequest],
@@ -518,7 +542,7 @@ export function CodexSessionApp({
       return
     }
 
-    if (key.ctrl && key.name === "r" && state.error?.recoverable) {
+    if (key.ctrl && key.name === "r" && reconnectPending) {
       key.preventDefault()
       onAction("reconnect")
     }
@@ -565,11 +589,19 @@ export function CodexSessionApp({
         >
           {state.transcript.length === 0 ? (
             <box style={{ height: "100%", alignItems: "center", justifyContent: "center" }}>
-              <text fg={palette.muted}>Ask Codex to inspect, explain, or change this project.</text>
+              <text fg={palette.muted}>
+                Ask {engineDisplayName(engine)} to inspect, explain, or change this project.
+              </text>
             </box>
           ) : (
             state.transcript.map((item) => (
-              <TranscriptEntry key={item.id} item={item} palette={palette} syntaxStyle={syntaxStyle} />
+              <TranscriptEntry
+                key={item.id}
+                item={item}
+                palette={palette}
+                syntaxStyle={syntaxStyle}
+                engineName={engineDisplayName(engine)}
+              />
             ))
           )}
         </scrollbox>
@@ -633,7 +665,7 @@ export function CodexSessionApp({
         </text>
         <textarea
           ref={textareaRef}
-          focused={!overlay && !state.pendingRequest && !state.error?.recoverable}
+          focused={!overlay && !state.pendingRequest && !reconnectPending}
           placeholder={styledComposerPlaceholder}
           textColor={palette.foreground}
           placeholderColor={palette.muted}
@@ -672,10 +704,12 @@ export function CodexSessionApp({
       </box>
 
       <box style={{ height: 1, flexDirection: "row", justifyContent: "space-between" }}>
-        <text fg={error ? palette.destructive : palette.muted}>{error ?? statusHelp(state)}</text>
+        <text fg={error ? palette.destructive : palette.muted}>
+          {error ?? statusHelp(state, supportsReconnect)}
+        </text>
         <box style={{ height: 1, flexDirection: "row" }}>
           <text fg={palette.accent}>
-            codex{state.model ? `/${state.model}` : ""}
+            {engineStatusLabel(engine, state.model)}
             {context ? ` · ${context}` : ""} ·{" "}
           </text>
           <PolicyBadge policy={policy} palette={palette} />
@@ -809,10 +843,12 @@ function TranscriptEntry({
   item,
   palette,
   syntaxStyle,
+  engineName = "Codex",
 }: {
   item: TranscriptItem
   palette: BrandPalette
   syntaxStyle: SyntaxStyle
+  engineName?: string
 }) {
   const anchorId = transcriptAnchorId(item.id)
 
@@ -863,7 +899,7 @@ function TranscriptEntry({
   }
 
   const hasText = item.text.trim().length > 0
-  const title = item.kind === "reasoning" ? `Codex thinking${hasText ? "" : "…"}` : "Codex"
+  const title = item.kind === "reasoning" ? `${engineName} thinking${hasText ? "" : "…"}` : engineName
   return (
     <box id={anchorId} style={{ width: "100%", marginBottom: 1 }}>
       <text fg={item.kind === "reasoning" ? palette.muted : palette.foreground}>
@@ -1018,13 +1054,32 @@ function Approval({ request, palette }: { request?: PendingRequest; palette: Bra
         padding: 1,
       }}
     >
-      <text fg={palette.foreground}>{request.detail}</text>
-      <text fg={palette.action}>A Accept · S Session · D Decline · C Cancel</text>
+      {request.detail ? <text fg={palette.foreground}>{request.detail}</text> : null}
+      {request.requestKind === "user-input" ? (
+        <>
+          {request.choices.map((choice, index) => (
+            <text key={`${index}:${choice}`} fg={palette.foreground}>
+              {index + 1} {choice}
+            </text>
+          ))}
+          <text fg={palette.action}>1-{request.choices.length} answer · Esc dismiss</text>
+        </>
+      ) : (
+        <text fg={palette.action}>A Accept · S Session · D Decline · C Cancel</text>
+      )}
     </box>
   )
 }
 
-function approvalChoiceForKey(name: string, request: PendingRequest): string | undefined {
+export function approvalChoiceForKey(name: string, request: PendingRequest): string | undefined {
+  // Esc always resolves as "cancel": the engine accepts it for every request kind even when the
+  // request's own choices (e.g. ask_user options) do not list it.
+  if (name === "escape") return "cancel"
+  if (request.requestKind === "user-input") {
+    if (name === "c") return "cancel"
+    if (!/^[1-9]$/.test(name)) return undefined
+    return request.choices[Number(name) - 1]
+  }
   const requested =
     name === "a"
       ? "accept"
@@ -1032,14 +1087,14 @@ function approvalChoiceForKey(name: string, request: PendingRequest): string | u
         ? "acceptForSession"
         : name === "d"
           ? "decline"
-          : name === "c" || name === "escape"
+          : name === "c"
             ? "cancel"
             : undefined
   return requested && request.choices.includes(requested) ? requested : undefined
 }
 
-function statusHelp(state: AppViewState): string {
-  if (state.error?.recoverable) return "Ctrl+R reconnect · Ctrl+Q home"
+function statusHelp(state: AppViewState, supportsReconnect: boolean): string {
+  if (state.error?.recoverable && supportsReconnect) return "Ctrl+R reconnect · Ctrl+Q home"
   if (state.turnStatus === "running") return "Esc interrupt · Ctrl+Q home"
   return "Enter send · /help commands · F1 keys"
 }

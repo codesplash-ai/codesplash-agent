@@ -2,6 +2,7 @@ import { createCliRenderer, type KittyKeyboardOptions, type ThemeMode } from "@o
 import { createRoot } from "@opentui/react"
 import type {
   AppViewState,
+  EngineDriver,
   ProjectPreflight,
   SessionMeta,
   SessionPolicy,
@@ -19,12 +20,22 @@ import {
   SessionRecorder,
   SessionStore,
 } from "../core/index.ts"
+import { CodesplashDriver } from "../engines/codesplash/index.ts"
 import { CodexDriver } from "../engines/codex/index.ts"
 import { brandThemes } from "./brand.ts"
 import { type CodexSessionAction, CodexSessionApp } from "./codex-session.tsx"
 import { renderFullAccessConfirmation } from "./full-access-confirmation.tsx"
 
+/** Engines that run inside the harness session screen (Claude hands off to its own CLI). */
+export type HarnessEngineId = "codex" | "codesplash"
+
+export function createEngineDriver(engine: HarnessEngineId): EngineDriver {
+  return engine === "codesplash" ? new CodesplashDriver() : new CodexDriver()
+}
+
 export type CodexSessionRunOptions = {
+  /** Engine to run through the shared controller/recorder/session-screen flow. */
+  engine?: HarnessEngineId
   policy?: SessionPolicy
   /** When false (`--no-history` or config opt-out), nothing is written to disk. */
   historyEnabled?: boolean
@@ -49,6 +60,7 @@ export async function runCodexSession(
   themePreference: ThemePreference,
   options: CodexSessionRunOptions = {},
 ): Promise<CodexRunOutcome> {
+  const engine = options.engine ?? "codex"
   const policy = options.policy ?? defaultSessionPolicy
   const historyEnabled = options.historyEnabled ?? true
 
@@ -82,7 +94,7 @@ export async function runCodexSession(
       const now = new Date().toISOString()
       const handle = await store.create({
         schemaVersion: 1,
-        engine: "codex",
+        engine,
         localSessionId,
         projectPath: project.cwd,
         projectId,
@@ -100,7 +112,7 @@ export async function runCodexSession(
 
   try {
     while (true) {
-      const driver = new CodexDriver()
+      const driver = createEngineDriver(engine)
       const open = (withNativeSessionId: string | undefined) =>
         driver.openSession({
           cwd: project.cwd,
@@ -119,7 +131,7 @@ export async function runCodexSession(
         // The provider thread is gone (expired, deleted, or incompatible). Keep the
         // replayed transcript, surface the loss, and continue on a fresh thread.
         const warning = createAgentEvent(
-          { engine: "codex", localSessionId, sequence: firstSequence },
+          { engine, localSessionId, sequence: firstSequence },
           {
             kind: "warning",
             payload: {
@@ -151,7 +163,14 @@ export async function runCodexSession(
       })
 
       try {
-        const action = await renderCodexSession(controller, project, themePreference, policy, historyLocation)
+        const action = await renderCodexSession(
+          controller,
+          project,
+          themePreference,
+          policy,
+          historyLocation,
+          engine,
+        )
         if (action !== "reconnect") return action
       } finally {
         unregisterCleanup()
@@ -162,6 +181,26 @@ export async function runCodexSession(
       // Reconnect: keep the transcript and continue the event log monotonically.
       initialState = clearTransientState(controller.state)
       firstSequence = Math.max(firstSequence, controller.state.lastSequence + 1)
+
+      // CodeSplash keeps its chat history in-process (capabilities.resume is false), so a
+      // reopened session replays the transcript while the model starts fresh. The session
+      // screen suppresses the reconnect affordance for this engine; surface the context loss
+      // if the action arrives anyway.
+      if (engine === "codesplash") {
+        const warning = createAgentEvent(
+          { engine, localSessionId, sequence: firstSequence },
+          {
+            kind: "warning",
+            payload: {
+              message:
+                "Reconnected on a fresh model thread — the transcript is kept, but the model no longer remembers this conversation.",
+            },
+          },
+        )
+        recorder?.record(warning)
+        initialState = reduceAgentEvent(initialState, warning)
+        firstSequence += 1
+      }
     }
   } finally {
     await recorder?.close("closed")
@@ -193,6 +232,7 @@ async function renderCodexSession(
   themePreference: ThemePreference,
   policy: SessionPolicy,
   historyLocation: string | undefined,
+  engine: HarnessEngineId,
 ): Promise<CodexSessionAction> {
   const renderer = await createCliRenderer({
     exitOnCtrlC: false,
@@ -220,6 +260,7 @@ async function renderCodexSession(
         project={project}
         policy={policy}
         historyLocation={historyLocation}
+        engine={engine}
         onAction={finish}
       />,
     )

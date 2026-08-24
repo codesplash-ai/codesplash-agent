@@ -17,7 +17,7 @@ import {
   type ThemePreference,
 } from "../core/index.ts"
 import { launchClaude } from "./run-claude.ts"
-import { runCodexSession } from "./run-codex-session.tsx"
+import { type HarnessEngineId, runCodexSession } from "./run-codex-session.tsx"
 import { renderSessionPicker } from "./session-picker.tsx"
 import { type WelcomeAction, WelcomeApp } from "./welcome.tsx"
 
@@ -43,9 +43,10 @@ export async function runWelcome(
       continue
     }
 
-    if (action === "open-codex") {
+    if (action === "open-codex" || action === "open-codesplash") {
+      const engine: HarnessEngineId = action === "open-codesplash" ? "codesplash" : "codex"
       try {
-        if ((await openCodex(project, config, options)) === "quit") return
+        if ((await openEngine(engine, project, config, options)) === "quit") return
       } catch (error) {
         process.stderr.write(`codesplash: ${error instanceof Error ? error.message : String(error)}\n`)
       }
@@ -72,7 +73,9 @@ export async function runWelcome(
   }
 }
 
-async function openCodex(
+/** Opens a native-surface engine (Codex or CodeSplash) through the shared session flow. */
+async function openEngine(
+  engine: HarnessEngineId,
   project: ProjectPreflight,
   config: AgentConfig,
   options: AppOptions,
@@ -86,7 +89,7 @@ async function openCodex(
   while (true) {
     if (!skipPicker) {
       const sessions = (await listProjectSessions(projectIdFor(project.cwd))).filter(
-        (meta) => meta.engine === "codex",
+        (meta) => meta.engine === engine,
       )
       resume = undefined
       if (sessions.length > 0) {
@@ -97,7 +100,7 @@ async function openCodex(
     }
     skipPicker = false
 
-    const outcome = await runCodexSession(project, config.theme, { policy, historyEnabled, resume })
+    const outcome = await runCodexSession(project, config.theme, { engine, policy, historyEnabled, resume })
     if (outcome === "quit") return "quit"
     if (outcome === "new") {
       // Skip the picker and open a fresh session directly.

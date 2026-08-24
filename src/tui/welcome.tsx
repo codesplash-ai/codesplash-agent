@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react"
 import type { EngineProbe, ThemePreference } from "../core/index.ts"
 import { suspendToShell } from "../core/index.ts"
 import { ClaudeDriver } from "../engines/claude/index.ts"
+import { CodesplashDriver } from "../engines/codesplash/index.ts"
 import { CodexDriver } from "../engines/codex/index.ts"
 import {
   type BrandPalette,
@@ -14,15 +15,16 @@ import {
   wordmarkCodeSplash,
 } from "./brand.ts"
 
-export type WelcomeAction = "login-codex" | "open-codex" | "launch-claude" | "quit"
+export type WelcomeAction = "login-codex" | "open-codex" | "launch-claude" | "open-codesplash" | "quit"
 
-type AgentChoice = "codex" | "claude"
+export type AgentChoice = "codex" | "claude" | "codesplash"
 type FooterChoice = "theme" | "recheck" | "quit"
 type FocusZone = "agents" | "footer"
 
 type ProviderState = {
   codex: EngineProbe | undefined
   claude: EngineProbe | undefined
+  codesplash: EngineProbe | undefined
   error?: string
   checking: boolean
 }
@@ -34,8 +36,31 @@ type WelcomeAppProps = {
   onThemePreferenceChange(theme: ThemePreference): Promise<void>
 }
 
-const agentChoices: readonly AgentChoice[] = ["codex", "claude"]
+export const agentChoices: readonly AgentChoice[] = ["codex", "claude", "codesplash"]
 const footerChoices: readonly FooterChoice[] = ["theme", "recheck", "quit"]
+
+export type AgentActivation = { action: WelcomeAction } | { error: string }
+
+/**
+ * Maps Enter on an agent row to a welcome action or a surfaced error. Returns undefined
+ * while the row's probe is still in flight (except Codex, whose login flow is always safe).
+ */
+export function activateAgent(
+  choice: AgentChoice,
+  probe: EngineProbe | undefined,
+): AgentActivation | undefined {
+  if (choice === "claude") return { action: "launch-claude" }
+  if (choice === "codesplash") {
+    if (!probe) return undefined
+    if (probe.available && probe.authenticated !== false) return { action: "open-codesplash" }
+    return { error: probe.detail ?? "No API keys found — set ANTHROPIC_API_KEY or OPENAI_API_KEY" }
+  }
+  if (!probe?.authenticated) return { action: "login-codex" }
+  if (probe.compatible === false) {
+    return { error: probe.detail ?? "The installed Codex CLI version is not supported." }
+  }
+  return { action: "open-codex" }
+}
 
 export function WelcomeApp({
   detectedTheme: initialDetectedTheme,
@@ -48,6 +73,7 @@ export function WelcomeApp({
   const [providers, setProviders] = useState<ProviderState>({
     codex: undefined,
     claude: undefined,
+    codesplash: undefined,
     checking: true,
   })
   const [detectedTheme, setDetectedTheme] = useState(initialDetectedTheme)
@@ -61,8 +87,12 @@ export function WelcomeApp({
 
   const probe = useCallback(async () => {
     setProviders((current) => ({ ...current, checking: true, error: undefined }))
-    const [codex, claude] = await Promise.all([new CodexDriver().probe(), new ClaudeDriver().probe()])
-    setProviders({ codex, claude, checking: false })
+    const [codex, claude, codesplash] = await Promise.all([
+      new CodexDriver().probe(),
+      new ClaudeDriver().probe(),
+      new CodesplashDriver().probe(),
+    ])
+    setProviders({ codex, claude, codesplash, checking: false })
   }, [])
 
   const toggleTheme = useCallback(async () => {
@@ -153,19 +183,11 @@ export function WelcomeApp({
       if (key.name === "return" || key.name === "enter") {
         key.preventDefault()
         const choice = agentChoices[selectedAgent]
-        if (choice === "codex" && !providers.codex?.authenticated) {
-          onAction("login-codex")
-        }
-        if (choice === "codex" && providers.codex?.authenticated && providers.codex.compatible !== false) {
-          onAction("open-codex")
-        }
-        if (choice === "codex" && providers.codex?.authenticated && providers.codex.compatible === false) {
-          setProviders((current) => ({
-            ...current,
-            error: current.codex?.detail ?? "The installed Codex CLI version is not supported.",
-          }))
-        }
-        if (choice === "claude") onAction("launch-claude")
+        if (!choice) return
+        const activation = activateAgent(choice, providers[choice])
+        if (!activation) return
+        if ("action" in activation) onAction(activation.action)
+        else setProviders((current) => ({ ...current, error: activation.error }))
         return
       }
       return
@@ -234,7 +256,7 @@ export function WelcomeApp({
         <box
           style={{
             width: "100%",
-            height: 4,
+            height: 5,
             justifyContent: "center",
             backgroundColor: palette.panel,
             paddingLeft: 1,
@@ -256,6 +278,13 @@ export function WelcomeApp({
             palette={palette}
             selected={focusZone === "agents" && selectedAgent === 1}
             versionOnly
+          />
+          <ProviderRow
+            name="CODESPLASH"
+            probe={providers.codesplash}
+            checking={providers.checking}
+            palette={palette}
+            selected={focusZone === "agents" && selectedAgent === 2}
           />
         </box>
 

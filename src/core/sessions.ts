@@ -234,7 +234,7 @@ function isSessionMeta(value: unknown): value is SessionMeta {
   if (!isRecord(value)) return false
   return (
     value.schemaVersion === 1 &&
-    (value.engine === "codex" || value.engine === "claude") &&
+    (value.engine === "codex" || value.engine === "claude" || value.engine === "codesplash") &&
     typeof value.localSessionId === "string" &&
     typeof value.projectPath === "string" &&
     typeof value.projectId === "string" &&

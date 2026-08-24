@@ -3,6 +3,7 @@ import { createRoot, useKeyboard, useRenderer } from "@opentui/react"
 import { useEffect, useState } from "react"
 import type { SessionMeta, SessionStatus, ThemePreference } from "../core/index.ts"
 import { registerCleanup } from "../core/index.ts"
+import { CODESPLASH_CAPABILITIES } from "../engines/codesplash/index.ts"
 import { type BrandPalette, brandThemes } from "./brand.ts"
 
 export type SessionPickerAction = { type: "new" } | { type: "resume"; meta: SessionMeta } | { type: "back" }
@@ -34,8 +35,13 @@ export function sandboxBadge(meta: SessionMeta): string {
   return meta.engine === "claude" ? "official CLI" : ""
 }
 
-/** Pickers are engine-scoped, so a native session ID is the only resume requirement. */
+/**
+ * Pickers are engine-scoped, so a native session ID is the main resume requirement.
+ * CodeSplash rows stay listed but never resume (capabilities.resume is false: its turns run
+ * in-process and record nativeSessionId === localSessionId, which cannot be reopened).
+ */
 export function isResumableSession(meta: SessionMeta): boolean {
+  if (meta.engine === "codesplash") return CODESPLASH_CAPABILITIES.resume && Boolean(meta.nativeSessionId)
   return Boolean(meta.nativeSessionId)
 }
 
