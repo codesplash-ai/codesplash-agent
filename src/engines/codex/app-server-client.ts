@@ -1,3 +1,4 @@
+import { APP_VERSION } from "../../version.ts"
 import {
   type CodexAppServerProcess,
   type CodexAppServerProcessOptions,
@@ -11,7 +12,37 @@ import type { Model } from "./generated/v2/Model.ts"
 import type { ModelListParams } from "./generated/v2/ModelListParams.ts"
 import type { ModelListResponse } from "./generated/v2/ModelListResponse.ts"
 
+/** The Codex CLI version this app is tested against; the generated protocol types come from it. */
 export const SUPPORTED_CODEX_CLI_VERSION = "0.147.0"
+/** The oldest Codex CLI whose app-server protocol this app can drive. */
+export const MINIMUM_CODEX_CLI_VERSION = "0.147.0"
+
+export type CodexVersionCompatibility = {
+  compatible: boolean
+  /** Set when the session may proceed but the CLI is newer than the tested baseline. */
+  warning?: string
+}
+
+/** Versions newer than the tested baseline run with a warning; older than the minimum are refused. */
+export function codexVersionCompatibility(version: string | undefined): CodexVersionCompatibility {
+  if (!version) return { compatible: false }
+  if (version === SUPPORTED_CODEX_CLI_VERSION) return { compatible: true }
+  if (compareVersions(version, MINIMUM_CODEX_CLI_VERSION) < 0) return { compatible: false }
+  return {
+    compatible: true,
+    warning: `Codex CLI ${version} is newer than the tested baseline ${SUPPORTED_CODEX_CLI_VERSION}`,
+  }
+}
+
+function compareVersions(a: string, b: string): number {
+  const left = a.split(".").map(Number)
+  const right = b.split(".").map(Number)
+  for (let index = 0; index < Math.max(left.length, right.length); index++) {
+    const difference = (left[index] ?? 0) - (right[index] ?? 0)
+    if (difference !== 0) return difference
+  }
+  return 0
+}
 
 export class CodexAppServerClient {
   readonly process: CodexAppServerProcess
@@ -28,7 +59,7 @@ export class CodexAppServerClient {
       clientInfo: {
         name: "codesplash-agent",
         title: "CodeSplash Agent",
-        version: "0.0.0",
+        version: APP_VERSION,
       },
       capabilities: {
         experimentalApi: false,

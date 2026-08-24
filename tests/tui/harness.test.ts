@@ -42,7 +42,7 @@ describe("slash commands", () => {
   })
 })
 
-describe("cockpit status and layout", () => {
+describe("harness status and layout", () => {
   test("compacts the composer and hides the plan panel on small terminals", () => {
     expect(composerRows(24)).toBe(5)
     expect(composerRows(19)).toBe(3)

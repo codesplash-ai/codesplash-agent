@@ -13,7 +13,12 @@ import {
   type OpenSessionOptions,
   redactSensitiveText,
 } from "../../core/index.ts"
-import { CodexAppServerClient, SUPPORTED_CODEX_CLI_VERSION } from "./app-server-client.ts"
+import {
+  CodexAppServerClient,
+  codexVersionCompatibility,
+  MINIMUM_CODEX_CLI_VERSION,
+  SUPPORTED_CODEX_CLI_VERSION,
+} from "./app-server-client.ts"
 import type { CodexAppServerProcessOptions } from "./app-server-process.ts"
 import type { CommandExecutionRequestApprovalParams } from "./generated/v2/CommandExecutionRequestApprovalParams.ts"
 import type { FileChangeRequestApprovalParams } from "./generated/v2/FileChangeRequestApprovalParams.ts"
@@ -33,7 +38,6 @@ const CODEX_CAPABILITIES: EngineCapabilities = {
   approvals: true,
   interrupt: true,
   resume: true,
-  fork: true,
   usage: "tokens",
   surface: "native",
 }
@@ -73,7 +77,7 @@ export class CodexDriver implements EngineDriver {
       }
 
       const version = versionOutput.trim().match(/\d+\.\d+\.\d+/)?.[0]
-      const compatible = version === SUPPORTED_CODEX_CLI_VERSION
+      const compatibility = codexVersionCompatibility(version)
       client = new CodexAppServerClient({ ...this.processOptions, binary })
       await client.initialize()
       const account = await client.readAccount()
@@ -81,11 +85,11 @@ export class CodexDriver implements EngineDriver {
       return {
         available: true,
         authenticated: account.account !== null,
-        compatible,
+        compatible: compatibility.compatible,
         version,
-        detail: compatible
-          ? accountLabel
-          : `${accountLabel} · requires Codex CLI ${SUPPORTED_CODEX_CLI_VERSION} — install with: npm i -g @openai/codex@${SUPPORTED_CODEX_CLI_VERSION}`,
+        detail: compatibility.compatible
+          ? [accountLabel, compatibility.warning].filter(Boolean).join(" · ")
+          : `${accountLabel} · requires Codex CLI ${MINIMUM_CODEX_CLI_VERSION} or newer — install with: npm i -g @openai/codex@${SUPPORTED_CODEX_CLI_VERSION}`,
       }
     } catch (error) {
       return { available: false, detail: error instanceof Error ? error.message : String(error) }

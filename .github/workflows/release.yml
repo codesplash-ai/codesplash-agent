@@ -177,3 +177,18 @@ jobs:
       - name: Notice when tap auto-bump was skipped
         if: vars.BREW_TAP_REPO == ''
         run: echo "::notice::BREW_TAP_REPO repo variable not set — Homebrew tap auto-bump skipped"
+
+      # Inert until the founder sets the SCOOP_BUCKET_REPO repo variable ("owner/repo" of the
+      # Scoop bucket) and the SCOOP_BUCKET_TOKEN secret (push access to it). Renders the manifest
+      # from packaging/scoop/ with the released version + zip sha256; skips gracefully when the
+      # experimental Windows build produced no artifact.
+      - name: Update Scoop bucket manifest
+        if: vars.SCOOP_BUCKET_REPO != ''
+        env:
+          SCOOP_BUCKET_REPO: ${{ vars.SCOOP_BUCKET_REPO }}
+          SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+        run: chmod +x tools/update-scoop-bucket.sh && ./tools/update-scoop-bucket.sh --version "${GITHUB_REF_NAME#v}" --artifacts artifacts
+
+      - name: Notice when Scoop bucket update was skipped
+        if: vars.SCOOP_BUCKET_REPO == ''
+        run: echo "::notice::SCOOP_BUCKET_REPO repo variable not set — Scoop bucket update skipped"

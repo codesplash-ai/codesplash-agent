@@ -1,13 +1,13 @@
 # CodeSplash Agent
 
-**Your entire dev workday. One terminal.** A terminal cockpit that drives the AI coding agents you
+**Your entire dev workday. One terminal.** A terminal harness that drives the AI coding agents you
 already pay for — OpenAI Codex natively, Claude Code through its official CLI — with your
 credentials staying exactly where they are.
 
 - **Codex, native.** Streamed responses, tool activity, live diffs, plans, interactive approvals,
   interrupt, crash recovery, and resumable sessions over the official `codex app-server` protocol.
 - **Claude Code, official.** One keypress hands your real terminal to the official `claude` CLI and
-  restores the cockpit when you leave. The app never reimplements or touches Anthropic auth.
+  restores the harness when you leave. The app never reimplements or touches Anthropic auth.
 - **Credentials stay on your machine.** The agent never reads, copies, proxies, or stores provider
   credentials. It launches the official CLIs you installed and lets them own their own auth.
 - **Durable sessions.** Conversations persist locally (coalesced events, `0600` permissions, no raw
@@ -15,7 +15,7 @@ credentials staying exactly where they are.
 
 ## Install
 
-Prerequisites: the agent is a cockpit, not the engines. Install and log in to the official CLIs you
+Prerequisites: the agent is a harness, not the engines. Install and log in to the official CLIs you
 want to drive:
 
 - [Codex CLI](https://developers.openai.com/codex) — supported version: **0.147.0**
@@ -61,7 +61,7 @@ Only targets that pass real launch smoke tests in CI are advertised. Current sta
 ## Use
 
 ```sh
-codesplash [path]              # open the cockpit in a project (defaults to cwd)
+codesplash [path]              # open the harness in a project (defaults to cwd)
 codesplash --doctor            # non-interactive diagnostics: runtime, engines, auth, paths
 codesplash --no-history        # write no session files this run
 codesplash --sandbox read-only # override the Codex sandbox (read-only | workspace-write)

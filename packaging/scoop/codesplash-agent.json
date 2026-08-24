@@ -1,6 +1,6 @@
 {
   "version": "0.1.4",
-  "description": "Terminal cockpit for Codex and Claude Code — your AI accounts, one terminal, credentials stay on your machine.",
+  "description": "Terminal harness for Codex and Claude Code — your AI accounts, one terminal, credentials stay on your machine.",
   "homepage": "https://github.com/codesplash-ai/codesplash-agent",
   "license": "BUSL-1.1",
   "architecture": {

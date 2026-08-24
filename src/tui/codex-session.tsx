@@ -22,6 +22,7 @@ import type {
   TranscriptItem,
 } from "../core/index.ts"
 import { defaultSessionPolicy, suspendToShell } from "../core/index.ts"
+import { extractImageAttachments } from "./attachments.ts"
 import type { BrandPalette } from "./brand.ts"
 
 export type CodexSessionAction = "home" | "reconnect" | "new" | "resume-picker" | "quit"
@@ -93,7 +94,7 @@ export function composerRows(terminalHeight: number): number {
 
 /** The plan panel yields its rows to the transcript on small terminals. */
 export function showPlanPanel(terminalHeight: number, planSteps: number): boolean {
-  // Besides the plan itself, the cockpit needs 18 rows for its chrome, composer,
+  // Besides the plan itself, the harness needs 18 rows for its chrome, composer,
   // and at least one transcript row. Hiding the panel is preferable to letting
   // Yoga shrink its text rows onto the same terminal line.
   return planSteps > 0 && terminalHeight >= planSteps + 18
@@ -116,7 +117,7 @@ export function errorRecoveryHint(message: string): string | undefined {
   if (/rate.?limit|quota|429|usage limit/i.test(message))
     return "Provider limit reached — wait for the reset shown above"
   if (/version|protocol|unsupported/i.test(message))
-    return "Install Codex CLI 0.147.0 (pinned protocol baseline)"
+    return "Install Codex CLI 0.147.0 or newer (tested protocol baseline)"
   return undefined
 }
 
@@ -654,8 +655,17 @@ export function CodexSessionApp({
               runSlashCommand(command)
               return
             }
-            void runCommand(() => controller.send({ text })).then((sent) => {
-              if (sent) textareaRef.current?.setText("")
+            const extracted = extractImageAttachments(text)
+            void runCommand(() =>
+              controller.send({
+                text: extracted.text,
+                images: extracted.images.length > 0 ? extracted.images : undefined,
+              }),
+            ).then((sent) => {
+              if (sent) {
+                textareaRef.current?.setText("")
+                if (extracted.warnings.length > 0) setCommandError(extracted.warnings.join(" · "))
+              }
             })
           }}
         />
@@ -726,6 +736,9 @@ function SessionOverlay({
             {entry.command.padEnd(24)} {entry.description}
           </text>
         ))}
+        <text fg={palette.muted} style={{ marginTop: 1 }}>
+          Tip: drop an image file onto the terminal (or paste its path) to attach it to your prompt.
+        </text>
       </box>
     )
   }

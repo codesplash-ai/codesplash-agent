@@ -28,7 +28,7 @@ Do not put native Claude stream-JSON mode, custom tools, an MCP marketplace, sub
 | 1 — Core and Codex vertical slice | **Complete** | The production Codex TUI is live-dogfooded for streamed prompts, tool/diff activity, repeated turns, model/context status, and long-session navigation. Real app-server and integration coverage prove approvals, interrupt, resume, crash recovery, and redaction. |
 | 2 — Durable sessions and safety | **Implemented** | Sessions persist as coalesced JSONL plus atomic metadata, resume through a project-scoped picker backed by `thread/resume` with reconciliation, and policy/`--no-history`/full-access/signal handling are in place with all four exit gates covered by offline tests. The manual dogfood checklist remains before calling the milestone closed. |
 | 3 — Claude official-CLI surface | **Implemented** | Diagnostics-only probe, tested real-terminal handoff, and launch metadata: the app supplies its own session ID through the documented `--session-id` flag, resumes with `--resume` from an engine-scoped picker, and stores no terminal output. Manual dogfood of a real login/permissions/slash-command/resume pass remains. |
-| 4 — Cockpit completion | **Implemented** | Slash commands (`/new /resume /engine /model /permissions /history /help /quit`), an F1 keyboard-help overlay, a paginated model picker with per-turn switching, rate-limit status, actionable error hints, and compact small-terminal layout are in. Copy relies on terminal-native selection; screen-reader layouts remain a residual. |
+| 4 — Harness completion | **Implemented** | Slash commands (`/new /resume /engine /model /permissions /history /help /quit`), an F1 keyboard-help overlay, a paginated model picker with per-turn switching, rate-limit status, actionable error hints, and compact small-terminal layout are in. Copy relies on terminal-native selection; screen-reader layouts remain a residual. |
 | 5 — Alpha distribution | **Implemented** | Versioned BUSL-1.1 package with `--version`/`--doctor`, release build script (compile → smoke → archive → SHA-256), full CI matrix (macOS arm64/x64, Linux x64/arm64, Windows experimental), tag-triggered release workflow publishing GitHub Releases + npm + Homebrew tap, CHANGELOG, and a release checklist. The macOS arm64 artifact passed a real local build/checksum/doctor smoke. First public release awaits the user-run migration: repo public, tap repo, `NPM_TOKEN`/`TAP_GITHUB_TOKEN`, tag `v0.1.0`. |
 | 6 — Optional native Claude/extensibility | Deferred | Requires a fresh authentication/product decision. |
 
@@ -150,7 +150,7 @@ confirmation, badge visibility across states, and Esc abort; `--no-history` leav
 
 ### Keep
 
-- The “two engines, one cockpit” product shape is sound.
+- The “two engines, one harness” product shape is sound.
 - Codex-first sequencing is the lowest-risk route to a useful product.
 - OpenTUI React is a good fit for the existing stack and now includes textarea, streaming Markdown, syntax highlighting, and diff renderables.
 - Provider schemas must remain inside adapters.
@@ -173,13 +173,13 @@ black-box dependency:
 
 ### Change before implementation
 
-1. **Use Codex app-server for the native cockpit, not only `@openai/codex-sdk`.** The TypeScript SDK provides `runStreamed()`, thread resume, item events, and usage, but it wraps `codex exec` and does not expose a response path for interactive approvals. The current app-server v2 protocol exposes `thread/start`, `thread/resume`, `turn/start`, `turn/interrupt`, message deltas, diff updates, token updates, user-input requests, and approval requests/responses. It is experimental, so isolate its JSON-RPC transport and pin a supported Codex CLI version.
+1. **Use Codex app-server for the native harness, not only `@openai/codex-sdk`.** The TypeScript SDK provides `runStreamed()`, thread resume, item events, and usage, but it wraps `codex exec` and does not expose a response path for interactive approvals. The current app-server v2 protocol exposes `thread/start`, `thread/resume`, `turn/start`, `turn/interrupt`, message deltas, diff updates, token updates, user-input requests, and approval requests/responses. It is experimental, so isolate its JSON-RPC transport and pin a supported Codex CLI version.
 
 2. **Model a live session, not disconnected `start()` and `send()` calls.** A session owns a bidirectional command channel and one ordered event stream. Approval responses and interrupts must carry the native request, thread, turn, and item identifiers.
 
 3. **Make normalization intentionally lossless.** Store a stable common envelope plus the provider event name and raw payload. A small union such as `text.delta | tool.request | turn.end` would discard plans, warnings, terminal interaction, compaction, rate-limit updates, and provider-specific state needed for debugging and future features.
 
-4. **Treat PTY hosting as terminal emulation, not process spawning.** `node-pty` provides a pseudoterminal but does not interpret ANSI/VT sequences or maintain a screen buffer. OpenTUI does not currently provide a child-terminal emulator. Embedded Claude therefore requires a PTY, an emulator such as `@xterm/headless`, and an OpenTUI cell renderer. The reliable v1 fallback is to suspend OpenTUI, attach the official `claude` process to the real terminal, and restore the cockpit after it exits.
+4. **Treat PTY hosting as terminal emulation, not process spawning.** `node-pty` provides a pseudoterminal but does not interpret ANSI/VT sequences or maintain a screen buffer. OpenTUI does not currently provide a child-terminal emulator. Embedded Claude therefore requires a PTY, an emulator such as `@xterm/headless`, and an OpenTUI cell renderer. The reliable v1 fallback is to suspend OpenTUI, attach the official `claude` process to the real terminal, and restore the harness after it exits.
 
 5. **Do not duplicate provider session stores.** Codex and Claude remain authoritative for resumable model context. The application stores its own session ID, provider-native session ID, project identity, display metadata, and normalized UI history. Branch/fork support maps to provider capabilities rather than pretending every engine has identical semantics.
 
@@ -198,7 +198,7 @@ black-box dependency:
 - Codex can start and resume threads, stream output, display tool progress and diffs, request approval, accept or deny approval, interrupt a turn, and recover from a child-process failure.
 - The TUI has a scrollable transcript, multiline composer, status bar, approval modal, engine/session picker, and keyboard help.
 - Local session metadata survives restart and links back to provider-native session IDs.
-- Claude Code can run through a safe full-terminal handoff and return cleanly to the cockpit.
+- Claude Code can run through a safe full-terminal handoff and return cleanly to the harness.
 - Config supports engine defaults, sandbox/approval policy, key bindings, theme, and history opt-out.
 - Unit, protocol-contract, reducer, and child-process lifecycle tests run in CI without consuming model quota.
 
@@ -465,11 +465,11 @@ Exit gates:
 - [x] Claude Code behaves exactly as it does in a normal terminal for login, permissions, slash commands, and
       resume: the handoff inherits stdio and passes at most one documented flag (`--session-id` on new launches,
       `--resume <id>` on resume). Real-terminal dogfood of that pass is on the manual checklist.
-- [x] Exiting or crashing Claude always restores the parent terminal and cockpit (existing normal-exit,
+- [x] Exiting or crashing Claude always restores the parent terminal and harness (existing normal-exit,
       `SIGINT`, forced-termination, and abort coverage; restoration runs in a `finally`).
 - [x] Switching engines cannot accidentally send a prompt to the wrong live process: session pickers are
       engine-scoped, the Codex controller is closed before control returns to the welcome loop, and the Claude
-      handoff is synchronous — the cockpit never has two live engine processes accepting input.
+      handoff is synchronous — the harness never has two live engine processes accepting input.
 
 ### Milestone 3 implementation checkpoint — 2026-08-16
 
@@ -482,7 +482,7 @@ Exit gates:
       app generates the UUID itself and passes it through the documented `--session-id` flag, so resume via
       `--resume <id>` needs no output parsing at all.
 - [x] Launch status tracking: metadata reads "running" while Claude owns the terminal, then `closed` (exit 0) or
-      `failed`; a killed cockpit leaves a resumable "interrupted" row. No `events.jsonl` is ever created for
+      `failed`; a killed harness leaves a resumable "interrupted" row. No `events.jsonl` is ever created for
       Claude launches — terminal output is never recorded.
 - [x] `--no-history` skips all Claude session recording and launches the CLI bare.
 - [x] Embedded PTY remains excluded per the Milestone 0 decision (ADR 0003).
@@ -490,11 +490,11 @@ Exit gates:
       `claude` binary that records its argv, non-resumable metadata rejection, and picker badges/resumability.
 
 **Remaining before the milestone commit is closed — manual dogfood checklist:** launch real Claude Code from
-the cockpit, exercise login state, permissions prompts, a slash command, and `/quit`; relaunch and resume the
-same session from the picker and confirm the conversation continues; confirm the cockpit and terminal restore
+the harness, exercise login state, permissions prompts, a slash command, and `/quit`; relaunch and resume the
+same session from the picker and confirm the conversation continues; confirm the harness and terminal restore
 after exit and after killing Claude externally.
 
-### Milestone 4 — Cockpit completion
+### Milestone 4 — Harness completion
 
 **Goal:** turn the vertical slices into a coherent daily driver.
 

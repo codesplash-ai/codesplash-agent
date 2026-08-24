@@ -15,7 +15,6 @@ const capabilities: EngineCapabilities = {
   approvals: true,
   interrupt: true,
   resume: true,
-  fork: false,
   usage: "tokens",
   surface: "native",
 }

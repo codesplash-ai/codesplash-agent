@@ -52,7 +52,7 @@ export type ClaudeHandoffDeps = {
 
 /**
  * Runs one recorded handoff: metadata says "running" while Claude owns the terminal and a
- * terminal status afterwards, so a killed cockpit leaves a resumable "interrupted" row.
+ * terminal status afterwards, so a killed harness leaves a resumable "interrupted" row.
  */
 export async function runClaudeHandoffSession(deps: ClaudeHandoffDeps): Promise<number> {
   const { driver, store, project } = deps

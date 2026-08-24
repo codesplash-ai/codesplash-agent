@@ -1,7 +1,7 @@
 # Template rendered by .github/workflows/release.yml ({{VERSION}} and {{SHA256_*}} substituted)
 # and pushed to codesplash-ai/homebrew-tap as Formula/codesplash-agent.rb.
 class CodesplashAgent < Formula
-  desc "Terminal cockpit for Codex and Claude Code"
+  desc "Terminal harness for Codex and Claude Code"
   homepage "https://github.com/codesplash-ai/codesplash-agent"
   version "{{VERSION}}"
   license "BUSL-1.1"

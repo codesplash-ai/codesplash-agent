@@ -5,7 +5,7 @@
 
 ## Context
 
-The native Codex cockpit needs bidirectional operations that the high-level TypeScript SDK does not expose,
+The native Codex harness needs bidirectional operations that the high-level TypeScript SDK does not expose,
 especially server-initiated approval requests and their responses. Codex app-server exposes those operations
 over newline-delimited JSON-RPC, but the surface is still marked experimental and can change with the Codex
 CLI.

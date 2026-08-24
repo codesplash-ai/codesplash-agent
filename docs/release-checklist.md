@@ -35,7 +35,7 @@ Run top to bottom for every tagged release. A release ships only when every box 
 
 - [ ] Install from each advertised channel (brew, npm, release tarball).
 - [ ] `agent --doctor` reports sensible findings with no engines installed.
-- [ ] Install provider CLIs, log in, launch both surfaces from the cockpit.
+- [ ] Install provider CLIs, log in, launch both surfaces from the harness.
 - [ ] Uninstall; verify nothing remains except (optionally) config/data dirs and that **no
       credential material exists anywhere the app wrote** (grep config/data dirs).
 

@@ -19,7 +19,6 @@ export type EngineCapabilities = {
   approvals: boolean
   interrupt: boolean
   resume: boolean
-  fork: boolean
   usage: "none" | "tokens" | "estimated-cost"
   surface: EngineSurface
 }
