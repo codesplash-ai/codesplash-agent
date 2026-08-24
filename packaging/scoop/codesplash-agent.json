@@ -1,0 +1,26 @@
+{
+  "version": "0.1.4",
+  "description": "Terminal cockpit for Codex and Claude Code — your AI accounts, one terminal, credentials stay on your machine.",
+  "homepage": "https://github.com/codesplash-ai/codesplash-agent",
+  "license": "BUSL-1.1",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/codesplash-ai/codesplash-agent/releases/download/v0.1.4/codesplash-agent-0.1.4-win32-x64.zip",
+      "hash": "f0021bb317ca59206909b4d0ce7e63e2de5a198a129e3a336d992cf5e70599c1"
+    }
+  },
+  "bin": "codesplash.exe",
+  "checkver": {
+    "github": "https://github.com/codesplash-ai/codesplash-agent"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/codesplash-ai/codesplash-agent/releases/download/v$version/codesplash-agent-$version-win32-x64.zip"
+      }
+    },
+    "hash": {
+      "url": "$url.sha256"
+    }
+  }
+}

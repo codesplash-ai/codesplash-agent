@@ -161,3 +161,19 @@ jobs:
       - name: Notice when tap update was skipped
         if: env.TAP_GITHUB_TOKEN == ''
         run: echo "::notice::TAP_GITHUB_TOKEN secret not set — Homebrew tap update skipped"
+
+      # Inert until the founder sets the BREW_TAP_REPO repo variable ("owner/repo" of the
+      # tap) and the BREW_TAP_TOKEN secret (push access to that tap). Coexists with the
+      # TAP_GITHUB_TOKEN step above, which targets the hardcoded codesplash-ai/homebrew-tap;
+      # this one clones whichever tap BREW_TAP_REPO names and rewrites the formula's
+      # version + sha256 lines from the released artifacts (no-op push-skip when unchanged).
+      - name: Auto-bump Homebrew tap formula
+        if: vars.BREW_TAP_REPO != ''
+        env:
+          BREW_TAP_REPO: ${{ vars.BREW_TAP_REPO }}
+          BREW_TAP_TOKEN: ${{ secrets.BREW_TAP_TOKEN }}
+        run: chmod +x tools/update-brew-tap.sh && ./tools/update-brew-tap.sh --version "${GITHUB_REF_NAME#v}" --artifacts artifacts
+
+      - name: Notice when tap auto-bump was skipped
+        if: vars.BREW_TAP_REPO == ''
+        run: echo "::notice::BREW_TAP_REPO repo variable not set — Homebrew tap auto-bump skipped"
