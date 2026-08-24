@@ -3,6 +3,7 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { SessionPolicy } from "../../../src/core/index.ts"
+import { applyStoredCredentials, setApiKey } from "../../../src/engines/codesplash/auth.ts"
 import { type ToolContext, ToolInputError } from "../../../src/engines/codesplash/contracts.ts"
 import { bashTool, ELISION_MARKER, MAX_OUTPUT_BYTES } from "../../../src/engines/codesplash/tools/bash.ts"
 
@@ -256,5 +257,37 @@ describe("bash tool permissions", () => {
       makeContext({ sandbox: "workspace-write", approvalPolicy: "on-request" }),
     )
     expect(permission).toMatchObject({ sessionKey: "bash:bun" })
+  })
+})
+
+describe("bash tool credential hygiene", () => {
+  test("API keys injected from the credential store never reach spawned commands", async () => {
+    const saved = {
+      configDir: process.env.CODESPLASH_AGENT_CONFIG_DIR,
+      openai: process.env.OPENAI_API_KEY,
+    }
+    const storeDir = mkdtempSync(join(tmpdir(), "codesplash-bash-store-"))
+    try {
+      process.env.CODESPLASH_AGENT_CONFIG_DIR = storeDir
+      delete process.env.OPENAI_API_KEY
+      setApiKey("openai", "stored-bash-secret-key")
+      applyStoredCredentials()
+      // Read through a non-literal key so the `delete` narrowing above does not stick.
+      const readEnv = (name: string): string | undefined => process.env[name]
+      expect(readEnv("OPENAI_API_KEY")).toBe("stored-bash-secret-key")
+
+      // `env`-style diagnostics in a child must not see (and transcribe) the stored key;
+      // printenv exits 1 when the variable is absent from the child environment.
+      const outcome = await bashTool.run({ command: "printenv OPENAI_API_KEY" }, makeContext())
+      expect(outcome.text).not.toContain("stored-bash-secret-key")
+      expect(outcome.text).toContain("Exit code: 1")
+      expect(outcome.isError).toBe(true)
+    } finally {
+      rmSync(storeDir, { recursive: true, force: true })
+      if (saved.configDir === undefined) delete process.env.CODESPLASH_AGENT_CONFIG_DIR
+      else process.env.CODESPLASH_AGENT_CONFIG_DIR = saved.configDir
+      if (saved.openai === undefined) delete process.env.OPENAI_API_KEY
+      else process.env.OPENAI_API_KEY = saved.openai
+    }
   })
 })

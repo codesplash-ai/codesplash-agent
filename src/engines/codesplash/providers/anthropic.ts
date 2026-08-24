@@ -1,7 +1,10 @@
 /**
  * Anthropic Messages API adapter. The initial connection goes through withRetries; nothing is
- * retried after the first emitted event. API keys never appear in error messages.
+ * retried after the first emitted event. API keys never appear in error messages: response bodies
+ * embedded in errors pass through redactSensitiveText first (a gateway or proxy can echo the
+ * request's x-api-key header back in its error page).
  */
+import { redactSensitiveText } from "../../../core/index.ts"
 import {
   type ChatMessage,
   type ContentBlock,
@@ -119,7 +122,10 @@ async function connect(request: ProviderRequest, signal: AbortSignal): Promise<R
 async function httpError(response: Response): Promise<ProviderHttpError> {
   let detail = ""
   try {
-    detail = (await response.text()).slice(0, ERROR_BODY_MAX_CHARS).trim()
+    // Redact before truncating so a credential the body echoes is scrubbed whole, never split.
+    detail = redactSensitiveText(await response.text())
+      .slice(0, ERROR_BODY_MAX_CHARS)
+      .trim()
   } catch {
     detail = ""
   }
@@ -317,7 +323,7 @@ async function* mapMessagesStream(
         return
       case "error":
         throw new ProviderHttpError(
-          `anthropic: stream error (${parsed.error?.type ?? "unknown"}): ${parsed.error?.message ?? "no message"}`,
+          `anthropic: stream error (${parsed.error?.type ?? "unknown"}): ${redactSensitiveText(parsed.error?.message ?? "no message")}`,
           undefined,
         )
       default:

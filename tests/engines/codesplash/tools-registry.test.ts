@@ -200,11 +200,12 @@ describe("ask_user", () => {
 })
 
 describe("tool registry", () => {
-  test("builtinTools returns the eight built-ins in order", () => {
+  test("builtinTools returns the nine built-ins in order, apply_patch right after edit_file", () => {
     expect(builtinTools().map((tool) => tool.name)).toEqual([
       "read_file",
       "write_file",
       "edit_file",
+      "apply_patch",
       "glob",
       "grep",
       "bash",

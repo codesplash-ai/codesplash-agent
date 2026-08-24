@@ -18,6 +18,7 @@ import {
   type UserInput,
 } from "../../core/index.ts"
 import { APP_VERSION } from "../../version.ts"
+import { PROVIDER_ENV_VARS, resolveApiKey } from "./auth.ts"
 import {
   availableProviders,
   catalogModels,
@@ -63,17 +64,25 @@ export class CodesplashDriver implements EngineDriver {
 
   constructor(readonly options: CodesplashDriverOptions = {}) {}
 
-  /** Reports availability from present API keys; key values never appear in the probe. */
+  /**
+   * Reports availability from resolvable API keys — env var first, then the credential store —
+   * naming each provider's source (env/stored). Key values never appear in the probe.
+   */
   async probe(): Promise<EngineProbe> {
-    const providers = availableProviders()
-    if (providers.length === 0) {
+    const resolved = (Object.keys(PROVIDER_ENV_VARS) as ProviderId[]).flatMap((provider) => {
+      const credential = resolveApiKey(provider)
+      return credential ? [{ provider, source: credential.source }] : []
+    })
+    if (resolved.length === 0) {
       return { available: false, authenticated: false, version: APP_VERSION, detail: NO_KEYS_DETAIL }
     }
     return {
       available: true,
       authenticated: true,
       version: APP_VERSION,
-      detail: providers.map((id) => `${PROVIDER_DISPLAY_NAMES[id]} API key`).join(" · "),
+      detail: resolved
+        .map(({ provider, source }) => `${PROVIDER_DISPLAY_NAMES[provider]} API key (${source})`)
+        .join(" · "),
     }
   }
 

@@ -681,6 +681,28 @@ describe("AnthropicProvider failures and retries", () => {
     expect(providerError.message).not.toContain("test-api-key")
   })
 
+  test("redacts credential-shaped content echoed in a non-2xx body", async () => {
+    // A debug proxy or gateway can echo the x-api-key header (or key text) in its error page.
+    respond = () =>
+      new Response("rejected x-api-key: test-api-key (also saw Bearer sk-echo1234567890abcd)", {
+        status: 401,
+      })
+
+    let thrown: unknown
+    try {
+      await collectEvents(baseRequest())
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(thrown).toBeInstanceOf(ProviderHttpError)
+    const message = (thrown as ProviderHttpError).message
+    expect(message).toContain("401")
+    expect(message).toContain("[REDACTED]")
+    expect(message).not.toContain("test-api-key")
+    expect(message).not.toContain("sk-echo1234567890abcd")
+  })
+
   test("an HTTP-date retry-after header parses to a forward delay", async () => {
     respond = () =>
       new Response("busy", {

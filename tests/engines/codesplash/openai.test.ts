@@ -398,6 +398,29 @@ describe("createOpenAiProvider", () => {
     expect(requests).toHaveLength(1)
   })
 
+  test("redacts credential-shaped content echoed in a non-2xx body", async () => {
+    // A debug proxy or gateway can echo the Authorization header (or key text) in its error page.
+    serve([
+      {
+        kind: "error",
+        status: 401,
+        body: "Incorrect API key provided: sk-leak1234567890abcdef (Authorization: Bearer test-key-openai)",
+      },
+    ])
+    const error = await collect(
+      createOpenAiProvider().stream(makeRequest(), new AbortController().signal),
+    ).then(
+      () => undefined,
+      (thrown: unknown) => thrown,
+    )
+    expect(error).toBeInstanceOf(ProviderHttpError)
+    const message = (error as ProviderHttpError).message
+    expect(message).toContain("401")
+    expect(message).toContain("[REDACTED]")
+    expect(message).not.toContain("sk-leak1234567890abcdef")
+    expect(message).not.toContain("test-key-openai")
+  })
+
   test("a mid-stream error frame throws ProviderHttpError instead of completing silently", async () => {
     serve([
       {

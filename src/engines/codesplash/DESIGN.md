@@ -54,8 +54,9 @@ and node/bun builtins. Modules never import each other; the loop composes them.
   supportsReasoning. Tools use the `function` wrapper; ChatMessage tool_result blocks become
   `role:"tool"` messages, tool_call blocks become assistant `tool_calls`.
 - Both adapters: non-2xx → ProviderHttpError with status and Retry-After; connection retried via
-  withRetries; never retry after the first emitted event; redact nothing (keys never appear in
-  errors). Tests run against a local `Bun.serve` fixture streaming recorded SSE (happy path,
+  withRetries; never retry after the first emitted event; error bodies embedded in messages pass
+  through core `redactSensitiveText` so keys never appear in errors even when a proxy echoes the
+  auth header. Tests run against a local `Bun.serve` fixture streaming recorded SSE (happy path,
   tool-call assembly, 429-then-success, abort mid-stream).
 
 ## Tools

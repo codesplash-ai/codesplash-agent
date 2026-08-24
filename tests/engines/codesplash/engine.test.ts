@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { randomUUID } from "node:crypto"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { AgentEvent, EngineSession } from "../../../src/core/index.ts"
+import { setApiKey } from "../../../src/engines/codesplash/auth.ts"
 import type {
   ProviderClient,
   ProviderRequest,
@@ -19,13 +21,19 @@ const savedEnv: Record<string, string | undefined> = {}
 beforeEach(() => {
   savedEnv.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY
   savedEnv.OPENAI_API_KEY = process.env.OPENAI_API_KEY
+  savedEnv.CODESPLASH_AGENT_CONFIG_DIR = process.env.CODESPLASH_AGENT_CONFIG_DIR
   delete process.env.ANTHROPIC_API_KEY
   delete process.env.OPENAI_API_KEY
+  // Point the credential store at a fresh empty path so a developer's real store never leaks in.
+  process.env.CODESPLASH_AGENT_CONFIG_DIR = join(tmpdir(), `codesplash-engine-test-config-${randomUUID()}`)
 })
 
-afterEach(() => {
+afterEach(async () => {
+  const temporaryConfigDir = process.env.CODESPLASH_AGENT_CONFIG_DIR
   restoreEnv("ANTHROPIC_API_KEY", savedEnv.ANTHROPIC_API_KEY)
   restoreEnv("OPENAI_API_KEY", savedEnv.OPENAI_API_KEY)
+  restoreEnv("CODESPLASH_AGENT_CONFIG_DIR", savedEnv.CODESPLASH_AGENT_CONFIG_DIR)
+  if (temporaryConfigDir) await rm(temporaryConfigDir, { recursive: true, force: true })
 })
 
 function restoreEnv(name: string, value: string | undefined): void {
@@ -84,13 +92,13 @@ describe("CodesplashDriver.probe", () => {
     expect(probe.detail).toContain("OPENAI_API_KEY")
   })
 
-  test("reports the providers found without echoing key values", async () => {
+  test("reports the providers found with an env source, without echoing key values", async () => {
     process.env.ANTHROPIC_API_KEY = ANTHROPIC_KEY_VALUE
     const probe = await new CodesplashDriver().probe()
     expect(probe.available).toBe(true)
     expect(probe.authenticated).toBe(true)
     expect(probe.version).toBe(APP_VERSION)
-    expect(probe.detail).toBe("Anthropic API key")
+    expect(probe.detail).toBe("Anthropic API key (env)")
     expect(JSON.stringify(probe)).not.toContain(ANTHROPIC_KEY_VALUE)
   })
 
@@ -98,10 +106,25 @@ describe("CodesplashDriver.probe", () => {
     process.env.ANTHROPIC_API_KEY = ANTHROPIC_KEY_VALUE
     process.env.OPENAI_API_KEY = OPENAI_KEY_VALUE
     const probe = await new CodesplashDriver().probe()
-    expect(probe.detail).toBe("Anthropic API key · OpenAI API key")
+    expect(probe.detail).toBe("Anthropic API key (env) · OpenAI API key (env)")
     const serialized = JSON.stringify(probe)
     expect(serialized).not.toContain(ANTHROPIC_KEY_VALUE)
     expect(serialized).not.toContain(OPENAI_KEY_VALUE)
+  })
+
+  test("reports a stored credential source without echoing the key value", async () => {
+    setApiKey("openai", OPENAI_KEY_VALUE)
+    const probe = await new CodesplashDriver().probe()
+    expect(probe.available).toBe(true)
+    expect(probe.detail).toBe("OpenAI API key (stored)")
+    expect(JSON.stringify(probe)).not.toContain(OPENAI_KEY_VALUE)
+  })
+
+  test("an env var wins over a stored credential for the same provider", async () => {
+    setApiKey("anthropic", "stored-key-value")
+    process.env.ANTHROPIC_API_KEY = ANTHROPIC_KEY_VALUE
+    const probe = await new CodesplashDriver().probe()
+    expect(probe.detail).toBe("Anthropic API key (env)")
   })
 })
 

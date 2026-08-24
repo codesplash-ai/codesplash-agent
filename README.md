@@ -71,6 +71,37 @@ codesplash --full-access       # run Codex without a sandbox (requires typed con
 Inside a session: `/help` (or F1) shows every key binding and command — `/new`, `/resume`,
 `/engine`, `/model`, `/permissions`, `/history`, `/quit`.
 
+### Native engine
+
+The built-in CodeSplash engine talks to the Anthropic/OpenAI APIs directly with an API key you
+provide. Keys resolve environment-first (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`), then fall back to
+a locally stored credential (`credentials.json` in the config directory, `0600`, never sent
+anywhere else):
+
+```sh
+codesplash login anthropic             # prompts for the key — hidden input on a terminal
+codesplash login openai --api-key sk-… # or pass it inline / pipe it on stdin
+codesplash logout anthropic            # remove the stored key
+```
+
+`codesplash run` executes one headless turn and exits — the prompt comes from `-p/--prompt`, else
+the remaining positional text, else piped stdin:
+
+```sh
+codesplash run -p "summarize this repo"
+codesplash run . "fix the failing test" --auto      # path, positional prompt, auto-approve tools
+git diff | codesplash run --output-format json      # prompt from stdin, one JSON result object
+codesplash run -p "audit deps" --output-format stream-json --model claude-sonnet-5:high
+```
+
+Output formats: `text` (default — assistant text on stdout, tool activity on stderr), `json` (one
+final `{result, turns, usage, status}` object), `stream-json` (every event as a JSON line, then a
+result line). Useful flags: `--auto` (accept approvals; default declines them), `--sandbox
+read-only|workspace-write`, `--max-turns N`, `--no-history`. `--full-access` is interactive-only
+and rejected in run mode. Exit codes: `0` completed, `1` failed, `2` usage error, `130`
+interrupted. `codesplash --doctor` shows which providers have credentials and their source
+(`env`/`stored`) — never the values.
+
 ## Security posture
 
 - No provider OAuth implementation, no reading `~/.claude` or Codex credential stores, ever.

@@ -1,8 +1,11 @@
 /**
  * OpenAI Chat Completions streaming adapter. Connects through withRetries and never retries after
  * the first emitted event; aborting the request signal yields {type:"done", stopReason:"aborted"}
- * instead of throwing. API keys never appear in error messages.
+ * instead of throwing. API keys never appear in error messages: response bodies embedded in
+ * errors pass through redactSensitiveText first (a gateway or proxy can echo the request's
+ * Authorization header back in its error page).
  */
+import { redactSensitiveText } from "../../../core/index.ts"
 import {
   type ChatMessage,
   type ModelInfo,
@@ -105,7 +108,7 @@ async function* streamCompletion(
       const chunk = JSON.parse(frame.data) as WireChunk
       if (chunk.error) {
         throw new ProviderHttpError(
-          `OpenAI stream error${chunk.error.type ? ` (${chunk.error.type})` : ""}: ${chunk.error.message ?? "no message"}`,
+          `OpenAI stream error${chunk.error.type ? ` (${chunk.error.type})` : ""}: ${redactSensitiveText(chunk.error.message ?? "no message")}`,
           undefined,
         )
       }
@@ -154,7 +157,8 @@ async function connect(request: ProviderRequest, signal: AbortSignal): Promise<R
     signal,
   })
   if (!response.ok) {
-    const detail = (await response.text().catch(() => "")).slice(0, ERROR_BODY_LIMIT)
+    // Redact before truncating so a credential the body echoes is scrubbed whole, never split.
+    const detail = redactSensitiveText(await response.text().catch(() => "")).slice(0, ERROR_BODY_LIMIT)
     throw new ProviderHttpError(
       `OpenAI request failed with status ${response.status}${detail ? `: ${detail}` : ""}`,
       response.status,

@@ -3,6 +3,7 @@
  * one tools/ module allowed to import its siblings.
  */
 import type { HarnessTool, ToolSpec } from "../contracts.ts"
+import { applyPatchTool } from "./apply-patch.ts"
 import { bashTool } from "./bash.ts"
 import { editFileTool } from "./edit.ts"
 import { globTool } from "./glob.ts"
@@ -18,7 +19,17 @@ export type ToolRegistry = {
 }
 
 export function builtinTools(): HarnessTool[] {
-  return [readFileTool, writeFileTool, editFileTool, globTool, grepTool, bashTool, todoWriteTool, askUserTool]
+  return [
+    readFileTool,
+    writeFileTool,
+    editFileTool,
+    applyPatchTool,
+    globTool,
+    grepTool,
+    bashTool,
+    todoWriteTool,
+    askUserTool,
+  ]
 }
 
 export function createToolRegistry(tools: HarnessTool[]): ToolRegistry {
