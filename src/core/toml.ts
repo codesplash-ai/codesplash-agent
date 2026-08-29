@@ -1,39 +1,77 @@
 export type TomlScalar = string | number | boolean
 
+export type TomlValue = TomlScalar | TomlValue[] | TomlTable
+
 export type TomlTable = {
-  [key: string]: TomlScalar | { [key: string]: TomlScalar }
+  /** Undefined entries are skipped, so optional fields can be built unconditionally. */
+  [key: string]: TomlValue | undefined
 }
 
 /**
- * Serializes a flat table (root scalars plus one level of `[section]` tables) to TOML.
- * Bun ships `Bun.TOML.parse` without a serializer; the config schema is deliberately
- * flat, so this stays a minimal internal implementation instead of a dependency.
+ * Serializes a table to TOML: root scalars, nested `[a.b]` tables to any depth, inline arrays of
+ * scalars, and `[[a.b]]` arrays of tables. Bun ships `Bun.TOML.parse` without a serializer; the
+ * config schema is small and known, so this stays a minimal internal implementation instead of a
+ * dependency. Mixed-type arrays (tables alongside scalars) are unsupported and throw.
  */
 export function stringifyToml(table: TomlTable): string {
-  const rootLines: string[] = []
-  const sectionLines: string[] = []
+  const lines: string[] = []
+  writeTable(lines, table, [])
+  return `${lines.join("\n")}\n`.replace(/^\n/, "")
+}
+
+function writeTable(lines: string[], table: TomlTable, path: string[]): void {
+  const nestedTables: Array<[string, TomlTable]> = []
+  const tableArrays: Array<[string, TomlTable[]]> = []
 
   for (const [key, value] of Object.entries(table)) {
+    if (value === undefined) continue
     if (isScalar(value)) {
-      rootLines.push(`${formatKey(key)} = ${formatScalar(value)}`)
-      continue
-    }
-    sectionLines.push("", `[${formatKey(key)}]`)
-    for (const [sectionKey, sectionValue] of Object.entries(value)) {
-      if (!isScalar(sectionValue)) {
-        throw new Error(
-          `Cannot serialize [${key}].${sectionKey}: nested tables beyond one level are unsupported`,
-        )
-      }
-      sectionLines.push(`${formatKey(sectionKey)} = ${formatScalar(sectionValue)}`)
+      lines.push(`${formatKey(key)} = ${formatScalar(value)}`)
+    } else if (Array.isArray(value)) {
+      if (value.every(isTable)) tableArrays.push([key, value])
+      else lines.push(`${formatKey(key)} = ${formatInlineArray(value, [...path, key])}`)
+    } else {
+      nestedTables.push([key, value])
     }
   }
 
-  return `${[...rootLines, ...sectionLines].join("\n")}\n`.replace(/^\n/, "")
+  for (const [key, value] of nestedTables) {
+    const nestedPath = [...path, key]
+    lines.push("", `[${formatPath(nestedPath)}]`)
+    writeTable(lines, value, nestedPath)
+  }
+
+  for (const [key, elements] of tableArrays) {
+    const nestedPath = [...path, key]
+    for (const element of elements) {
+      lines.push("", `[[${formatPath(nestedPath)}]]`)
+      writeTable(lines, element, nestedPath)
+    }
+  }
+}
+
+/** Non-table arrays serialize inline; every element must be a scalar or a scalar array. */
+function formatInlineArray(values: TomlValue[], path: string[]): string {
+  const parts = values.map((value) => {
+    if (isScalar(value)) return formatScalar(value)
+    if (Array.isArray(value)) return formatInlineArray(value, path)
+    throw new Error(
+      `Cannot serialize ${formatPath(path)}: arrays mixing tables with other values are unsupported`,
+    )
+  })
+  return `[${parts.join(", ")}]`
 }
 
 function isScalar(value: unknown): value is TomlScalar {
   return typeof value === "string" || typeof value === "number" || typeof value === "boolean"
+}
+
+function isTable(value: TomlValue): value is TomlTable {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function formatPath(path: string[]): string {
+  return path.map(formatKey).join(".")
 }
 
 function formatKey(key: string): string {

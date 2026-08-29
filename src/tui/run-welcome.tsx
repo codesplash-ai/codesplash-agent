@@ -25,12 +25,14 @@ export async function runWelcome(
   project: ProjectPreflight,
   options: AppOptions = defaultAppOptions,
 ): Promise<void> {
-  let config = await loadConfig()
+  let config = await loadConfig(undefined, options.configOverrides)
 
   while (true) {
     const action = await renderWelcome(config.theme, async (theme) => {
       config = { ...config, theme }
-      await saveConfig(config)
+      // Persist the on-disk config plus the new theme: -c overrides are per-invocation and must
+      // never be written back, so the saved snapshot is reloaded without them.
+      await saveConfig({ ...(await loadConfig()), theme })
     })
     if (action === "quit") return
 
@@ -100,7 +102,15 @@ async function openEngine(
     }
     skipPicker = false
 
-    const outcome = await runCodexSession(project, config.theme, { engine, policy, historyEnabled, resume })
+    // The loaded config (with -c overrides applied) travels along so the codesplash engine sees
+    // the same providers/fallback settings as run/review/debug do.
+    const outcome = await runCodexSession(project, config.theme, {
+      engine,
+      config,
+      policy,
+      historyEnabled,
+      resume,
+    })
     if (outcome === "quit") return "quit"
     if (outcome === "new") {
       // Skip the picker and open a fresh session directly.

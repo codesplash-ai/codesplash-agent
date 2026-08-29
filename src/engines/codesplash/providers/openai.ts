@@ -29,28 +29,41 @@ export const openaiModels: ModelInfo[] = [
     id: "gpt-5.1",
     displayName: "GPT-5.1",
     provider: "openai",
+    protocol: "openai",
     contextWindow: 256000,
     maxOutputTokens: 32768,
     isDefault: true,
     supportsReasoning: true,
+    pricing: { inputPerMTok: 1.25, outputPerMTok: 10, cachedInputPerMTok: 0.125 },
   },
   {
     id: "gpt-5.1-mini",
     displayName: "GPT-5.1 Mini",
     provider: "openai",
+    protocol: "openai",
     contextWindow: 256000,
     maxOutputTokens: 32768,
     isDefault: false,
     supportsReasoning: false,
+    pricing: { inputPerMTok: 0.25, outputPerMTok: 2, cachedInputPerMTok: 0.025 },
   },
 ]
 
-export function createOpenAiProvider(): ProviderClient {
+export type OpenAiProviderOptions = {
+  /** Overrides the OPENAI_BASE_URL env override and the default endpoint. */
+  baseUrl?: string
+  /** Env var the key is read from; when set and the var is absent, no auth header is sent. */
+  keyEnvVar?: string
+  /** Model catalog served through client.models (custom providers pass their config models). */
+  models?: ModelInfo[]
+}
+
+export function createOpenAiProvider(options: OpenAiProviderOptions = {}): ProviderClient {
   return {
     id: "openai",
-    models: openaiModels,
+    models: options.models ?? openaiModels,
     stream(request: ProviderRequest, signal: AbortSignal): AsyncIterable<ProviderStreamEvent> {
-      return streamCompletion(request, signal)
+      return streamCompletion(request, signal, options)
     },
   }
 }
@@ -84,10 +97,11 @@ type PendingToolCall = { id?: string; name?: string; argumentsJson: string }
 async function* streamCompletion(
   request: ProviderRequest,
   signal: AbortSignal,
+  options: OpenAiProviderOptions,
 ): AsyncGenerator<ProviderStreamEvent> {
   let response: Response
   try {
-    response = await withRetries(() => connect(request, signal), { signal })
+    response = await withRetries(() => connect(request, signal, options), { signal })
   } catch (error) {
     if (signal.aborted) {
       yield { type: "done", stopReason: "aborted" }
@@ -146,19 +160,33 @@ async function* streamCompletion(
   yield { type: "done", stopReason: stopReason ?? "end_turn" }
 }
 
-async function connect(request: ProviderRequest, signal: AbortSignal): Promise<Response> {
-  const key = process.env.OPENAI_API_KEY
-  if (!key) throw new Error("OPENAI_API_KEY is not set; the harness cannot reach OpenAI")
-  const base = (process.env.OPENAI_BASE_URL ?? DEFAULT_BASE_URL).replace(/\/+$/, "")
+async function connect(
+  request: ProviderRequest,
+  signal: AbortSignal,
+  options: OpenAiProviderOptions,
+): Promise<Response> {
+  const key = process.env[options.keyEnvVar ?? "OPENAI_API_KEY"]
+  // The default provider requires its key; a custom provider is only constructed when available,
+  // so a missing key there means requiresKey=false and the request carries no auth header.
+  if (!key && options.keyEnvVar === undefined) {
+    throw new Error("OPENAI_API_KEY is not set; the harness cannot reach OpenAI")
+  }
+  const base = (options.baseUrl ?? process.env.OPENAI_BASE_URL ?? DEFAULT_BASE_URL).replace(/\/+$/, "")
+  const headers: Record<string, string> = { "content-type": "application/json" }
+  if (key) headers.authorization = `Bearer ${key}`
   const response = await fetch(`${base}/v1/chat/completions`, {
     method: "POST",
-    headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+    headers,
     body: JSON.stringify(buildBody(request)),
     signal,
   })
   if (!response.ok) {
-    // Redact before truncating so a credential the body echoes is scrubbed whole, never split.
-    const detail = redactSensitiveText(await response.text().catch(() => "")).slice(0, ERROR_BODY_LIMIT)
+    // Scrub the concrete resolved key first (pattern-based redaction cannot know a custom
+    // provider's key shape), then redact, then truncate so a credential the body echoes is
+    // scrubbed whole, never split.
+    let body = await response.text().catch(() => "")
+    if (key) body = body.replaceAll(key, "[REDACTED]")
+    const detail = redactSensitiveText(body).slice(0, ERROR_BODY_LIMIT)
     throw new ProviderHttpError(
       `OpenAI request failed with status ${response.status}${detail ? `: ${detail}` : ""}`,
       response.status,

@@ -44,6 +44,14 @@ export function sessionDirectory(root: string, projectId: string, localSessionId
   return join(root, projectId, localSessionId)
 }
 
+/**
+ * Where an engine-owned native transcript lives for a session: `transcript.jsonl` next to the
+ * session's events.jsonl. The session store never reads it; engines own its format.
+ */
+export function transcriptPathFor(handle: Pick<SessionHandle, "directory">): string {
+  return join(handle.directory, "transcript.jsonl")
+}
+
 export async function listProjectSessions(
   projectId: string,
   root = sessionsRootDirectory(),

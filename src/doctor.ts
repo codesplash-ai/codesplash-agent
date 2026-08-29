@@ -1,5 +1,18 @@
 /** Non-interactive diagnostics: the release smoke and the first thing support asks for. */
-import { configFilePath, dataDirectory, type EngineProbe, inspectProject } from "./core/index.ts"
+import {
+  type CustomProviderConfig,
+  configFilePath,
+  dataDirectory,
+  defaultConfig,
+  type EngineProbe,
+  inspectProject,
+  listProjectSessions,
+  loadConfig,
+  projectIdFor,
+  sessionDirectory,
+  sessionsRootDirectory,
+  transcriptPathFor,
+} from "./core/index.ts"
 import { ClaudeDriver } from "./engines/claude/index.ts"
 import { CodesplashDriver } from "./engines/codesplash/index.ts"
 import { CodexDriver } from "./engines/codex/index.ts"
@@ -16,14 +29,20 @@ export type DoctorReport = {
   codex: EngineProbe
   claude: EngineProbe
   codesplash: EngineProbe
+  /** One line per configured custom [providers.*] entry — key env var names only, never values. */
+  customProviders?: string[]
+  /** Native-transcript state for the newest codesplash session of this project (best effort). */
+  transcript?: string
 }
 
 export async function collectDoctorReport(cwd = process.cwd()): Promise<DoctorReport> {
-  const [codex, claude, codesplash, project] = await Promise.all([
+  const [codex, claude, codesplash, project, config] = await Promise.all([
     new CodexDriver().probe(),
     new ClaudeDriver().probe(),
     new CodesplashDriver().probe(),
     inspectProject(cwd).catch(() => undefined),
+    // A broken config file must not break diagnostics; the probe line already reports engines.
+    loadConfig().catch(() => structuredClone(defaultConfig)),
   ])
   const configPath = configFilePath()
 
@@ -38,6 +57,34 @@ export async function collectDoctorReport(cwd = process.cwd()): Promise<DoctorRe
     codex,
     claude,
     codesplash,
+    customProviders: config.providers.map((provider) => describeCustomProvider(provider)),
+    transcript: project ? await describeNewestTranscript(project.cwd) : undefined,
+  }
+}
+
+/** Names the key env var and whether it is set — the key value itself is never read here. */
+function describeCustomProvider(provider: CustomProviderConfig, env = process.env): string {
+  const keyState = env[provider.keyEnvVar]
+    ? `${provider.keyEnvVar} set`
+    : provider.requiresKey
+      ? `${provider.keyEnvVar} missing`
+      : "no key needed"
+  return `${provider.displayName} (custom, ${provider.protocol} protocol) · ${provider.baseUrl} · ${keyState}`
+}
+
+/** Transcript presence for the project's newest codesplash session; failures degrade to nothing. */
+async function describeNewestTranscript(cwd: string): Promise<string | undefined> {
+  try {
+    const root = sessionsRootDirectory()
+    const projectId = projectIdFor(cwd)
+    const newest = (await listProjectSessions(projectId, root)).find((meta) => meta.engine === "codesplash")
+    if (!newest) return "no codesplash sessions for this project"
+    const path = transcriptPathFor({
+      directory: sessionDirectory(root, projectId, newest.localSessionId),
+    })
+    return `${path}${(await Bun.file(path).exists()) ? "" : " (missing)"}`
+  } catch {
+    return undefined
   }
 }
 
@@ -50,6 +97,8 @@ export function formatDoctorReport(report: DoctorReport): string {
     ["codex", formatProbe(report.codex)],
     ["claude", formatProbe(report.claude)],
     ["codesplash", formatProbe(report.codesplash)],
+    ...(report.customProviders ?? []).map((line): [string, string] => ["provider", line]),
+    ...(report.transcript !== undefined ? [["transcript", report.transcript] as [string, string]] : []),
   ]
   const lines = [
     `CodeSplash Agent ${report.version}`,

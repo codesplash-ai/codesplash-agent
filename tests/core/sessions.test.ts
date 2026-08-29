@@ -10,6 +10,7 @@ import {
   readSessionMeta,
   type SessionMeta,
   SessionStore,
+  transcriptPathFor,
 } from "../../src/core/sessions.ts"
 
 const temporaryDirectories: string[] = []
@@ -167,6 +168,42 @@ describe("session store", () => {
   test("returns an empty list for a project with no sessions", async () => {
     const root = await temporaryDirectory()
     expect(await listProjectSessions(projectIdFor("/nowhere"), root)).toEqual([])
+  })
+
+  test("open returns a handle that appends to the same log and updates the same meta", async () => {
+    const root = await temporaryDirectory()
+    const store = new SessionStore(root)
+    const created = await store.create(makeMeta({ engine: "codesplash" }))
+    await created.appendEventLines([JSON.stringify(makeEvent(0, "one"))])
+
+    const reopened = await store.open(makeMeta().projectId, "local-1")
+    expect(reopened.directory).toBe(created.directory)
+    expect(reopened.meta.engine).toBe("codesplash")
+    await reopened.appendEventLines([JSON.stringify(makeEvent(1, "two"))])
+    await reopened.updateMeta({ lastStatus: "closed", lastSequence: 1 })
+
+    const events = await readSessionEvents(created.directory)
+    expect(events.events.map((event) => event.sequence)).toEqual([0, 1])
+    const meta = await readSessionMeta(created.directory)
+    expect(meta?.lastStatus).toBe("closed")
+    expect(meta?.lastSequence).toBe(1)
+    expect(meta?.updatedAt).not.toBe("2026-08-16T00:00:00.000Z")
+  })
+
+  test("open rejects a session that does not exist", async () => {
+    const root = await temporaryDirectory()
+    const store = new SessionStore(root)
+    await expect(store.open(projectIdFor("/canonical/project"), "missing")).rejects.toThrow(
+      "No session metadata",
+    )
+  })
+
+  test("transcriptPathFor places transcript.jsonl next to events.jsonl", async () => {
+    const root = await temporaryDirectory()
+    const store = new SessionStore(root)
+    const handle = await store.create(makeMeta({ engine: "codesplash" }))
+    expect(transcriptPathFor(handle)).toBe(join(handle.directory, "transcript.jsonl"))
+    expect(join(transcriptPathFor(handle), "..")).toBe(join(handle.eventsPath, ".."))
   })
 })
 

@@ -3,12 +3,14 @@ import { randomUUID } from "node:crypto"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { AgentEvent, EngineSession } from "../../../src/core/index.ts"
+import type { AgentConfig, AgentEvent, CustomProviderConfig, EngineSession } from "../../../src/core/index.ts"
+import { defaultConfig } from "../../../src/core/index.ts"
 import { setApiKey } from "../../../src/engines/codesplash/auth.ts"
-import type {
-  ProviderClient,
-  ProviderRequest,
-  ProviderStreamEvent,
+import {
+  type ProviderClient,
+  ProviderHttpError,
+  type ProviderRequest,
+  type ProviderStreamEvent,
 } from "../../../src/engines/codesplash/contracts.ts"
 import { CodesplashDriver } from "../../../src/engines/codesplash/engine.ts"
 import { APP_VERSION } from "../../../src/version.ts"
@@ -167,7 +169,7 @@ describe("CodesplashDriver sessions", () => {
       nativeTranscript: true,
       approvals: true,
       interrupt: true,
-      resume: false,
+      resume: true,
       usage: "tokens",
       surface: "native",
     })
@@ -342,5 +344,231 @@ describe("CodesplashDriver sessions", () => {
     await session.close()
     await done
     await expect(session.send({ text: "hi" })).rejects.toThrow("closed")
+  })
+
+  test("wires [codesplash].fallbackModel and the registry resolver into the loop", async () => {
+    process.env.ANTHROPIC_API_KEY = ANTHROPIC_KEY_VALUE
+    process.env.OPENAI_API_KEY = OPENAI_KEY_VALUE
+    // The primary provider fails with zero events; the loop must retry on the configured
+    // fallback model, whose client comes from the session's provider map (test override here).
+    const anthropicRequests: ProviderRequest[] = []
+    const anthropic: ProviderClient = {
+      id: "anthropic",
+      models: [],
+      stream(request) {
+        anthropicRequests.push(request)
+        return (async function* (): AsyncGenerator<ProviderStreamEvent> {
+          yield* []
+          throw new ProviderHttpError("scripted provider failure", 500)
+        })()
+      },
+    }
+    const openai = fakeProvider("openai", [
+      [
+        { type: "text_delta", text: "fallback reply" },
+        { type: "done", stopReason: "end_turn" },
+      ],
+    ])
+    const config: AgentConfig = {
+      ...structuredClone(defaultConfig),
+      codesplash: { fallbackModel: "gpt-5.1" },
+    }
+    const driver = new CodesplashDriver({ config, providers: { anthropic, openai } })
+    const session = await driver.openSession({ cwd, localSessionId: "local-fallback-1" })
+    const { events, done } = collectEvents(session)
+
+    await session.send({ text: "hello" })
+    await until(() => events.find((event) => event.kind === "turn.completed"), "turn.completed")
+
+    const warning = events.find((event) => event.kind === "warning")
+    expect(warning?.kind === "warning" && warning.payload.message).toBe(
+      "Provider error on claude-fable-5; falling back to gpt-5.1",
+    )
+    expect(anthropicRequests).toHaveLength(1)
+    expect(openai.requests).toHaveLength(1)
+    expect(openai.requests[0]?.model.id).toBe("gpt-5.1")
+    const completed = events.find((event) => event.kind === "message.completed")
+    expect(completed?.kind === "message.completed" && completed.payload.text).toBe("fallback reply")
+    const turn = events.find((event) => event.kind === "turn.completed")
+    expect(turn?.kind === "turn.completed" && turn.payload.status).toBe("completed")
+
+    await session.close()
+    await done
+  })
+})
+
+/* ------------------------------ custom (BYOK) providers ------------------------------ */
+
+function customConfig(...providers: CustomProviderConfig[]): AgentConfig {
+  return { ...structuredClone(defaultConfig), providers }
+}
+
+function ollamaProvider(overrides: Partial<CustomProviderConfig> = {}): CustomProviderConfig {
+  return {
+    id: "ollama",
+    protocol: "openai",
+    baseUrl: "http://localhost:11434/v1",
+    displayName: "Ollama",
+    keyEnvVar: "OLLAMA_API_KEY",
+    requiresKey: false,
+    models: [
+      {
+        id: "qwen3:8b",
+        displayName: "Qwen3 8B",
+        contextWindow: 32_768,
+        maxOutputTokens: 8_192,
+        supportsReasoning: false,
+        isDefault: true,
+      },
+    ],
+    ...overrides,
+  }
+}
+
+describe("CodesplashDriver custom providers", () => {
+  let cwd: string
+
+  beforeEach(async () => {
+    cwd = await mkdtemp(join(tmpdir(), "codesplash-engine-custom-"))
+    delete process.env.OLLAMA_API_KEY
+  })
+
+  afterEach(async () => {
+    delete process.env.OLLAMA_API_KEY
+    await rm(cwd, { recursive: true, force: true })
+  })
+
+  test("probe adds one detail fragment per configured custom provider, never key values", async () => {
+    process.env.ANTHROPIC_API_KEY = ANTHROPIC_KEY_VALUE
+    process.env.OLLAMA_API_KEY = "unit-test-ollama-key-value"
+    const config = customConfig(
+      ollamaProvider(),
+      ollamaProvider({
+        id: "gateway",
+        displayName: "Gateway",
+        keyEnvVar: "GATEWAY_API_KEY",
+        requiresKey: true,
+        models: [
+          {
+            id: "gw-model",
+            displayName: "gw-model",
+            contextWindow: 128_000,
+            maxOutputTokens: 16_384,
+            supportsReasoning: false,
+            isDefault: true,
+          },
+        ],
+      }),
+    )
+    const probe = await new CodesplashDriver({ config }).probe()
+    expect(probe.available).toBe(true)
+    expect(probe.detail).toBe(
+      "Anthropic API key (env) · Ollama (custom, key present) · Gateway (custom, key missing)",
+    )
+    expect(JSON.stringify(probe)).not.toContain("unit-test-ollama-key-value")
+  })
+
+  test("probe reports available on a keyless custom provider alone, and unavailable when its key is missing", async () => {
+    const keyless = await new CodesplashDriver({ config: customConfig(ollamaProvider()) }).probe()
+    expect(keyless.available).toBe(true)
+    expect(keyless.detail).toBe("Ollama (custom, no key needed)")
+
+    const keyed = await new CodesplashDriver({
+      config: customConfig(ollamaProvider({ requiresKey: true })),
+    }).probe()
+    expect(keyed.available).toBe(false)
+    expect(keyed.detail).toContain("No API keys found")
+    expect(keyed.detail).toContain("Ollama (custom, key missing)")
+  })
+
+  test("a session on a custom provider routes turns through the runtime-id keyed provider map", async () => {
+    const provider = fakeProvider("openai", [
+      [
+        { type: "text_delta", text: "local hello" },
+        { type: "done", stopReason: "end_turn" },
+      ],
+    ])
+    const driver = new CodesplashDriver({
+      config: customConfig(ollamaProvider()),
+      providers: { ollama: provider },
+    })
+    const session = await driver.openSession({ cwd, localSessionId: "local-custom-1" })
+    const { events, done } = collectEvents(session)
+
+    const ready = await until(
+      () => events.find((event) => event.kind === "session.status" && event.payload.status === "ready"),
+      "ready status",
+    )
+    expect(ready.kind === "session.status" && ready.payload.model).toBe("qwen3:8b")
+
+    const models = await session.listModels?.()
+    expect(models).toEqual([
+      {
+        id: "qwen3:8b",
+        displayName: "Qwen3 8B",
+        description: "Ollama · 33k context",
+        isDefault: true,
+      },
+    ])
+
+    await session.send({ text: "hi" })
+    await until(() => events.find((event) => event.kind === "turn.completed"), "turn.completed")
+    expect(provider.requests).toHaveLength(1)
+    expect(provider.requests[0]?.model.provider).toBe("ollama")
+    expect(provider.requests[0]?.model.protocol).toBe("openai")
+
+    await session.close()
+    await done
+  })
+
+  test("setModel switches between built-in and custom models, with actionable unavailable errors", async () => {
+    process.env.ANTHROPIC_API_KEY = ANTHROPIC_KEY_VALUE
+    const driver = new CodesplashDriver({
+      config: customConfig(
+        ollamaProvider(),
+        ollamaProvider({
+          id: "gateway",
+          displayName: "Gateway",
+          keyEnvVar: "GATEWAY_API_KEY",
+          requiresKey: true,
+          models: [
+            {
+              id: "gw-model",
+              displayName: "gw-model",
+              contextWindow: 128_000,
+              maxOutputTokens: 16_384,
+              supportsReasoning: false,
+              isDefault: true,
+            },
+          ],
+        }),
+      ),
+      providers: { anthropic: fakeProvider("anthropic", []), ollama: fakeProvider("openai", []) },
+    })
+    const session = await driver.openSession({ cwd, localSessionId: "local-custom-2" })
+    const { events, done } = collectEvents(session)
+
+    // The anthropic key is set, so the session default stays the built-in default model.
+    const ready = await until(
+      () => events.find((event) => event.kind === "session.status" && event.payload.status === "ready"),
+      "ready status",
+    )
+    expect(ready.kind === "session.status" && ready.payload.model).toBe("claude-fable-5")
+
+    // A custom model id containing ":" parses as an exact id, not an id:effort selector.
+    await session.setModel?.("qwen3:8b")
+    await until(
+      () => events.find((event) => event.kind === "session.status" && event.payload.model === "qwen3:8b"),
+      "custom model switch",
+    )
+
+    // An unavailable custom provider's model names the missing key env var, never its value.
+    await expect(session.setModel?.("gw-model")).rejects.toThrow(
+      "The Gateway provider needs GATEWAY_API_KEY set",
+    )
+    await expect(session.setModel?.("gpt-5.1")).rejects.toThrow("OPENAI_API_KEY")
+
+    await session.close()
+    await done
   })
 })

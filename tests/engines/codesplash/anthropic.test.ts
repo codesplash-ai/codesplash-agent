@@ -210,6 +210,99 @@ describe("AnthropicProvider catalog", () => {
       expect(entry.maxOutputTokens).toBe(32_000)
     }
     expect(model("claude-haiku-4-5-20251001").supportsReasoning).toBe(false)
+    for (const entry of anthropicModels) expect(entry.protocol).toBe("anthropic")
+  })
+})
+
+describe("AnthropicProvider factory options", () => {
+  async function drain(provider: ReturnType<typeof createAnthropicProvider>): Promise<ProviderStreamEvent[]> {
+    const events: ProviderStreamEvent[] = []
+    for await (const event of provider.stream(baseRequest(), new AbortController().signal)) {
+      events.push(event)
+    }
+    return events
+  }
+
+  test("an explicit baseUrl option wins over the ANTHROPIC_BASE_URL env override", async () => {
+    const hits: string[] = []
+    const local = Bun.serve({
+      port: 0,
+      fetch: (request) => {
+        hits.push(new URL(request.url).pathname)
+        return sseResponse(textTurnFrames())
+      },
+    })
+    try {
+      // ANTHROPIC_BASE_URL still points at the shared fixture; the option must win.
+      const events = await drain(createAnthropicProvider({ baseUrl: `http://127.0.0.1:${local.port}` }))
+      expect(events.at(-1)).toEqual({ type: "done", stopReason: "end_turn" })
+      expect(hits).toEqual(["/v1/messages"])
+      expect(captured).toHaveLength(0)
+    } finally {
+      local.stop(true)
+    }
+  })
+
+  test("a keyEnvVar option reads the key from the named variable into x-api-key", async () => {
+    respond = async (request) => {
+      await captureRequest(request)
+      return sseResponse(textTurnFrames())
+    }
+    process.env.CUSTOM_ANTHROPIC_TEST_KEY = "custom-anthropic-key-value"
+    try {
+      await drain(createAnthropicProvider({ keyEnvVar: "CUSTOM_ANTHROPIC_TEST_KEY" }))
+      expect(captured[0]?.apiKey).toBe("custom-anthropic-key-value")
+    } finally {
+      delete process.env.CUSTOM_ANTHROPIC_TEST_KEY
+    }
+  })
+
+  test("a keyEnvVar with no value sends no auth header instead of failing (requiresKey=false)", async () => {
+    respond = async (request) => {
+      await captureRequest(request)
+      return sseResponse(textTurnFrames())
+    }
+    delete process.env.CUSTOM_ANTHROPIC_MISSING_KEY
+    const events = await drain(createAnthropicProvider({ keyEnvVar: "CUSTOM_ANTHROPIC_MISSING_KEY" }))
+    expect(events.at(-1)).toEqual({ type: "done", stopReason: "end_turn" })
+    expect(captured[0]?.apiKey).toBeNull()
+  })
+
+  test("a custom key echoed bare in an error body is scrubbed even when its env name looks benign", async () => {
+    // The env-name heuristic in redactSensitiveText would never match "CUSTOM_MODEL_AUTH", and the
+    // value matches no credential pattern — the adapter must scrub the concrete resolved key.
+    process.env.CUSTOM_MODEL_AUTH = "gateway-pass-value-123456"
+    respond = () => new Response("gateway saw gateway-pass-value-123456 and refused", { status: 400 })
+    try {
+      let thrown: unknown
+      try {
+        await drain(createAnthropicProvider({ keyEnvVar: "CUSTOM_MODEL_AUTH" }))
+      } catch (error) {
+        thrown = error
+      }
+      expect(thrown).toBeInstanceOf(ProviderHttpError)
+      const message = (thrown as ProviderHttpError).message
+      expect(message).toContain("[REDACTED]")
+      expect(message).not.toContain("gateway-pass-value-123456")
+    } finally {
+      delete process.env.CUSTOM_MODEL_AUTH
+    }
+  })
+
+  test("a models option replaces the client's catalog", () => {
+    const custom: ModelInfo[] = [
+      {
+        id: "claude-proxy",
+        displayName: "Claude proxy",
+        provider: "my-gateway",
+        protocol: "anthropic",
+        contextWindow: 128_000,
+        maxOutputTokens: 16_384,
+        isDefault: true,
+        supportsReasoning: true,
+      },
+    ]
+    expect(createAnthropicProvider({ models: custom }).models).toBe(custom)
   })
 })
 

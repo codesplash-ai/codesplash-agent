@@ -1,7 +1,8 @@
 import { chmod, mkdir, readFile, rename } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
-import { stringifyToml } from "./toml.ts"
+import { redactSensitiveText } from "./redaction.ts"
+import { stringifyToml, type TomlTable } from "./toml.ts"
 
 export type ThemePreference = "system" | "dark" | "light"
 
@@ -11,11 +12,44 @@ export type ConfigSandboxMode = Exclude<SandboxMode, "danger-full-access">
 
 export type ApprovalPolicy = "untrusted" | "on-request"
 
+/** Wire protocol a custom provider speaks; mirrors the engine's ProviderId union. */
+export type CustomProviderProtocol = "anthropic" | "openai"
+
+/** Catalog price estimates in USD per million tokens. */
+export type CustomModelPricing = {
+  inputPerMTok: number
+  outputPerMTok: number
+  cachedInputPerMTok?: number
+}
+
+export type CustomModelConfig = {
+  id: string
+  displayName: string
+  contextWindow: number
+  maxOutputTokens: number
+  supportsReasoning: boolean
+  isDefault: boolean
+  pricing?: CustomModelPricing
+}
+
+/** One `[providers.<id>]` table, fully resolved (defaults applied). Keys never live here. */
+export type CustomProviderConfig = {
+  id: string
+  protocol: CustomProviderProtocol
+  baseUrl: string
+  displayName: string
+  keyEnvVar: string
+  requiresKey: boolean
+  models: CustomModelConfig[]
+}
+
 export type AgentConfig = {
   schemaVersion: 1
   theme: ThemePreference
   history: { enabled: boolean }
   codex: { sandbox: ConfigSandboxMode; approvalPolicy: ApprovalPolicy }
+  codesplash: { fallbackModel?: string }
+  providers: CustomProviderConfig[]
 }
 
 export const defaultConfig: AgentConfig = {
@@ -23,7 +57,36 @@ export const defaultConfig: AgentConfig = {
   theme: "system",
   history: { enabled: true },
   codex: { sandbox: "workspace-write", approvalPolicy: "on-request" },
+  codesplash: {},
+  providers: [],
 }
+
+const PROVIDER_ID_PATTERN = /^[a-z][a-z0-9-]{0,31}$/
+const RESERVED_PROVIDER_IDS = ["anthropic", "openai"]
+/**
+ * Credential-shaped field names refused inside [providers.*]: API keys belong in the
+ * environment. Compared case-insensitively with `_`/`-` stripped, so the common aliases
+ * (api_key, api-key, API_KEY, Token, ...) are refused too instead of sitting unused in
+ * plaintext on disk.
+ */
+const CREDENTIAL_FIELD_KEYS = new Set([
+  "key",
+  "apikey",
+  "token",
+  "secret",
+  "password",
+  "authorization",
+  "bearer",
+])
+
+/** Field names in `table` that look like credentials (see CREDENTIAL_FIELD_KEYS). */
+function credentialFieldNames(table: Record<string, unknown>): string[] {
+  return Object.keys(table).filter((name) =>
+    CREDENTIAL_FIELD_KEYS.has(name.toLowerCase().replace(/[-_]/g, "")),
+  )
+}
+const DEFAULT_CONTEXT_WINDOW = 128_000
+const DEFAULT_MAX_OUTPUT_TOKENS = 16_384
 
 export function configDirectory(
   env: NodeJS.ProcessEnv = process.env,
@@ -51,12 +114,23 @@ export function configFilePath(directory = configDirectory()): string {
   return join(directory, "config.toml")
 }
 
-export async function loadConfig(path = configFilePath()): Promise<AgentConfig> {
+/**
+ * Loads and validates the config file. `overrides` are per-invocation `-c/--config` values in
+ * `dotted.path=value` form, applied via applyConfigOverrides BEFORE validation — they are never
+ * written back to disk. A missing file still honors the overrides (applied to an empty table).
+ */
+export async function loadConfig(
+  path = configFilePath(),
+  overrides: readonly string[] = [],
+): Promise<AgentConfig> {
   let source: string
   try {
     source = await readFile(path, "utf8")
   } catch (error) {
-    if (isNodeError(error) && error.code === "ENOENT") return structuredClone(defaultConfig)
+    if (isNodeError(error) && error.code === "ENOENT") {
+      if (overrides.length === 0) return structuredClone(defaultConfig)
+      return validateConfig(applyConfigOverrides({}, overrides), path)
+    }
     throw new Error(`Could not read config at ${path}: ${errorMessage(error)}`, { cause: error })
   }
 
@@ -67,7 +141,61 @@ export async function loadConfig(path = configFilePath()): Promise<AgentConfig> 
     throw new Error(`Could not parse config at ${path}: ${errorMessage(error)}`, { cause: error })
   }
 
-  return validateConfig(parsed, path)
+  return validateConfig(applyConfigOverrides(parsed, overrides), path)
+}
+
+/**
+ * Applies `dotted.path=value` overrides to a parsed (but not yet validated) TOML object. Values
+ * parse as TOML scalars, falling back to the raw string. Malformed overrides throw with the
+ * offending override named; the message passes through redactSensitiveText so a value that looks
+ * like a credential is never echoed.
+ */
+export function applyConfigOverrides(parsed: unknown, overrides: readonly string[]): unknown {
+  if (overrides.length === 0) return parsed
+  const root: Record<string, unknown> = isRecord(parsed) ? structuredClone(parsed) : {}
+
+  for (const override of overrides) {
+    const separator = override.indexOf("=")
+    if (separator === -1) {
+      throw new Error(
+        `Invalid config override "${redactSensitiveText(override)}": expected dotted.path=value`,
+      )
+    }
+    const path = override.slice(0, separator).trim()
+    const segments = path.split(".").map((segment) => segment.trim())
+    if (path === "" || segments.some((segment) => segment === "")) {
+      throw new Error(`Invalid config override "${redactSensitiveText(override)}": the key path is empty`)
+    }
+    setConfigPath(root, segments, parseOverrideValue(override.slice(separator + 1)))
+  }
+
+  return root
+}
+
+function parseOverrideValue(raw: string): unknown {
+  try {
+    const parsed = Bun.TOML.parse(`v = ${raw}`)
+    if (isRecord(parsed) && "v" in parsed) return parsed.v
+  } catch {
+    // Not a TOML scalar; fall through to the raw string.
+  }
+  return raw
+}
+
+function setConfigPath(root: Record<string, unknown>, segments: string[], value: unknown): void {
+  let cursor = root
+  for (const segment of segments.slice(0, -1)) {
+    const next = cursor[segment]
+    if (isRecord(next)) {
+      cursor = next
+    } else {
+      const created: Record<string, unknown> = {}
+      cursor[segment] = created
+      cursor = created
+    }
+  }
+  const leaf = segments[segments.length - 1]
+  if (leaf !== undefined) cursor[leaf] = value
 }
 
 export function validateConfig(parsed: unknown, path: string): AgentConfig {
@@ -127,6 +255,29 @@ export function validateConfig(parsed: unknown, path: string): AgentConfig {
     }
   }
 
+  if (parsed.codesplash !== undefined) {
+    if (!isRecord(parsed.codesplash)) {
+      problems.push(`[codesplash]: expected a table`)
+    } else if (parsed.codesplash.fallbackModel !== undefined) {
+      // Which model the id names is validated at use time, not load time.
+      if (typeof parsed.codesplash.fallbackModel === "string" && parsed.codesplash.fallbackModel !== "") {
+        config.codesplash.fallbackModel = parsed.codesplash.fallbackModel
+      } else {
+        problems.push(
+          `[codesplash].fallbackModel: got ${JSON.stringify(parsed.codesplash.fallbackModel)}, expected a model id string`,
+        )
+      }
+    }
+  }
+
+  if (parsed.providers !== undefined) {
+    if (!isRecord(parsed.providers)) {
+      problems.push(`[providers]: expected one [providers.<id>] table per custom provider`)
+    } else {
+      config.providers = validateProviders(parsed.providers, problems)
+    }
+  }
+
   if (problems.length > 0) {
     throw new Error(`Invalid config at ${path}:\n${problems.map((problem) => `  - ${problem}`).join("\n")}`)
   }
@@ -134,20 +285,281 @@ export function validateConfig(parsed: unknown, path: string): AgentConfig {
   return config
 }
 
+function validateProviders(providers: Record<string, unknown>, problems: string[]): CustomProviderConfig[] {
+  const validated: CustomProviderConfig[] = []
+  /** model id -> provider id that already defined it; duplicates across the config are errors. */
+  const seenModelIds = new Map<string, string>()
+
+  for (const [id, table] of Object.entries(providers)) {
+    if (RESERVED_PROVIDER_IDS.includes(id)) {
+      problems.push(
+        `[providers.${id}]: "${id}" is a built-in provider; custom provider ids must not shadow it`,
+      )
+      continue
+    }
+    if (!PROVIDER_ID_PATTERN.test(id)) {
+      problems.push(
+        `[providers.${id}]: provider ids must match ${PROVIDER_ID_PATTERN} (lowercase letters, digits, hyphens)`,
+      )
+      continue
+    }
+    if (!isRecord(table)) {
+      problems.push(`[providers.${id}]: expected a table`)
+      continue
+    }
+    const provider = validateProvider(id, table, seenModelIds, problems)
+    if (provider) validated.push(provider)
+  }
+
+  return validated
+}
+
+function validateProvider(
+  id: string,
+  table: Record<string, unknown>,
+  seenModelIds: Map<string, string>,
+  problems: string[],
+): CustomProviderConfig | undefined {
+  const before = problems.length
+  const keyEnvVar = readOptionalString(table.keyEnvVar) ?? defaultKeyEnvVar(id)
+
+  // Never store credentials in config.toml — refuse the field without echoing its value.
+  for (const field of credentialFieldNames(table)) {
+    problems.push(
+      `[providers.${id}].${field}: API keys never live in config.toml; set the ${keyEnvVar} environment variable instead`,
+    )
+  }
+
+  if (table.keyEnvVar !== undefined && readOptionalString(table.keyEnvVar) === undefined) {
+    problems.push(`[providers.${id}].keyEnvVar: expected a non-empty environment variable name`)
+  }
+
+  let protocol: CustomProviderProtocol | undefined
+  if (table.protocol === undefined) {
+    problems.push(`[providers.${id}].protocol: required — "anthropic" or "openai"`)
+  } else if (table.protocol === "anthropic" || table.protocol === "openai") {
+    protocol = table.protocol
+  } else {
+    problems.push(
+      `[providers.${id}].protocol: got ${JSON.stringify(table.protocol)}, expected "anthropic" or "openai"`,
+    )
+  }
+
+  let baseUrl: string | undefined
+  if (table.baseUrl === undefined) {
+    problems.push(`[providers.${id}].baseUrl: required for custom providers`)
+  } else {
+    baseUrl = readOptionalString(table.baseUrl)
+    if (baseUrl === undefined) {
+      problems.push(`[providers.${id}].baseUrl: got ${JSON.stringify(table.baseUrl)}, expected a URL string`)
+    }
+  }
+
+  const displayName = readOptionalString(table.displayName) ?? capitalize(id)
+  if (table.displayName !== undefined && readOptionalString(table.displayName) === undefined) {
+    problems.push(`[providers.${id}].displayName: expected a non-empty string`)
+  }
+
+  let requiresKey = true
+  if (table.requiresKey !== undefined) {
+    if (typeof table.requiresKey === "boolean") requiresKey = table.requiresKey
+    else {
+      problems.push(
+        `[providers.${id}].requiresKey: got ${JSON.stringify(table.requiresKey)}, expected true or false`,
+      )
+    }
+  }
+
+  const models = validateModels(id, table.models, keyEnvVar, seenModelIds, problems)
+
+  if (problems.length > before || protocol === undefined || baseUrl === undefined || !models) {
+    return undefined
+  }
+  return { id, protocol, baseUrl, displayName, keyEnvVar, requiresKey, models }
+}
+
+function validateModels(
+  providerId: string,
+  value: unknown,
+  keyEnvVar: string,
+  seenModelIds: Map<string, string>,
+  problems: string[],
+): CustomModelConfig[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) {
+    problems.push(
+      `[providers.${providerId}].models: at least one [[providers.${providerId}.models]] table is required`,
+    )
+    return undefined
+  }
+
+  const before = problems.length
+  const models: CustomModelConfig[] = []
+  let sawDefault = false
+
+  for (const [index, entry] of value.entries()) {
+    const label = `[[providers.${providerId}.models]] #${index + 1}`
+    if (!isRecord(entry)) {
+      problems.push(`${label}: expected a table`)
+      continue
+    }
+
+    for (const field of credentialFieldNames(entry)) {
+      problems.push(
+        `${label}.${field}: API keys never live in config.toml; set the ${keyEnvVar} environment variable instead`,
+      )
+    }
+
+    const id = readOptionalString(entry.id)
+    if (id === undefined) {
+      problems.push(`${label}.id: required — the model id sent to the provider`)
+      continue
+    }
+    const previousOwner = seenModelIds.get(id)
+    if (previousOwner !== undefined) {
+      problems.push(
+        `${label}.id: duplicate model id "${id}" (already defined by [providers.${previousOwner}])`,
+      )
+      continue
+    }
+    seenModelIds.set(id, providerId)
+
+    const model: CustomModelConfig = {
+      id,
+      displayName: readOptionalString(entry.displayName) ?? id,
+      contextWindow: DEFAULT_CONTEXT_WINDOW,
+      maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+      supportsReasoning: false,
+      isDefault: false,
+    }
+    if (entry.displayName !== undefined && readOptionalString(entry.displayName) === undefined) {
+      problems.push(`${label}.displayName: expected a non-empty string`)
+    }
+
+    for (const field of ["contextWindow", "maxOutputTokens"] as const) {
+      const raw = entry[field]
+      if (raw === undefined) continue
+      if (typeof raw === "number" && Number.isInteger(raw) && raw > 0) model[field] = raw
+      else problems.push(`${label}.${field}: got ${JSON.stringify(raw)}, expected a positive integer`)
+    }
+
+    for (const [field, target] of [
+      ["supportsReasoning", "supportsReasoning"],
+      ["default", "isDefault"],
+    ] as const) {
+      const raw = entry[field]
+      if (raw === undefined) continue
+      if (typeof raw === "boolean") model[target] = raw
+      else problems.push(`${label}.${field}: got ${JSON.stringify(raw)}, expected true or false`)
+    }
+    if (model.isDefault) {
+      if (sawDefault) {
+        problems.push(`${label}.default: more than one model sets default = true`)
+        model.isDefault = false
+      }
+      sawDefault = true
+    }
+
+    if (entry.pricing !== undefined) {
+      const pricing = validatePricing(label, entry.pricing, problems)
+      if (pricing) model.pricing = pricing
+    }
+
+    models.push(model)
+  }
+
+  if (problems.length > before) return undefined
+  if (!sawDefault && models[0]) models[0].isDefault = true
+  return models
+}
+
+function validatePricing(label: string, value: unknown, problems: string[]): CustomModelPricing | undefined {
+  if (!isRecord(value)) {
+    problems.push(`${label}.pricing: expected a table`)
+    return undefined
+  }
+  const before = problems.length
+  const read = (field: string, required: boolean): number | undefined => {
+    const raw = value[field]
+    if (raw === undefined) {
+      if (required) problems.push(`${label}.pricing.${field}: required — USD per million tokens`)
+      return undefined
+    }
+    if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) return raw
+    problems.push(`${label}.pricing.${field}: got ${JSON.stringify(raw)}, expected a non-negative number`)
+    return undefined
+  }
+  const inputPerMTok = read("inputPerMTok", true)
+  const outputPerMTok = read("outputPerMTok", true)
+  const cachedInputPerMTok = read("cachedInputPerMTok", false)
+  if (problems.length > before || inputPerMTok === undefined || outputPerMTok === undefined) return undefined
+  const pricing: CustomModelPricing = { inputPerMTok, outputPerMTok }
+  if (cachedInputPerMTok !== undefined) pricing.cachedInputPerMTok = cachedInputPerMTok
+  return pricing
+}
+
+/** Default key env var for a custom provider id: upper-cased, non-alphanumerics to "_". */
+export function defaultKeyEnvVar(providerId: string): string {
+  return `${providerId.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`
+}
+
+function capitalize(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1)
+}
+
 export async function saveConfig(config: AgentConfig, path = configFilePath()): Promise<void> {
   const directory = dirname(path)
 
   await mkdir(directory, { recursive: true, mode: 0o700 })
   const temporaryPath = `${path}.${process.pid}.tmp`
-  const source = stringifyToml({
+  const table: TomlTable = {
     schemaVersion: config.schemaVersion,
     theme: config.theme,
     history: { enabled: config.history.enabled },
     codex: { sandbox: config.codex.sandbox, approvalPolicy: config.codex.approvalPolicy },
-  })
+  }
+  if (config.codesplash.fallbackModel !== undefined) {
+    table.codesplash = { fallbackModel: config.codesplash.fallbackModel }
+  }
+  if (config.providers.length > 0) {
+    table.providers = Object.fromEntries(
+      config.providers.map((provider) => [provider.id, providerTable(provider)]),
+    )
+  }
+  const source = stringifyToml(table)
   await Bun.write(temporaryPath, source)
   await chmod(temporaryPath, 0o600)
   await rename(temporaryPath, path)
+}
+
+function providerTable(provider: CustomProviderConfig): TomlTable {
+  return {
+    protocol: provider.protocol,
+    baseUrl: provider.baseUrl,
+    displayName: provider.displayName,
+    keyEnvVar: provider.keyEnvVar,
+    requiresKey: provider.requiresKey,
+    models: provider.models.map((model) => {
+      const entry: TomlTable = {
+        id: model.id,
+        displayName: model.displayName,
+        contextWindow: model.contextWindow,
+        maxOutputTokens: model.maxOutputTokens,
+        supportsReasoning: model.supportsReasoning,
+        default: model.isDefault,
+      }
+      if (model.pricing) {
+        const pricing: TomlTable = {
+          inputPerMTok: model.pricing.inputPerMTok,
+          outputPerMTok: model.pricing.outputPerMTok,
+        }
+        if (model.pricing.cachedInputPerMTok !== undefined) {
+          pricing.cachedInputPerMTok = model.pricing.cachedInputPerMTok
+        }
+        entry.pricing = pricing
+      }
+      return entry
+    }),
+  }
 }
 
 export function isThemePreference(value: unknown): value is ThemePreference {
@@ -164,6 +576,10 @@ function isConfigSandboxMode(value: unknown): value is ConfigSandboxMode {
 
 function isApprovalPolicy(value: unknown): value is ApprovalPolicy {
   return value === "untrusted" || value === "on-request"
+}
+
+function readOptionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value !== "" ? value : undefined
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

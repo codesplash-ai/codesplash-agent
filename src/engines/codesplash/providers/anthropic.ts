@@ -37,48 +37,69 @@ export const anthropicModels: ModelInfo[] = [
     id: "claude-fable-5",
     displayName: "Claude Fable 5",
     provider: "anthropic",
+    protocol: "anthropic",
     contextWindow: 200_000,
     maxOutputTokens: 32_000,
     isDefault: true,
     supportsReasoning: true,
+    pricing: { inputPerMTok: 15, outputPerMTok: 75, cachedInputPerMTok: 1.5 },
   },
   {
     id: "claude-opus-5",
     displayName: "Claude Opus 5",
     provider: "anthropic",
+    protocol: "anthropic",
     contextWindow: 200_000,
     maxOutputTokens: 32_000,
     isDefault: false,
     supportsReasoning: true,
+    pricing: { inputPerMTok: 15, outputPerMTok: 75, cachedInputPerMTok: 1.5 },
   },
   {
     id: "claude-sonnet-5",
     displayName: "Claude Sonnet 5",
     provider: "anthropic",
+    protocol: "anthropic",
     contextWindow: 200_000,
     maxOutputTokens: 32_000,
     isDefault: false,
     supportsReasoning: true,
+    pricing: { inputPerMTok: 3, outputPerMTok: 15, cachedInputPerMTok: 0.3 },
   },
   {
     id: "claude-haiku-4-5-20251001",
     displayName: "Claude Haiku 4.5",
     provider: "anthropic",
+    protocol: "anthropic",
     contextWindow: 200_000,
     maxOutputTokens: 32_000,
     isDefault: false,
     supportsReasoning: false,
+    pricing: { inputPerMTok: 1, outputPerMTok: 5, cachedInputPerMTok: 0.1 },
   },
 ]
 
+export type AnthropicProviderOptions = {
+  /** Overrides the ANTHROPIC_BASE_URL env override and the default endpoint. */
+  baseUrl?: string
+  /** Env var the key is read from; when set and the var is absent, no auth header is sent. */
+  keyEnvVar?: string
+  /** Model catalog served through client.models (custom providers pass their config models). */
+  models?: ModelInfo[]
+}
+
 export class AnthropicProvider implements ProviderClient {
   readonly id = "anthropic" as const
-  readonly models = anthropicModels
+  readonly models: ModelInfo[]
+
+  constructor(readonly options: AnthropicProviderOptions = {}) {
+    this.models = options.models ?? anthropicModels
+  }
 
   async *stream(request: ProviderRequest, signal: AbortSignal): AsyncIterable<ProviderStreamEvent> {
     let response: Response
     try {
-      response = await connect(request, signal)
+      response = await connect(request, signal, this.options)
     } catch (error) {
       if (signal.aborted) {
         yield { type: "done", stopReason: "aborted" }
@@ -90,42 +111,54 @@ export class AnthropicProvider implements ProviderClient {
   }
 }
 
-export function createAnthropicProvider(): ProviderClient {
-  return new AnthropicProvider()
+export function createAnthropicProvider(options: AnthropicProviderOptions = {}): ProviderClient {
+  return new AnthropicProvider(options)
 }
 
-async function connect(request: ProviderRequest, signal: AbortSignal): Promise<Response> {
-  const apiKey = process.env.ANTHROPIC_API_KEY
-  if (!apiKey) throw new Error("anthropic: ANTHROPIC_API_KEY is not set")
-  const baseUrl = (process.env.ANTHROPIC_BASE_URL ?? DEFAULT_BASE_URL).replace(/\/+$/, "")
+async function connect(
+  request: ProviderRequest,
+  signal: AbortSignal,
+  options: AnthropicProviderOptions,
+): Promise<Response> {
+  const keyEnvVar = options.keyEnvVar ?? "ANTHROPIC_API_KEY"
+  const apiKey = process.env[keyEnvVar]
+  // The default provider requires its key; a custom provider is only constructed when available,
+  // so a missing key there means requiresKey=false and the request carries no auth header.
+  if (!apiKey && options.keyEnvVar === undefined) {
+    throw new Error("anthropic: ANTHROPIC_API_KEY is not set")
+  }
+  const baseUrl = (options.baseUrl ?? process.env.ANTHROPIC_BASE_URL ?? DEFAULT_BASE_URL).replace(/\/+$/, "")
+  const headers: Record<string, string> = {
+    "anthropic-version": ANTHROPIC_VERSION,
+    "content-type": "application/json",
+    accept: "text/event-stream",
+  }
+  if (apiKey) headers["x-api-key"] = apiKey
   const body = JSON.stringify(buildRequestBody(request))
   return withRetries(
     async () => {
       const response = await fetch(`${baseUrl}/v1/messages`, {
         method: "POST",
-        headers: {
-          "x-api-key": apiKey,
-          "anthropic-version": ANTHROPIC_VERSION,
-          "content-type": "application/json",
-          accept: "text/event-stream",
-        },
+        headers,
         body,
         signal,
       })
-      if (!response.ok) throw await httpError(response)
+      if (!response.ok) throw await httpError(response, apiKey)
       return response
     },
     { signal },
   )
 }
 
-async function httpError(response: Response): Promise<ProviderHttpError> {
+async function httpError(response: Response, apiKey: string | undefined): Promise<ProviderHttpError> {
   let detail = ""
   try {
-    // Redact before truncating so a credential the body echoes is scrubbed whole, never split.
-    detail = redactSensitiveText(await response.text())
-      .slice(0, ERROR_BODY_MAX_CHARS)
-      .trim()
+    // Scrub the concrete resolved key first — pattern-based redaction cannot know a custom
+    // provider's key shape or env-var name — then redact, then truncate so a credential the body
+    // echoes is scrubbed whole, never split.
+    let body = await response.text()
+    if (apiKey) body = body.replaceAll(apiKey, "[REDACTED]")
+    detail = redactSensitiveText(body).slice(0, ERROR_BODY_MAX_CHARS).trim()
   } catch {
     detail = ""
   }

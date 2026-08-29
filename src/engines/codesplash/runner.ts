@@ -15,6 +15,7 @@ import {
   type EngineSession,
   type SessionPolicy,
   type SessionRecorder,
+  type SessionUsageSnapshot,
   serializeEvent,
   type TurnStatus,
 } from "../../core/index.ts"
@@ -52,6 +53,12 @@ export type HeadlessRunOptions = {
   driver?: EngineDriver
   /** Stable session id shared with the CLI's persisted event log; defaults to a random UUID. */
   localSessionId?: string
+  /** Engine-owned transcript to reload on resume and append to per turn; passed to openSession. */
+  nativeTranscriptPath?: string
+  /** First event sequence for a resumed session's log continuity; passed to openSession. */
+  firstSequence?: number
+  /** Cumulative usage the resumed session already recorded; passed to openSession. */
+  initialUsage?: SessionUsageSnapshot
   /** Injectable sinks so tests capture output; default process.stdout / process.stderr. */
   stdout?: HeadlessSink
   stderr?: HeadlessSink
@@ -69,15 +76,19 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<number> 
   const stderr = options.stderr ?? process.stderr
   const recorder = options.recorder
   const maxTurns = Math.max(1, Math.floor(options.maxTurns ?? DEFAULT_MAX_TURNS))
-  const output = createOutput(options.outputFormat, stdout, stderr)
+  const localSessionId = options.localSessionId ?? crypto.randomUUID()
+  const output = createOutput(options.outputFormat, stdout, stderr, localSessionId)
 
   let session: EngineSession
   try {
     session = await driver.openSession({
       cwd: options.cwd,
-      localSessionId: options.localSessionId ?? crypto.randomUUID(),
+      localSessionId,
       model: headlessModelSelector(options.model, options.effort),
       policy: options.policy,
+      nativeTranscriptPath: options.nativeTranscriptPath,
+      firstSequence: options.firstSequence,
+      initialUsage: options.initialUsage,
     })
   } catch (error) {
     stderr.write(`codesplash: ${describeError(error)}\n`)
@@ -195,10 +206,11 @@ function createOutput(
   format: HeadlessOutputFormat,
   stdout: HeadlessSink,
   stderr: HeadlessSink,
+  sessionId: string,
 ): HeadlessOutput {
   if (format === "text") return new TextOutput(stdout, stderr)
-  if (format === "json") return new JsonOutput(stdout)
-  return new StreamJsonOutput(stdout)
+  if (format === "json") return new JsonOutput(stdout, sessionId)
+  return new StreamJsonOutput(stdout, sessionId)
 }
 
 /**
@@ -213,6 +225,7 @@ class ResultAccumulator {
   #outputTokens: number | undefined
   #totalTokens: number | undefined
   #contextTokens: number | undefined
+  #estimatedCostUsd: number | undefined
 
   observe(event: AgentEvent): void {
     if (event.kind === "message.delta") {
@@ -228,6 +241,7 @@ class ResultAccumulator {
       this.#outputTokens = event.payload.outputTokens ?? this.#outputTokens
       this.#totalTokens = event.payload.totalTokens ?? this.#totalTokens
       this.#contextTokens = event.payload.contextTokens ?? this.#contextTokens
+      this.#estimatedCostUsd = event.payload.estimatedCostUsd ?? this.#estimatedCostUsd
     }
   }
 
@@ -235,14 +249,23 @@ class ResultAccumulator {
     return this.#lastMessageId === undefined ? "" : (this.#messages.get(this.#lastMessageId) ?? "")
   }
 
-  get usage(): { inputTokens?: number; outputTokens?: number; totalTokens?: number } {
-    const usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number } = {}
+  get usage(): HeadlessUsage {
+    const usage: HeadlessUsage = {}
     if (this.#inputTokens !== undefined) usage.inputTokens = this.#inputTokens
     if (this.#outputTokens !== undefined) usage.outputTokens = this.#outputTokens
     const total = this.#totalTokens ?? this.#contextTokens
     if (total !== undefined) usage.totalTokens = total
+    if (this.#estimatedCostUsd !== undefined) usage.estimatedCostUsd = this.#estimatedCostUsd
     return usage
   }
+}
+
+type HeadlessUsage = {
+  inputTokens?: number
+  outputTokens?: number
+  totalTokens?: number
+  /** Session-cumulative estimated cost from the engine's usage events, when observed. */
+  estimatedCostUsd?: number
 }
 
 /** Assistant text deltas stream to stdout; tool labels and their status go to stderr. */
@@ -291,7 +314,10 @@ class TextOutput implements HeadlessOutput {
 class JsonOutput implements HeadlessOutput {
   readonly #accumulator = new ResultAccumulator()
 
-  constructor(private readonly stdout: HeadlessSink) {}
+  constructor(
+    private readonly stdout: HeadlessSink,
+    private readonly sessionId: string,
+  ) {}
 
   onEvent(event: AgentEvent): void {
     this.#accumulator.observe(event)
@@ -299,7 +325,7 @@ class JsonOutput implements HeadlessOutput {
 
   finish(status: FinalTurnStatus, turns: number): void {
     const { result, usage } = this.#accumulator
-    this.stdout.write(`${JSON.stringify({ result, turns, usage, status })}\n`)
+    this.stdout.write(`${JSON.stringify({ result, turns, usage, status, sessionId: this.sessionId })}\n`)
   }
 }
 
@@ -310,7 +336,10 @@ class JsonOutput implements HeadlessOutput {
 class StreamJsonOutput implements HeadlessOutput {
   readonly #accumulator = new ResultAccumulator()
 
-  constructor(private readonly stdout: HeadlessSink) {}
+  constructor(
+    private readonly stdout: HeadlessSink,
+    private readonly sessionId: string,
+  ) {}
 
   onEvent(event: AgentEvent): void {
     this.#accumulator.observe(event)
@@ -319,7 +348,9 @@ class StreamJsonOutput implements HeadlessOutput {
 
   finish(status: FinalTurnStatus): void {
     const { result, usage } = this.#accumulator
-    this.stdout.write(`${JSON.stringify({ type: "result", result, status, usage })}\n`)
+    this.stdout.write(
+      `${JSON.stringify({ type: "result", result, status, usage, sessionId: this.sessionId })}\n`,
+    )
   }
 }
 

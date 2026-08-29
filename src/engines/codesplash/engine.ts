@@ -4,8 +4,10 @@
  */
 import { extname } from "node:path"
 import {
+  type AgentConfig,
   type AgentEvent,
   AsyncQueue,
+  defaultConfig,
   defaultSessionPolicy,
   type EngineCapabilities,
   type EngineDecision,
@@ -13,6 +15,7 @@ import {
   type EngineModel,
   type EngineProbe,
   type EngineSession,
+  loadConfig,
   type OpenSessionOptions,
   type SessionPolicy,
   type UserInput,
@@ -20,16 +23,17 @@ import {
 import { APP_VERSION } from "../../version.ts"
 import { PROVIDER_ENV_VARS, resolveApiKey } from "./auth.ts"
 import {
-  availableProviders,
-  catalogModels,
-  defaultModelFor,
-  defaultProvider,
+  buildProviderRegistry,
+  customProviderAvailable,
+  findModel,
   formatModelSelector,
+  type ModelSelection,
   PROVIDER_DISPLAY_NAMES,
   PROVIDER_KEY_VARIABLES,
-  parseModelSelector,
+  type ProviderRegistry,
 } from "./catalog.ts"
 import type {
+  ChatMessage,
   ContentBlock,
   ImageBlock,
   ModelInfo,
@@ -39,15 +43,14 @@ import type {
 } from "./contracts.ts"
 import { CodesplashEventFactory, CodesplashLoop } from "./loop.ts"
 import { buildSystemPrompt } from "./prompt.ts"
-import { createAnthropicProvider } from "./providers/anthropic.ts"
-import { createOpenAiProvider } from "./providers/openai.ts"
 import { builtinTools, createToolRegistry, type ToolRegistry } from "./tools/registry.ts"
+import { appendTranscriptMessages, loadTranscript } from "./transcript.ts"
 
 export const CODESPLASH_CAPABILITIES: EngineCapabilities = {
   nativeTranscript: true,
   approvals: true,
   interrupt: true,
-  resume: false,
+  resume: true,
   usage: "tokens",
   surface: "native",
 }
@@ -55,45 +58,89 @@ export const CODESPLASH_CAPABILITIES: EngineCapabilities = {
 const NO_KEYS_DETAIL = "No API keys found — set ANTHROPIC_API_KEY or OPENAI_API_KEY"
 
 export type CodesplashDriverOptions = {
-  /** Provider overrides, e.g. scripted fakes in tests. */
-  providers?: Partial<Record<ProviderId, ProviderClient>>
+  /** Provider client overrides keyed by runtime id, e.g. scripted fakes in tests. */
+  providers?: Partial<Record<string, ProviderClient>>
+  /** Harness config; when absent it is loaded lazily the first time probe/openSession needs it. */
+  config?: AgentConfig
 }
 
 export class CodesplashDriver implements EngineDriver {
   readonly id = "codesplash" as const
+  #configPromise: Promise<AgentConfig> | undefined
 
   constructor(readonly options: CodesplashDriverOptions = {}) {}
 
+  async #config(): Promise<AgentConfig> {
+    if (this.options.config) return this.options.config
+    this.#configPromise ??= loadConfig()
+    return this.#configPromise
+  }
+
+  /** Config for probe: a broken config file degrades to defaults instead of failing the probe. */
+  async #probeConfig(): Promise<AgentConfig> {
+    try {
+      return await this.#config()
+    } catch {
+      return structuredClone(defaultConfig)
+    }
+  }
+
   /**
    * Reports availability from resolvable API keys — env var first, then the credential store —
-   * naming each provider's source (env/stored). Key values never appear in the probe.
+   * naming each provider's source (env/stored), plus one fragment per configured custom provider
+   * with its key state. Key values never appear in the probe.
    */
   async probe(): Promise<EngineProbe> {
+    const config = await this.#probeConfig()
     const resolved = (Object.keys(PROVIDER_ENV_VARS) as ProviderId[]).flatMap((provider) => {
       const credential = resolveApiKey(provider)
       return credential ? [{ provider, source: credential.source }] : []
     })
-    if (resolved.length === 0) {
-      return { available: false, authenticated: false, version: APP_VERSION, detail: NO_KEYS_DETAIL }
+    const builtinDetails = resolved.map(
+      ({ provider, source }) => `${PROVIDER_DISPLAY_NAMES[provider]} API key (${source})`,
+    )
+    const customDetails = config.providers.map((provider) => {
+      const keyState = process.env[provider.keyEnvVar]
+        ? "key present"
+        : provider.requiresKey
+          ? "key missing"
+          : "no key needed"
+      return `${provider.displayName} (custom, ${keyState})`
+    })
+    const anyCustomAvailable = config.providers.some((provider) => customProviderAvailable(provider))
+
+    if (resolved.length === 0 && !anyCustomAvailable) {
+      return {
+        available: false,
+        authenticated: false,
+        version: APP_VERSION,
+        detail: [NO_KEYS_DETAIL, ...customDetails].join(" · "),
+      }
     }
     return {
       available: true,
       authenticated: true,
       version: APP_VERSION,
-      detail: resolved
-        .map(({ provider, source }) => `${PROVIDER_DISPLAY_NAMES[provider]} API key (${source})`)
-        .join(" · "),
+      detail: [...builtinDetails, ...customDetails].join(" · "),
     }
   }
 
   async openSession(options: OpenSessionOptions): Promise<EngineSession> {
-    if (availableProviders().length === 0) {
+    const config = await this.#config()
+    const registry = buildProviderRegistry(config)
+    if (registry.providers.length === 0) {
       throw new Error(`${NO_KEYS_DETAIL} to use the CodeSplash engine`)
     }
-    return new CodesplashSession(options, {
-      anthropic: this.options.providers?.anthropic ?? createAnthropicProvider(),
-      openai: this.options.providers?.openai ?? createOpenAiProvider(),
-    })
+    const providers: Record<string, ProviderClient> = {}
+    for (const runtime of registry.providers) {
+      providers[runtime.id] = this.options.providers?.[runtime.id] ?? runtime.client
+    }
+    // Resume: reload the provider-native history the transcript persisted. An empty or missing
+    // file is simply a fresh session.
+    const seededHistory = options.nativeTranscriptPath
+      ? await loadTranscript(options.nativeTranscriptPath)
+      : []
+    return new CodesplashSession(options, config, registry, providers, seededHistory)
   }
 }
 
@@ -104,7 +151,10 @@ class CodesplashSession implements EngineSession {
   readonly #factory: CodesplashEventFactory
   readonly #loop: CodesplashLoop
   readonly #registry: ToolRegistry
-  readonly #providers: Record<ProviderId, ProviderClient>
+  readonly #providerRegistry: ProviderRegistry
+  /** Provider clients keyed by runtime id ("anthropic", "openai", or a custom config key). */
+  readonly #providers: Record<string, ProviderClient>
+  readonly #config: AgentConfig
   readonly #policy: SessionPolicy
   readonly #cwd: string
   #model: ModelInfo
@@ -115,12 +165,19 @@ class CodesplashSession implements EngineSession {
   #turnReserved = false
   #closed = false
   #ended = false
+  /** Transcript write failures degrade to a single warning event per session, never a crash. */
+  #transcriptWarned = false
 
   constructor(
     readonly options: OpenSessionOptions,
-    providers: Record<ProviderId, ProviderClient>,
+    config: AgentConfig,
+    providerRegistry: ProviderRegistry,
+    providers: Record<string, ProviderClient>,
+    seededHistory: ChatMessage[] = [],
   ) {
     this.events = this.#queue
+    this.#config = config
+    this.#providerRegistry = providerRegistry
     this.#providers = providers
     this.#policy = options.policy ?? defaultSessionPolicy
     this.#cwd = options.cwd
@@ -132,15 +189,26 @@ class CodesplashSession implements EngineSession {
       registry: this.#registry,
       events: this.#factory,
       emit: (event) => this.#push(event),
+      fallbackModel: config.codesplash.fallbackModel,
+      // Resume: continue the recorded cumulative usage instead of restarting the counts at zero.
+      initialUsage: options.initialUsage,
+      // Registry-backed: only models on available providers resolve, and test overrides in the
+      // session's provider map take effect for the fallback path too.
+      resolveModel: (id) => {
+        const model = this.#providerRegistry.find(id)
+        if (!model) return undefined
+        const provider = this.#providers[model.provider]
+        return provider ? { model, provider } : undefined
+      },
     })
+    if (seededHistory.length > 0) this.#loop.seedHistory(seededHistory)
 
     this.#push(
       this.#factory.event("session/opening", {}, { kind: "session.status", payload: { status: "starting" } }),
     )
     const selection = options.model
-      ? parseModelSelector(options.model)
-      : { model: defaultModelFor(defaultProvider()), effort: undefined }
-    requireProviderKey(selection.model.provider)
+      ? this.#selectModel(options.model)
+      : { model: this.#providerRegistry.defaultModel(), effort: undefined }
     this.#model = selection.model
     this.#reasoningEffort = selection.effort
     this.#push(
@@ -176,6 +244,7 @@ class CodesplashSession implements EngineSession {
     let turnStarted = false
     try {
       const provider = this.#providers[this.#model.provider]
+      if (!provider) throw new Error(`No provider client for "${this.#model.provider}"`)
       const system = await this.#systemPromptFor()
       const userContent = await buildUserContent(input)
       this.#requireOpen()
@@ -203,6 +272,7 @@ class CodesplashSession implements EngineSession {
             ),
           )
         })
+        .then(() => this.#persistTurnTranscript())
         .finally(() => {
           this.#turnPromise = undefined
           this.#turnReserved = false
@@ -234,13 +304,12 @@ class CodesplashSession implements EngineSession {
 
   async listModels(): Promise<EngineModel[]> {
     this.#requireOpen()
-    const providers = availableProviders()
-    const sessionDefault = defaultProvider()
-    return catalogModels(providers).map((model) => ({
+    const sessionDefault = this.#providerRegistry.defaultModel()
+    return this.#providerRegistry.models.map((model) => ({
       id: model.id,
       displayName: model.displayName,
-      description: describeModel(model),
-      isDefault: model.provider === sessionDefault && model.isDefault,
+      description: this.#describeModel(model),
+      isDefault: model.id === sessionDefault.id && model.provider === sessionDefault.provider,
     }))
   }
 
@@ -250,8 +319,7 @@ class CodesplashSession implements EngineSession {
     if (this.#turnReserved || this.#loop.isTurnActive) {
       throw new Error("Wait for the current turn before switching models")
     }
-    const selection = parseModelSelector(model)
-    requireProviderKey(selection.model.provider)
+    const selection = this.#selectModel(model)
     this.#model = selection.model
     this.#reasoningEffort = selection.effort
     this.#push(
@@ -264,6 +332,82 @@ class CodesplashSession implements EngineSession {
         },
       ),
     )
+  }
+
+  /**
+   * Parses a selector against the registry (available providers only). A model that exists but
+   * whose provider has no key gets an actionable message naming the key env var — never its value.
+   */
+  #selectModel(selector: string): ModelSelection {
+    try {
+      return this.#providerRegistry.parseSelector(selector)
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("Unknown model")) {
+        const unavailable = this.#unavailableModelError(selector)
+        if (unavailable) throw unavailable
+      }
+      throw error
+    }
+  }
+
+  /** An error naming the missing key when the selector points at a known-but-keyless provider. */
+  #unavailableModelError(selector: string): Error | undefined {
+    const trimmed = selector.trim()
+    const candidates = new Set([trimmed, trimmed.split(":")[0] ?? trimmed])
+    for (const candidate of candidates) {
+      const builtin = findModel(candidate)
+      if (builtin) {
+        return new Error(
+          `The ${PROVIDER_DISPLAY_NAMES[builtin.protocol]} provider needs ${PROVIDER_KEY_VARIABLES[builtin.protocol]} set`,
+        )
+      }
+      for (const custom of this.#config.providers) {
+        if (custom.models.some((model) => model.id === candidate)) {
+          return new Error(`The ${custom.displayName} provider needs ${custom.keyEnvVar} set`)
+        }
+      }
+    }
+    return undefined
+  }
+
+  #describeModel(model: ModelInfo): string {
+    return [
+      this.#providerRegistry.runtimeFor(model).displayName,
+      `${Math.round(model.contextWindow / 1000)}k context`,
+      model.supportsReasoning ? "reasoning" : undefined,
+    ]
+      .filter(Boolean)
+      .join(" · ")
+  }
+
+  /**
+   * Appends the messages the finished turn added to the native transcript. The loop tracks the
+   * turn boundary itself (a fallback's thinking-strip can drop emptied pre-turn messages, so a
+   * pre-turn length captured here would drift). Write failures degrade to one warning event per
+   * session — a broken disk must never crash a live session.
+   */
+  async #persistTurnTranscript(): Promise<void> {
+    const path = this.options.nativeTranscriptPath
+    if (!path) return
+    const added = this.#loop.lastTurnMessages
+    if (added.length === 0) return
+    try {
+      await appendTranscriptMessages(path, added)
+    } catch (error) {
+      if (this.#transcriptWarned) return
+      this.#transcriptWarned = true
+      const message = error instanceof Error ? error.message : String(error)
+      this.#push(
+        this.#factory.event(
+          "transcript/appendFailed",
+          {},
+          {
+            kind: "warning",
+            payload: { message: `Could not persist the session transcript: ${message}` },
+          },
+        ),
+      )
+    }
   }
 
   async #systemPromptFor(): Promise<string> {
@@ -289,24 +433,6 @@ class CodesplashSession implements EngineSession {
 }
 
 /* -------------------------------------- helpers -------------------------------------- */
-
-function requireProviderKey(provider: ProviderId): void {
-  if (!process.env[PROVIDER_KEY_VARIABLES[provider]]) {
-    throw new Error(
-      `The ${PROVIDER_DISPLAY_NAMES[provider]} provider needs ${PROVIDER_KEY_VARIABLES[provider]} set`,
-    )
-  }
-}
-
-function describeModel(model: ModelInfo): string {
-  return [
-    PROVIDER_DISPLAY_NAMES[model.provider],
-    `${Math.round(model.contextWindow / 1000)}k context`,
-    model.supportsReasoning ? "reasoning" : undefined,
-  ]
-    .filter(Boolean)
-    .join(" · ")
-}
 
 const IMAGE_MEDIA_TYPES: Record<string, string> = {
   ".png": "image/png",

@@ -17,9 +17,11 @@ import {
   type OpenSessionOptions,
   projectIdFor,
   readSessionEvents,
+  type SessionMeta,
   SessionStore,
   serializeEvent,
   sessionDirectory,
+  transcriptPathFor,
   type UserInput,
 } from "../src/core/index.ts"
 
@@ -261,8 +263,10 @@ describe("codesplash run e2e (fake driver)", () => {
     )
 
     expect(exitCode).toBe(0)
+    const sessionId = driver.openOptions?.localSessionId as string
     expect(fixture.stdout.text).toBe(
-      '{"result":"All done","turns":1,"usage":{"inputTokens":10,"outputTokens":4,"totalTokens":14},"status":"completed"}\n',
+      '{"result":"All done","turns":1,"usage":{"inputTokens":10,"outputTokens":4,"totalTokens":14},' +
+        `"status":"completed","sessionId":"${sessionId}"}\n`,
     )
     expect(fixture.stderr.text).toBe("")
   })
@@ -285,10 +289,11 @@ describe("codesplash run e2e (fake driver)", () => {
     collect.emit = (event) => expectedScript.push(event)
     await simpleScript(collect, { text: "say hi" })
     const expectedLines = expectedScript.map((event) => serializeEvent(event)).join("\n")
+    const sessionId = driver.openOptions?.localSessionId as string
     expect(fixture.stdout.text).toBe(
       `${expectedLines}\n` +
         '{"type":"result","result":"All done","status":"completed",' +
-        '"usage":{"inputTokens":10,"outputTokens":4,"totalTokens":14}}\n',
+        `"usage":{"inputTokens":10,"outputTokens":4,"totalTokens":14},"sessionId":"${sessionId}"}\n`,
     )
   })
 
@@ -386,7 +391,7 @@ describe("codesplash run e2e (fake driver)", () => {
     ).rejects.toThrow(UsageError)
   })
 
-  test("--no-history runs without touching the session store", async () => {
+  test("--no-history runs without touching the session store or the transcript", async () => {
     const fixture = await makeFixture()
     const driver = new ScriptedDriver(simpleScript)
     const poisonedStore = {
@@ -402,6 +407,8 @@ describe("codesplash run e2e (fake driver)", () => {
 
     expect(exitCode).toBe(0)
     expect(fixture.stdout.text).toBe("All done\n")
+    expect(driver.openOptions?.nativeTranscriptPath).toBeUndefined()
+    expect(driver.openOptions?.firstSequence).toBeUndefined()
   })
 
   test("--model passes the selector through and rejects unknown models as usage errors", async () => {
@@ -437,6 +444,81 @@ describe("codesplash run e2e (fake driver)", () => {
     expect(driver.openOptions?.policy).toEqual({ sandbox: "read-only", approvalPolicy: "on-request" })
   })
 
+  test("a recorded run passes the session's transcript path to the engine", async () => {
+    const fixture = await makeFixture()
+    const driver = new ScriptedDriver(simpleScript)
+
+    const exitCode = await runRunCommand([fixture.projectDir, "-p", "go"], overridesFor(fixture, driver))
+
+    expect(exitCode).toBe(0)
+    const projectId = projectIdFor(fixture.projectDir)
+    const sessionId = driver.openOptions?.localSessionId as string
+    expect(driver.openOptions?.nativeTranscriptPath).toBe(
+      transcriptPathFor({ directory: sessionDirectory(fixture.sessionsRoot, projectId, sessionId) }),
+    )
+    expect(driver.openOptions?.firstSequence).toBeUndefined()
+  })
+
+  test("--effort combines with --model into the engine selector", async () => {
+    const fixture = await makeFixture()
+    const driver = new ScriptedDriver(simpleScript)
+
+    const exitCode = await runRunCommand(
+      [fixture.projectDir, "-p", "go", "--model", "claude-sonnet-5", "--effort", "low"],
+      overridesFor(fixture, driver),
+    )
+
+    expect(exitCode).toBe(0)
+    expect(driver.openOptions?.model).toBe("claude-sonnet-5:low")
+
+    const doubled = await makeFixture()
+    await expect(
+      runRunCommand(
+        [doubled.projectDir, "-p", "go", "--model", "claude-sonnet-5:high", "--effort", "low"],
+        overridesFor(doubled, new ScriptedDriver(simpleScript)),
+      ),
+    ).rejects.toThrow(UsageError)
+  })
+
+  test("-c overrides reach the run's config load", async () => {
+    const fixture = await makeFixture()
+    const driver = new ScriptedDriver(simpleScript)
+
+    const exitCode = await runRunCommand(
+      [fixture.projectDir, "-p", "go", "-c", "codex.sandbox=read-only"],
+      overridesFor(fixture, driver),
+    )
+
+    expect(exitCode).toBe(0)
+    expect(driver.openOptions?.policy).toEqual({ sandbox: "read-only", approvalPolicy: "on-request" })
+  })
+
+  test("custom-provider models from config.toml pass --model validation", async () => {
+    const fixture = await makeFixture()
+    const driver = new ScriptedDriver(simpleScript)
+    await Bun.write(
+      join(fixture.env.CODESPLASH_AGENT_CONFIG_DIR as string, "config.toml"),
+      [
+        "[providers.local]",
+        'protocol = "openai"',
+        'baseUrl = "http://localhost:9/v1"',
+        "requiresKey = false",
+        "",
+        "[[providers.local.models]]",
+        'id = "local-model"',
+        "",
+      ].join("\n"),
+    )
+
+    const exitCode = await runRunCommand(
+      [fixture.projectDir, "-p", "go", "--model", "local-model"],
+      overridesFor(fixture, driver),
+    )
+
+    expect(exitCode).toBe(0)
+    expect(driver.openOptions?.model).toBe("local-model")
+  })
+
   test("--max-turns is forwarded to the runner options", async () => {
     const fixture = await makeFixture()
     let sawTurns = 0
@@ -455,5 +537,208 @@ describe("codesplash run e2e (fake driver)", () => {
 
     expect(exitCode).toBe(0)
     expect(sawTurns).toBe(1)
+  })
+})
+
+/* --------------------------------- resume and continue --------------------------------- */
+
+/** Seeds one recorded session (meta plus one prior event line) into the fixture's store. */
+async function seedSession(
+  fixture: Fixture,
+  patch: Partial<SessionMeta> & { localSessionId: string },
+): Promise<SessionMeta> {
+  const meta: SessionMeta = {
+    schemaVersion: 1,
+    engine: "codesplash",
+    projectPath: fixture.projectDir,
+    projectId: projectIdFor(fixture.projectDir),
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    lastStatus: "closed",
+    lastSequence: 4,
+    sandbox: "read-only",
+    approvalPolicy: "untrusted",
+    ...patch,
+  }
+  const handle = await fixture.store.create(meta)
+  const prior = createAgentEvent(
+    {
+      engine: meta.engine,
+      localSessionId: meta.localSessionId,
+      sequence: meta.lastSequence,
+      timestamp: meta.updatedAt,
+    },
+    { kind: "user.message", payload: { id: "u-0", text: "earlier prompt" } },
+  )
+  await handle.appendEventLines([serializeEvent(prior)])
+  return meta
+}
+
+describe("codesplash run --resume / --continue (fake driver)", () => {
+  test("--resume appends to the recorded session and reuses its policy", async () => {
+    const fixture = await makeFixture()
+    await seedSession(fixture, { localSessionId: "resume-1" })
+    const driver = new ScriptedDriver(simpleScript)
+
+    const exitCode = await runRunCommand(
+      [fixture.projectDir, "-p", "again", "--resume", "resume-1"],
+      overridesFor(fixture, driver),
+    )
+
+    expect(exitCode).toBe(0)
+    expect(driver.openOptions?.localSessionId).toBe("resume-1")
+    expect(driver.openOptions?.firstSequence).toBe(5)
+    expect(driver.openOptions?.policy).toEqual({ sandbox: "read-only", approvalPolicy: "untrusted" })
+    const directory = sessionDirectory(fixture.sessionsRoot, projectIdFor(fixture.projectDir), "resume-1")
+    expect(driver.openOptions?.nativeTranscriptPath).toBe(transcriptPathFor({ directory }))
+
+    // The prior history stays and the new turn's events land after it in the same log.
+    const { events } = await readSessionEvents(directory)
+    expect(events[0]?.kind).toBe("user.message")
+    expect(events.map((event) => event.kind)).toEqual([
+      "user.message",
+      "turn.started",
+      "message.delta",
+      "usage.updated",
+      "message.completed",
+      "turn.completed",
+    ])
+    const sessions = await listProjectSessions(projectIdFor(fixture.projectDir), fixture.sessionsRoot)
+    expect(sessions).toHaveLength(1)
+    expect(sessions[0]?.lastStatus).toBe("closed")
+  })
+
+  test("stale meta never re-issues sequences: the on-disk events decide, and usage is reseeded", async () => {
+    const fixture = await makeFixture()
+    const meta = await seedSession(fixture, { localSessionId: "resume-stale" })
+    // A crash mid-turn leaves events ahead of meta.lastSequence (meta only syncs on
+    // turn.completed/session.status): append events past it, including recorded usage.
+    const projectId = projectIdFor(fixture.projectDir)
+    const handle = await fixture.store.open(projectId, "resume-stale")
+    const laterEvents = [
+      createAgentEvent(
+        { engine: "codesplash", localSessionId: "resume-stale", sequence: 8, timestamp: meta.updatedAt },
+        {
+          kind: "usage.updated",
+          payload: { inputTokens: 900, outputTokens: 40, estimatedCostUsd: 0.25, hasUnpricedUsage: false },
+        },
+      ),
+      createAgentEvent(
+        { engine: "codesplash", localSessionId: "resume-stale", sequence: 9, timestamp: meta.updatedAt },
+        { kind: "usage.updated", payload: { rateLimit: { usedPercent: 10 } } },
+      ),
+    ]
+    await handle.appendEventLines(laterEvents.map((event) => serializeEvent(event)))
+
+    const driver = new ScriptedDriver(simpleScript)
+    const exitCode = await runRunCommand(
+      [fixture.projectDir, "-p", "go", "--resume", "resume-stale"],
+      overridesFor(fixture, driver),
+    )
+
+    expect(exitCode).toBe(0)
+    // meta.lastSequence is 4; the highest on-disk event is 9 — the next run starts at 10.
+    expect(driver.openOptions?.firstSequence).toBe(10)
+    // Cumulative usage from the log seeds the resumed engine session (the rate-limit-only
+    // trailing event leaves the token fields intact).
+    expect(driver.openOptions?.initialUsage).toEqual({
+      inputTokens: 900,
+      outputTokens: 40,
+      estimatedCostUsd: 0.25,
+      hasUnpricedUsage: false,
+    })
+  })
+
+  test("--sandbox on the command line overrides the recorded sandbox", async () => {
+    const fixture = await makeFixture()
+    await seedSession(fixture, { localSessionId: "resume-2", sandbox: "read-only" })
+    const driver = new ScriptedDriver(simpleScript)
+
+    const exitCode = await runRunCommand(
+      [fixture.projectDir, "-p", "go", "--resume", "resume-2", "--sandbox", "workspace-write"],
+      overridesFor(fixture, driver),
+    )
+
+    expect(exitCode).toBe(0)
+    expect(driver.openOptions?.policy).toEqual({
+      sandbox: "workspace-write",
+      approvalPolicy: "untrusted",
+    })
+  })
+
+  test("a recorded full-access sandbox degrades to workspace-write with a notice", async () => {
+    const fixture = await makeFixture()
+    await seedSession(fixture, { localSessionId: "resume-3", sandbox: "danger-full-access" })
+    const driver = new ScriptedDriver(simpleScript)
+
+    const exitCode = await runRunCommand(
+      [fixture.projectDir, "-p", "go", "--resume", "resume-3"],
+      overridesFor(fixture, driver),
+    )
+
+    expect(exitCode).toBe(0)
+    expect(driver.openOptions?.policy).toEqual({
+      sandbox: "workspace-write",
+      approvalPolicy: "untrusted",
+    })
+    expect(fixture.stderr.text).toContain("needs interactive confirmation; using workspace-write")
+  })
+
+  test("--continue picks the most recently updated codesplash session, skipping other engines", async () => {
+    const fixture = await makeFixture()
+    await seedSession(fixture, { localSessionId: "older", updatedAt: "2026-01-01T00:00:00.000Z" })
+    await seedSession(fixture, { localSessionId: "newer", updatedAt: "2026-01-02T00:00:00.000Z" })
+    await seedSession(fixture, {
+      localSessionId: "codex-newest",
+      engine: "codex",
+      updatedAt: "2026-01-03T00:00:00.000Z",
+    })
+    const driver = new ScriptedDriver(simpleScript)
+
+    const exitCode = await runRunCommand(
+      [fixture.projectDir, "-p", "go", "--continue"],
+      overridesFor(fixture, driver),
+    )
+
+    expect(exitCode).toBe(0)
+    expect(driver.openOptions?.localSessionId).toBe("newer")
+  })
+
+  test("missing targets and foreign engines are usage errors", async () => {
+    const empty = await makeFixture()
+    await expect(
+      runRunCommand(
+        [empty.projectDir, "-p", "go", "--continue"],
+        overridesFor(empty, new ScriptedDriver(simpleScript)),
+      ),
+    ).rejects.toThrow("No codesplash session to continue in this project")
+
+    const unknown = await makeFixture()
+    await expect(
+      runRunCommand(
+        [unknown.projectDir, "-p", "go", "--resume", "nope"],
+        overridesFor(unknown, new ScriptedDriver(simpleScript)),
+      ),
+    ).rejects.toThrow('No recorded session "nope" for this project')
+
+    const foreign = await makeFixture()
+    await seedSession(foreign, { localSessionId: "codex-1", engine: "codex" })
+    await expect(
+      runRunCommand(
+        [foreign.projectDir, "-p", "go", "--resume", "codex-1"],
+        overridesFor(foreign, new ScriptedDriver(simpleScript)),
+      ),
+    ).rejects.toThrow("belongs to the codex engine")
+  })
+
+  test("resuming with history disabled via -c is a usage error", async () => {
+    const fixture = await makeFixture()
+    await seedSession(fixture, { localSessionId: "resume-4" })
+    await expect(
+      runRunCommand(
+        [fixture.projectDir, "-p", "go", "--resume", "resume-4", "-c", "history.enabled=false"],
+        overridesFor(fixture, new ScriptedDriver(simpleScript)),
+      ),
+    ).rejects.toThrow("Resuming needs session history")
   })
 })

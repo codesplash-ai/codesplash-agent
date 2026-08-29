@@ -33,6 +33,8 @@ export type AppViewState = {
     totalTokens?: number
     modelContextWindow?: number
     estimatedCostUsd?: number
+    /** True once any usage ran on a model without catalog pricing: the cost is partial. */
+    hasUnpricedUsage?: boolean
     rateLimit?: RateLimitUsage
   }
   warnings: string[]

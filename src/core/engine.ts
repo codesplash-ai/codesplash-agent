@@ -31,6 +31,19 @@ export type EngineProbe = {
   detail?: string
 }
 
+/**
+ * Cumulative usage a resumed session already recorded, extracted from its persisted
+ * `usage.updated` events. An engine that reports session-cumulative usage seeds its counters
+ * from this so resumed runs continue the totals instead of restarting at zero.
+ */
+export type SessionUsageSnapshot = {
+  inputTokens?: number
+  cachedInputTokens?: number
+  outputTokens?: number
+  estimatedCostUsd?: number
+  hasUnpricedUsage?: boolean
+}
+
 export type OpenSessionOptions = {
   cwd: string
   localSessionId: string
@@ -40,6 +53,13 @@ export type OpenSessionOptions = {
   policy?: SessionPolicy
   /** First event sequence number; lets a resumed session continue a persisted log monotonically. */
   firstSequence?: number
+  /** Cumulative usage recorded before a resume; only the codesplash engine uses it today. */
+  initialUsage?: SessionUsageSnapshot
+  /**
+   * File path where an engine that owns its transcript may persist and reload provider-native
+   * history across runs. Only the codesplash engine uses it today.
+   */
+  nativeTranscriptPath?: string
   /** Turn IDs already present in local history, for reconciling a resumed provider thread. */
   knownTurnIds?: readonly string[]
 }

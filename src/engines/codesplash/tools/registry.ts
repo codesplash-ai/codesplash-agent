@@ -11,6 +11,8 @@ import { grepTool } from "./grep.ts"
 import { askUserTool } from "./question.ts"
 import { readFileTool } from "./read.ts"
 import { todoWriteTool } from "./todo.ts"
+import { createWebFetchTool } from "./web-fetch.ts"
+import { createWebSearchTool } from "./web-search.ts"
 import { writeFileTool } from "./write.ts"
 
 export type ToolRegistry = {
@@ -26,6 +28,8 @@ export function builtinTools(): HarnessTool[] {
     applyPatchTool,
     globTool,
     grepTool,
+    createWebFetchTool(),
+    createWebSearchTool(),
     bashTool,
     todoWriteTool,
     askUserTool,

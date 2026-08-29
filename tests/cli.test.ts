@@ -5,6 +5,7 @@ import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import packageJson from "../package.json"
 import {
+  extractConfigOverrides,
   parseAppArguments,
   parseLoginArguments,
   parseLogoutArguments,
@@ -13,6 +14,7 @@ import {
   runLogoutCommand,
   UsageError,
 } from "../src/cli.ts"
+import { UsageError as CommandsUsageError } from "../src/commands/usage-error.ts"
 import { effectiveHistoryEnabled, effectiveSessionPolicy } from "../src/core/app-options.ts"
 import { defaultConfig } from "../src/core/config.ts"
 import { formatDoctorReport } from "../src/doctor.ts"
@@ -46,23 +48,59 @@ describe("parseAppArguments", () => {
   test("parses the project path and defaults", () => {
     expect(parseAppArguments([])).toEqual({
       path: undefined,
-      options: { noHistory: false, fullAccess: false },
+      options: { noHistory: false, fullAccess: false, configOverrides: [] },
     })
     expect(parseAppArguments(["/tmp/project"])).toEqual({
       path: "/tmp/project",
-      options: { noHistory: false, fullAccess: false },
+      options: { noHistory: false, fullAccess: false, configOverrides: [] },
     })
   })
 
   test("parses history, sandbox, and full-access flags in any order", () => {
     expect(parseAppArguments(["--no-history", "/tmp/project", "--sandbox", "read-only"])).toEqual({
       path: "/tmp/project",
-      options: { noHistory: true, fullAccess: false, sandboxOverride: "read-only" },
+      options: { noHistory: true, fullAccess: false, sandboxOverride: "read-only", configOverrides: [] },
     })
     expect(parseAppArguments(["--sandbox=workspace-write", "--full-access"])).toEqual({
       path: undefined,
-      options: { noHistory: false, fullAccess: true, sandboxOverride: "workspace-write" },
+      options: {
+        noHistory: false,
+        fullAccess: true,
+        sandboxOverride: "workspace-write",
+        configOverrides: [],
+      },
     })
+  })
+
+  test("collects repeatable -c/--config overrides in every spelling", () => {
+    expect(
+      parseAppArguments([
+        "-c",
+        "codex.sandbox=read-only",
+        "--config",
+        "theme=dark",
+        "--config=history.enabled=false",
+        "-c=codesplash.fallbackModel=gpt-5.1",
+      ]).options.configOverrides,
+    ).toEqual([
+      "codex.sandbox=read-only",
+      "theme=dark",
+      "history.enabled=false",
+      "codesplash.fallbackModel=gpt-5.1",
+    ])
+  })
+
+  test("malformed -c overrides are usage errors that never echo secret-looking values", () => {
+    expect(() => parseAppArguments(["-c"])).toThrow(UsageError)
+    expect(() => parseAppArguments(["-c", "no-equals-sign"])).toThrow(UsageError)
+    expect(() => parseAppArguments(["-c", "=value-without-path"])).toThrow(UsageError)
+    try {
+      parseAppArguments(["-c", "api_key sk-secret-override-value"])
+      throw new Error("expected a UsageError")
+    } catch (error) {
+      expect(error).toBeInstanceOf(UsageError)
+      expect((error as Error).message).not.toContain("sk-secret-override-value")
+    }
   })
 
   test("rejects invalid sandbox values, danger mode via --sandbox, and unknown flags", () => {
@@ -75,6 +113,29 @@ describe("parseAppArguments", () => {
     )
     expect(() => parseAppArguments(["--frobnicate"])).toThrow("Unknown option --frobnicate")
     expect(() => parseAppArguments(["a", "b"])).toThrow("Expected at most one project path")
+  })
+})
+
+describe("UsageError re-export", () => {
+  test("cli.ts and commands/usage-error.ts share one class, so instanceof agrees everywhere", () => {
+    expect(UsageError).toBe(CommandsUsageError)
+    expect(new CommandsUsageError("x")).toBeInstanceOf(UsageError)
+  })
+})
+
+describe("extractConfigOverrides", () => {
+  test("pulls every -c/--config spelling out and keeps the rest in order", () => {
+    expect(
+      extractConfigOverrides(["--base", "main", "-c", "theme=dark", "--config=a.b=1", "path", "-c=x=y"]),
+    ).toEqual({
+      args: ["--base", "main", "path"],
+      configOverrides: ["theme=dark", "a.b=1", "x=y"],
+    })
+  })
+
+  test("missing or malformed override values are usage errors", () => {
+    expect(() => extractConfigOverrides(["--config"])).toThrow(UsageError)
+    expect(() => extractConfigOverrides(["-c", "nope"])).toThrow(UsageError)
   })
 })
 
@@ -154,6 +215,31 @@ describe("version and doctor", () => {
       },
     })
     expect(report).toContain("codesplash ● v9.9.9 · Anthropic API key · OpenAI API key")
+  })
+
+  test("renders custom-provider and transcript rows when the report carries them", () => {
+    const report = formatDoctorReport({
+      version: "9.9.9",
+      runtime: "bun 1.3.14",
+      platform: "darwin arm64",
+      configPath: "/tmp/config.toml",
+      configPresent: true,
+      dataDirectory: "/tmp/data",
+      git: "available",
+      codex: { available: true, authenticated: true, version: "0.150.0" },
+      claude: { available: true, authenticated: true, version: "2.0.0" },
+      codesplash: { available: true, authenticated: true, version: "9.9.9" },
+      customProviders: [
+        "Ollama (custom, openai protocol) · http://localhost:11434/v1 · no key needed",
+        "Proxy (custom, anthropic protocol) · https://proxy.example/v1 · PROXY_API_KEY missing",
+      ],
+      transcript: "/tmp/data/sessions/p1/s1/transcript.jsonl",
+    })
+    expect(report).toContain(
+      "provider   Ollama (custom, openai protocol) · http://localhost:11434/v1 · no key needed",
+    )
+    expect(report).toContain("PROXY_API_KEY missing")
+    expect(report).toContain("transcript /tmp/data/sessions/p1/s1/transcript.jsonl")
   })
 })
 
@@ -259,20 +345,26 @@ describe("parseRunArguments", () => {
       path: undefined,
       prompt: "fix it",
       model: "claude-sonnet-5:high",
+      effort: undefined,
       outputFormat: "json",
       auto: true,
       maxTurns: 3,
       sandboxOverride: "read-only",
       noHistory: true,
+      resume: undefined,
+      continueSession: false,
+      configOverrides: [],
     })
     expect(
       parseRunArguments(
         [
           "--prompt=fix it",
           "--model=gpt-5.1",
+          "--effort=low",
           "--output-format=stream-json",
           "--max-turns=7",
           "--sandbox=workspace-write",
+          "--resume=session-1",
         ],
         notADirectory,
       ),
@@ -280,11 +372,15 @@ describe("parseRunArguments", () => {
       path: undefined,
       prompt: "fix it",
       model: "gpt-5.1",
+      effort: "low",
       outputFormat: "stream-json",
       auto: false,
       maxTurns: 7,
       sandboxOverride: "workspace-write",
       noHistory: false,
+      resume: "session-1",
+      continueSession: false,
+      configOverrides: [],
     })
   })
 
@@ -293,12 +389,46 @@ describe("parseRunArguments", () => {
       path: undefined,
       prompt: "hello",
       model: undefined,
+      effort: undefined,
       outputFormat: "text",
       auto: false,
       maxTurns: undefined,
       sandboxOverride: undefined,
       noHistory: false,
+      resume: undefined,
+      continueSession: false,
+      configOverrides: [],
     })
+  })
+
+  test("parses --effort, --resume, --continue, and repeatable -c overrides", () => {
+    const parsed = parseRunArguments(
+      ["-p", "go", "--effort", "high", "-c", "codex.sandbox=read-only", "--config", "theme=dark"],
+      notADirectory,
+    )
+    expect(parsed.effort).toBe("high")
+    expect(parsed.configOverrides).toEqual(["codex.sandbox=read-only", "theme=dark"])
+
+    expect(parseRunArguments(["-p", "go", "--resume", "abc-123"], notADirectory).resume).toBe("abc-123")
+    expect(parseRunArguments(["-p", "go", "--continue"], notADirectory).continueSession).toBe(true)
+  })
+
+  test("resume conflicts and bad values are usage errors", () => {
+    expect(() => parseRunArguments(["--resume", "a", "--continue"], notADirectory)).toThrow(
+      "--resume and --continue conflict",
+    )
+    expect(() => parseRunArguments(["--resume", "a", "--no-history"], notADirectory)).toThrow(
+      "--no-history cannot resume a session",
+    )
+    expect(() => parseRunArguments(["--continue", "--no-history"], notADirectory)).toThrow(UsageError)
+    expect(() => parseRunArguments(["--resume"], notADirectory)).toThrow("--resume expects a session id")
+    expect(() => parseRunArguments(["--resume", "--continue"], notADirectory)).toThrow(UsageError)
+    expect(() => parseRunArguments(["--effort", "max"], notADirectory)).toThrow(
+      "--effort expects low, medium, or high, got max",
+    )
+    expect(() => parseRunArguments(["--effort"], notADirectory)).toThrow(UsageError)
+    expect(() => parseRunArguments(["-c", "broken"], notADirectory)).toThrow(UsageError)
+    expect(() => parseRunArguments(["-c"], notADirectory)).toThrow(UsageError)
   })
 
   test("with --prompt the single positional is the project path", () => {
@@ -458,8 +588,59 @@ describe("subcommand usage errors exit 2", () => {
 
     const help = await spawnCli(["--help"])
     expect(help.exitCode).toBe(0)
-    for (const needle of ["login", "logout", "run", "--output-format", "--auto", "--max-turns"]) {
+    for (const needle of [
+      "login",
+      "logout",
+      "run",
+      "review",
+      "stats",
+      "completions",
+      "debug",
+      "--output-format",
+      "--auto",
+      "--max-turns",
+      "--resume",
+      "--continue",
+      "--effort",
+      "-c, --config",
+      "--uncommitted",
+      "--base",
+      "--commit",
+    ]) {
       expect(help.stdout).toContain(needle)
     }
+  }, 30000)
+
+  test("the new subcommands dispatch and their usage errors exit 2", async () => {
+    const stats = await spawnCli(["stats", "--days", "zero"])
+    expect(stats.exitCode).toBe(2)
+    expect(stats.stderr).toContain("--days expects a positive integer")
+
+    const completions = await spawnCli(["completions"])
+    expect(completions.exitCode).toBe(2)
+    expect(completions.stderr).toContain("completions expects a shell")
+
+    const debug = await spawnCli(["debug", "network"])
+    expect(debug.exitCode).toBe(2)
+    expect(debug.stderr).toContain('Unknown debug topic "network"')
+
+    const review = await spawnCli(["review", "--base"])
+    expect(review.exitCode).toBe(2)
+    expect(review.stderr).toContain("--base expects a git ref")
+
+    const conflict = await spawnCli(["run", "--resume", "a", "--continue", "-p", "x"])
+    expect(conflict.exitCode).toBe(2)
+    expect(conflict.stderr).toContain("--resume and --continue conflict")
+  }, 30000)
+
+  test("completions prints a script and stats reports an empty window, both exit 0", async () => {
+    const completions = await spawnCli(["completions", "bash"])
+    expect(completions.exitCode).toBe(0)
+    expect(completions.stdout).toContain("_codesplash_completions")
+    expect(completions.stdout).toContain("--resume")
+
+    const stats = await spawnCli(["stats"])
+    expect(stats.exitCode).toBe(0)
+    expect(stats.stdout).toContain("No sessions in the last 30 days.")
   }, 30000)
 })

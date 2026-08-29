@@ -24,6 +24,7 @@ const MODEL: ModelInfo = {
   id: "test-model",
   displayName: "Test Model",
   provider: "anthropic",
+  protocol: "anthropic",
   contextWindow: 200_000,
   maxOutputTokens: 1_000,
   isDefault: true,
@@ -203,6 +204,9 @@ describe("CodesplashLoop text turns", () => {
       outputTokens: 5,
       contextTokens: 17,
       modelContextWindow: 200_000,
+      // MODEL has no pricing: cost is still emitted (0) and the loop flags the usage unpriced.
+      estimatedCostUsd: 0,
+      hasUnpricedUsage: true,
     })
 
     expect(ofKind(events, "turn.completed")[0]?.payload.status).toBe("completed")
@@ -582,11 +586,12 @@ describe("CodesplashLoop concurrency", () => {
         return { text: "ok", label: "probe" }
       },
     })
+    // Distinct inputs: identical repeated calls would (correctly) trip doom-loop detection.
     const calls: ProviderStreamEvent[] = Array.from({ length: 6 }, (_, index) => ({
       type: "tool_call",
       id: `call-${index}`,
       name: "probe",
-      input: {},
+      input: { index },
     }))
     const provider = scriptedProvider([
       [...calls, { type: "done", stopReason: "tool_use" }],
@@ -733,8 +738,9 @@ describe("CodesplashLoop interrupts and limits", () => {
 
   test("forces the turn to end after the maximum tool rounds", async () => {
     const tool = fakeTool({ name: "spin", readOnly: true })
+    // Distinct inputs per round: identical calls would trip doom-loop detection long before the cap.
     const provider = repeatingProvider((call) => [
-      { type: "tool_call", id: `call-${call}`, name: "spin", input: {} },
+      { type: "tool_call", id: `call-${call}`, name: "spin", input: { call } },
       { type: "done", stopReason: "tool_use" },
     ])
     const { loop, events } = makeLoop({ tools: [tool] })

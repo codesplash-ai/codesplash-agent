@@ -8,18 +8,42 @@ import type { SessionPolicy } from "../../core/index.ts"
 
 /* ---------------------------------- providers ---------------------------------- */
 
+/** Wire protocol an adapter speaks. Runtime provider ids are plain strings (see ModelInfo). */
 export type ProviderId = "anthropic" | "openai"
+
+/** Catalog price estimates in USD per million tokens. */
+export type ModelPricing = {
+  inputPerMTok: number
+  outputPerMTok: number
+  /** Defaults to inputPerMTok / 10 at use sites when absent. */
+  cachedInputPerMTok?: number
+}
 
 export type ModelInfo = {
   id: string
   displayName: string
-  provider: ProviderId
+  /** Runtime provider id: "anthropic", "openai", or a custom [providers.*] config key. */
+  provider: string
+  /** Which adapter dialect the model's provider speaks. */
+  protocol: ProviderId
   contextWindow: number
   /** Maximum output tokens to request per response. */
   maxOutputTokens: number
   /** Default model when this provider is the session's provider. */
   isDefault: boolean
   supportsReasoning: boolean
+  pricing?: ModelPricing
+}
+
+/** A configured, available provider: identity plus the adapter client constructed for it. */
+export type ProviderRuntime = {
+  id: string
+  protocol: ProviderId
+  displayName: string
+  keyEnvVar: string
+  requiresKey: boolean
+  baseUrl?: string
+  client: ProviderClient
 }
 
 export type ReasoningEffort = "low" | "medium" | "high"

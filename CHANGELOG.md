@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+### CodeSplash native engine
+
+- First-party CodeSplash engine: sessions run in-process against the Anthropic/OpenAI APIs with
+  your own API key (`codesplash login <provider>` stores one locally; env vars always win),
+  streaming responses and reasoning, built-in tools (read/write/edit/glob/grep/bash/apply_patch/
+  todo/ask_user), sandbox and approval enforcement, and the same TUI surface as Codex.
+- Headless `codesplash run`: one prompt, one turn, exit codes for CI; output as streamed `text`,
+  a single `json` result object, or `stream-json` event lines — now including the `sessionId` and
+  an estimated cost in `usage`.
+- `codesplash run --resume <id>` / `--continue`: recorded run sessions keep an engine-owned
+  transcript (`transcript.jsonl` next to the event log) and can be picked back up headlessly —
+  recorded sandbox/approval policy is reused unless overridden, history is appended in place, and
+  `--no-history` with resume is a usage error. TUI codesplash sessions are resumable from the
+  session picker (and Ctrl+R) the same way.
+- Custom providers (BYOK): `[providers.<id>]` tables in config.toml serve extra models through
+  the anthropic or openai wire protocol (e.g. a local Ollama) with per-model context/output/
+  pricing settings; API keys stay in env vars and are refused inside config.toml. Optional
+  `[codesplash].fallbackModel` retries a failed provider request once on a fallback model.
+- Cost accounting: per-session cumulative token usage with an estimated cost from catalog
+  pricing, in `usage.updated` events, the `/usage` overlay (labelled "estimated", "partial" when
+  a model has no pricing), headless JSON output, and `codesplash stats`.
+- Web tools: `web_fetch` (URL to markdown/text with a DNS-pinning SSRF guard, per-hop redirect
+  validation, and a 5MB cap) and `web_search` (DuckDuckGo HTML results) — read-only,
+  cache-backed, gated per host/search under untrusted approvals, and every result is wrapped in
+  an explicit untrusted-content notice so fetched pages cannot pose as instructions.
+- Doom-loop guard: a tool call repeated with identical input is answered synthetically on the
+  third try and force-ends the turn on the fifth.
+- New subcommands: `codesplash review` (git diff review — uncommitted, `--base <ref>`, or
+  `--commit <sha>` — in one read-only headless turn), `codesplash stats [--days N] [--json]`
+  (recorded usage per engine+model), `codesplash completions <shell>` (bash/zsh/fish/powershell),
+  and `codesplash debug prompt` (the model-visible surface as JSON).
+- Repeatable `-c/--config dotted.path=value` overrides on the TUI, `run`, `review`, and
+  `debug prompt` — applied to that invocation's config load only, never written back.
+- `/usage` slash command in the TUI: session tokens, context left, estimated cost, and the
+  current model in one overlay.
+- `--doctor` reports configured custom providers (key env var names only, never values) and the
+  newest codesplash session's transcript state.
+
+### Harness
+
 - Composer image attachments: drop an image file onto the terminal (or paste its path) and it is
   sent to Codex as an image, replaced inline with an `[image: name]` marker. Supports quoted and
   backslash-escaped paths; files over 8MB stay as text with a warning.

@@ -129,12 +129,75 @@ function serve(responses: FixtureResponse[]): Fixture {
   return fixture
 }
 
+describe("createOpenAiProvider factory options", () => {
+  const textStop: FixtureResponse = {
+    kind: "sse",
+    chunks: [
+      { choices: [{ delta: { role: "assistant", content: "ok" }, finish_reason: null }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+    ],
+  }
+
+  test("an explicit baseUrl option wins over the OPENAI_BASE_URL env override", async () => {
+    const envFixture = serve([textStop])
+    const optionFixture = startFixture([textStop])
+    try {
+      const provider = createOpenAiProvider({ baseUrl: optionFixture.url })
+      const events = await collect(provider.stream(makeRequest(), new AbortController().signal))
+      expect(events.at(-1)).toEqual({ type: "done", stopReason: "end_turn" })
+      expect(optionFixture.requests).toHaveLength(1)
+      expect(recorded(optionFixture.requests).path).toBe("/v1/chat/completions")
+      expect(envFixture.requests).toHaveLength(0)
+    } finally {
+      optionFixture.stop()
+    }
+  })
+
+  test("a keyEnvVar option reads the key from the named variable into the auth header", async () => {
+    const served = serve([textStop])
+    process.env.CUSTOM_OPENAI_TEST_KEY = "custom-openai-key-value"
+    try {
+      const provider = createOpenAiProvider({ keyEnvVar: "CUSTOM_OPENAI_TEST_KEY" })
+      await collect(provider.stream(makeRequest(), new AbortController().signal))
+      expect(recorded(served.requests).authorization).toBe("Bearer custom-openai-key-value")
+    } finally {
+      delete process.env.CUSTOM_OPENAI_TEST_KEY
+    }
+  })
+
+  test("a keyEnvVar with no value sends no auth header instead of failing (requiresKey=false)", async () => {
+    const served = serve([textStop])
+    delete process.env.CUSTOM_OPENAI_MISSING_KEY
+    const provider = createOpenAiProvider({ keyEnvVar: "CUSTOM_OPENAI_MISSING_KEY" })
+    const events = await collect(provider.stream(makeRequest(), new AbortController().signal))
+    expect(events.at(-1)).toEqual({ type: "done", stopReason: "end_turn" })
+    expect(recorded(served.requests).authorization).toBeNull()
+  })
+
+  test("a models option replaces the client's catalog", () => {
+    const custom: ModelInfo[] = [
+      {
+        id: "qwen3:8b",
+        displayName: "Qwen3 8B",
+        provider: "ollama",
+        protocol: "openai",
+        contextWindow: 32_768,
+        maxOutputTokens: 8_192,
+        isDefault: true,
+        supportsReasoning: false,
+      },
+    ]
+    expect(createOpenAiProvider({ models: custom }).models).toBe(custom)
+  })
+})
+
 describe("createOpenAiProvider", () => {
   test("exposes the openai catalog with exactly one default model", () => {
     const provider = createOpenAiProvider()
     expect(provider.id).toBe("openai")
     expect(provider.models.filter((model) => model.isDefault)).toHaveLength(1)
     expect(provider.models[0]?.id).toBe("gpt-5.1")
+    for (const entry of openaiModels) expect(entry.protocol).toBe("openai")
   })
 
   test("streams text deltas and maps finish_reason stop to end_turn", async () => {
@@ -419,6 +482,30 @@ describe("createOpenAiProvider", () => {
     expect(message).toContain("[REDACTED]")
     expect(message).not.toContain("sk-leak1234567890abcdef")
     expect(message).not.toContain("test-key-openai")
+  })
+
+  test("a custom key echoed bare in an error body is scrubbed even when its env name looks benign", async () => {
+    // The env-name heuristic in redactSensitiveText would never match "CUSTOM_LLM_ACCESS", and
+    // the value matches no credential pattern — the adapter must scrub the concrete resolved key.
+    serve([{ kind: "error", status: 401, body: "gateway saw llm-access-value-123456 and refused" }])
+    process.env.CUSTOM_LLM_ACCESS = "llm-access-value-123456"
+    try {
+      const error = await collect(
+        createOpenAiProvider({ keyEnvVar: "CUSTOM_LLM_ACCESS" }).stream(
+          makeRequest(),
+          new AbortController().signal,
+        ),
+      ).then(
+        () => undefined,
+        (thrown: unknown) => thrown,
+      )
+      expect(error).toBeInstanceOf(ProviderHttpError)
+      const message = (error as ProviderHttpError).message
+      expect(message).toContain("[REDACTED]")
+      expect(message).not.toContain("llm-access-value-123456")
+    } finally {
+      delete process.env.CUSTOM_LLM_ACCESS
+    }
   })
 
   test("a mid-stream error frame throws ProviderHttpError instead of completing silently", async () => {

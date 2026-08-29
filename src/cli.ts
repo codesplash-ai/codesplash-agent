@@ -1,22 +1,28 @@
 #!/usr/bin/env bun
 
 import { statSync } from "node:fs"
+import { UsageError } from "./commands/usage-error.ts"
 import type { AppOptions } from "./core/app-options.ts"
-import type { ConfigSandboxMode } from "./core/config.ts"
-import type { EngineDriver } from "./core/engine.ts"
+import { type AgentConfig, applyConfigOverrides, type ConfigSandboxMode } from "./core/config.ts"
+import type { EngineDriver, SessionPolicy, SessionUsageSnapshot } from "./core/engine.ts"
+import type { AgentEvent } from "./core/events.ts"
 import type { SessionRecorder } from "./core/session-recorder.ts"
-import type { SessionStore } from "./core/sessions.ts"
-import type { ProviderId } from "./engines/codesplash/contracts.ts"
+import type { SessionMeta, SessionStore } from "./core/sessions.ts"
+import type { ProviderId, ReasoningEffort } from "./engines/codesplash/contracts.ts"
 import type { HeadlessOutputFormat, HeadlessSink } from "./engines/codesplash/runner.ts"
 
 function printHelp() {
   process.stdout.write(`CodeSplash Agent
 
 Usage:
-  codesplash [path] [--no-history] [--sandbox <mode>] [--full-access]
+  codesplash [path] [--no-history] [--sandbox <mode>] [--full-access] [-c <key=value>]
   codesplash login <anthropic|openai> [--api-key <key>]
   codesplash logout <anthropic|openai>
   codesplash run [path] [-p|--prompt <text>] [run options]
+  codesplash review [path] [review options]
+  codesplash stats [--days <n>] [--json]
+  codesplash completions <bash|zsh|fish|powershell>
+  codesplash debug prompt [path] [--model <id[:effort]>] [--sandbox <mode>] [-c <key=value>]
   codesplash --doctor
   codesplash --version
   codesplash --fixture
@@ -31,6 +37,11 @@ Commands:
   logout         Remove a stored API key
   run            Run one headless CodeSplash turn and exit. The prompt comes from -p/--prompt,
                  else the remaining positional text, else piped stdin
+  review         Collect a git diff and run one read-only CodeSplash review turn over it
+  stats          Aggregate recorded session usage (tokens, estimated cost) per engine and model
+  completions    Print a shell completion script for bash, zsh, fish, or powershell
+  debug          Inspect harness internals; "debug prompt" prints the model-visible surface
+                 (model, system prompt, tool specs) as JSON without opening a session
 
 Options:
   path           Project directory (defaults to the current directory)
@@ -40,6 +51,9 @@ Options:
   --sandbox <mode>
                  Override the configured sandbox: read-only or workspace-write
   --full-access  Run without a sandbox after an explicit confirmation (interactive sessions only)
+  -c, --config <key=value>
+                 Override one config value for this invocation, e.g. -c codex.sandbox=read-only
+                 (repeatable; dotted TOML path; never written back to config.toml)
   --fixture      Render the synthetic OpenTUI development fixture
   --codex-smoke  Check Codex app-server startup, protocol, and account state without running a model
   --codex-live-smoke
@@ -50,21 +64,74 @@ Options:
 Run options:
   -p, --prompt <text>        Prompt text for the turn
   --model <id[:effort]>      Model id, optionally with :low, :medium, or :high reasoning effort
+  --effort <level>           Reasoning effort (low, medium, or high) for the chosen model
   --output-format <format>   text (default), json, or stream-json
   --auto                     Accept approval requests instead of declining them
   --max-turns <n>            Upper bound on turns for the run (default 40)
   --sandbox <mode>           read-only or workspace-write
   --no-history               Do not write session files for this run
+  --resume <id>              Append this turn to the recorded codesplash session with that id
+  --continue                 Append to the project's most recently updated codesplash session
+  -c, --config <key=value>   Override one config value for this run (repeatable)
+
+Review options:
+  --uncommitted              Review uncommitted changes, staged and untracked included (default)
+  --base <ref>               Review changes since <ref> (git diff <ref>...HEAD)
+  --commit <sha>             Review one commit (git show --patch <sha>)
+  --model <id[:effort]>      Model id, optionally with :low, :medium, or :high reasoning effort
+  --output-format <format>   text (default) or json
+  --auto                     Accept approval requests instead of declining them
+  -c, --config <key=value>   Override one config value for this run (repeatable)
 `)
 }
 
-/** A caller mistake (bad flags, missing prompt): printed to stderr, exit code 2. */
-export class UsageError extends Error {
-  override readonly name = "UsageError"
+/**
+ * A caller mistake (bad flags, missing prompt): printed to stderr, exit code 2. The class lives
+ * in commands/usage-error.ts so command modules can throw it without importing cli.ts; this
+ * re-export keeps every existing `import { UsageError } from "../src/cli.ts"` working and makes
+ * `instanceof` agree across the CLI and the command modules.
+ */
+export { UsageError }
+
+/** Validates one `-c/--config` override's syntax eagerly so mistakes exit 2 before any I/O. */
+function checkConfigOverride(value: string): string {
+  try {
+    applyConfigOverrides({}, [value])
+  } catch (error) {
+    throw new UsageError(error instanceof Error ? error.message : String(error))
+  }
+  return value
+}
+
+/**
+ * Pulls repeatable `-c/--config key=value` flags out of a subcommand's argument list, for
+ * subcommands whose parsers live in src/commands and take the overrides separately.
+ */
+export function extractConfigOverrides(args: string[]): { args: string[]; configOverrides: string[] } {
+  const rest: string[] = []
+  const configOverrides: string[] = []
+
+  for (let index = 0; index < args.length; index++) {
+    const argument = args[index] as string
+    if (argument === "-c" || argument === "--config") {
+      const value = args[++index]
+      if (value === undefined) throw new UsageError("--config expects a dotted.path=value override")
+      configOverrides.push(checkConfigOverride(value))
+    } else if (argument.startsWith("--config=")) {
+      configOverrides.push(checkConfigOverride(argument.slice("--config=".length)))
+    } else if (argument.startsWith("-c=")) {
+      configOverrides.push(checkConfigOverride(argument.slice("-c=".length)))
+    } else {
+      rest.push(argument)
+    }
+  }
+
+  return { args: rest, configOverrides }
 }
 
 export function parseAppArguments(args: string[]): { path?: string; options: AppOptions } {
-  const options: AppOptions = { noHistory: false, fullAccess: false }
+  const configOverrides: string[] = []
+  const options: AppOptions = { noHistory: false, fullAccess: false, configOverrides }
   let path: string | undefined
 
   for (let index = 0; index < args.length; index++) {
@@ -73,6 +140,14 @@ export function parseAppArguments(args: string[]): { path?: string; options: App
       options.noHistory = true
     } else if (argument === "--full-access") {
       options.fullAccess = true
+    } else if (argument === "-c" || argument === "--config") {
+      const value = args[++index]
+      if (value === undefined) throw new UsageError("--config expects a dotted.path=value override")
+      configOverrides.push(checkConfigOverride(value))
+    } else if (argument.startsWith("--config=")) {
+      configOverrides.push(checkConfigOverride(argument.slice("--config=".length)))
+    } else if (argument.startsWith("-c=")) {
+      configOverrides.push(checkConfigOverride(argument.slice("-c=".length)))
     } else if (argument === "--sandbox" || argument.startsWith("--sandbox=")) {
       const value = argument.includes("=") ? argument.slice("--sandbox=".length) : args[++index]
       if (value === "read-only" || value === "workspace-write") {
@@ -242,11 +317,19 @@ export type RunCommand = {
   /** Prompt from --prompt or positional text; undefined defers to piped stdin. */
   prompt?: string
   model?: string
+  /** `--effort`: reasoning effort combined with the model (or the default model) by the runner. */
+  effort?: ReasoningEffort
   outputFormat: HeadlessOutputFormat
   auto: boolean
   maxTurns?: number
   sandboxOverride?: ConfigSandboxMode
   noHistory: boolean
+  /** `--resume <id>`: append this turn to the recorded codesplash session with that id. */
+  resume?: string
+  /** `--continue`: append to the project's most recently updated codesplash session. */
+  continueSession: boolean
+  /** Repeatable `-c/--config key=value` overrides applied to this run's config load. */
+  configOverrides: string[]
 }
 
 function defaultIsDirectory(path: string): boolean {
@@ -268,11 +351,15 @@ export function parseRunArguments(
 ): RunCommand {
   let promptFlag: string | undefined
   let model: string | undefined
+  let effort: ReasoningEffort | undefined
   let outputFormat: HeadlessOutputFormat = "text"
   let auto = false
   let maxTurns: number | undefined
   let sandboxOverride: ConfigSandboxMode | undefined
   let noHistory = false
+  let resume: string | undefined
+  let continueSession = false
+  const configOverrides: string[] = []
   const positionals: string[] = []
 
   for (let index = 0; index < args.length; index++) {
@@ -281,6 +368,28 @@ export function parseRunArguments(
       const value = argument.startsWith("--prompt=") ? argument.slice("--prompt=".length) : args[++index]
       if (value === undefined) throw new UsageError("--prompt expects the prompt text")
       promptFlag = value
+    } else if (argument === "--effort" || argument.startsWith("--effort=")) {
+      const value = argument.includes("=") ? argument.slice("--effort=".length) : args[++index]
+      if (value !== "low" && value !== "medium" && value !== "high") {
+        throw new UsageError(`--effort expects low, medium, or high, got ${value ?? "nothing"}`)
+      }
+      effort = value
+    } else if (argument === "--resume" || argument.startsWith("--resume=")) {
+      const value = argument.includes("=") ? argument.slice("--resume=".length) : args[++index]
+      if (value === undefined || value === "" || value.startsWith("-")) {
+        throw new UsageError("--resume expects a session id (see the resume picker or session store)")
+      }
+      resume = value
+    } else if (argument === "--continue") {
+      continueSession = true
+    } else if (argument === "-c" || argument === "--config") {
+      const value = args[++index]
+      if (value === undefined) throw new UsageError("--config expects a dotted.path=value override")
+      configOverrides.push(checkConfigOverride(value))
+    } else if (argument.startsWith("--config=")) {
+      configOverrides.push(checkConfigOverride(argument.slice("--config=".length)))
+    } else if (argument.startsWith("-c=")) {
+      configOverrides.push(checkConfigOverride(argument.slice("-c=".length)))
     } else if (argument === "--model" || argument.startsWith("--model=")) {
       const value = argument.includes("=") ? argument.slice("--model=".length) : args[++index]
       if (value === undefined) {
@@ -322,6 +431,13 @@ export function parseRunArguments(
     }
   }
 
+  if (resume !== undefined && continueSession) {
+    throw new UsageError("--resume and --continue conflict; pass at most one")
+  }
+  if ((resume !== undefined || continueSession) && noHistory) {
+    throw new UsageError("--no-history cannot resume a session; resumed runs append to its history")
+  }
+
   let path: string | undefined
   let prompt = promptFlag
   if (promptFlag !== undefined) {
@@ -336,7 +452,20 @@ export function parseRunArguments(
     }
   }
 
-  return { path, prompt, model, outputFormat, auto, maxTurns, sandboxOverride, noHistory }
+  return {
+    path,
+    prompt,
+    model,
+    effort,
+    outputFormat,
+    auto,
+    maxTurns,
+    sandboxOverride,
+    noHistory,
+    resume,
+    continueSession,
+    configOverrides,
+  }
 }
 
 /** Test seams for the run command; every field defaults to the real process surface. */
@@ -356,6 +485,7 @@ export type RunCommandOverrides = {
 export async function runRunCommand(args: string[], overrides: RunCommandOverrides = {}): Promise<number> {
   const command = parseRunArguments(args, overrides.isDirectory)
   const env = overrides.env ?? process.env
+  const stderr = overrides.stderr ?? process.stderr
 
   let prompt = command.prompt
   if (prompt === undefined) {
@@ -366,15 +496,6 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
     throw new UsageError("run needs a prompt: pass -p/--prompt, positional text, or pipe it on stdin")
   }
 
-  if (command.model !== undefined) {
-    const { parseModelSelector } = await import("./engines/codesplash/catalog.ts")
-    try {
-      parseModelSelector(command.model)
-    } catch (error) {
-      throw new UsageError(error instanceof Error ? error.message : String(error))
-    }
-  }
-
   const { applyStoredCredentials } = await import("./engines/codesplash/auth.ts")
   applyStoredCredentials(env)
 
@@ -382,36 +503,103 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
   const project = await inspectProject(command.path ?? process.cwd())
 
   const { configDirectory, configFilePath, loadConfig } = await import("./core/config.ts")
-  const config = await loadConfig(configFilePath(configDirectory(env)))
+  const config = await loadConfig(configFilePath(configDirectory(env)), command.configOverrides)
+
+  if (command.model !== undefined) {
+    // Validate against the static built-in catalog first (availability-agnostic, like always),
+    // then against the config-driven registry so custom-provider models pass too.
+    const selector = command.effort ? `${command.model}:${command.effort}` : command.model
+    const { buildProviderRegistry, parseModelSelector } = await import("./engines/codesplash/catalog.ts")
+    try {
+      parseModelSelector(selector)
+    } catch (staticError) {
+      try {
+        buildProviderRegistry(config, env).parseSelector(selector)
+      } catch {
+        throw new UsageError(staticError instanceof Error ? staticError.message : String(staticError))
+      }
+    }
+  }
+
   const { effectiveHistoryEnabled, effectiveSessionPolicy } = await import("./core/app-options.ts")
   const appOptions: AppOptions = {
     noHistory: command.noHistory,
     fullAccess: false,
     sandboxOverride: command.sandboxOverride,
   }
-  const policy = effectiveSessionPolicy(config, appOptions)
-  const localSessionId = crypto.randomUUID()
-
+  let policy = effectiveSessionPolicy(config, appOptions)
+  let localSessionId: string = crypto.randomUUID()
   let recorder: SessionRecorder | undefined
-  if (effectiveHistoryEnabled(config, appOptions)) {
-    const { projectIdFor, SessionStore } = await import("./core/sessions.ts")
+  let nativeTranscriptPath: string | undefined
+  let firstSequence: number | undefined
+  let initialUsage: SessionUsageSnapshot | undefined
+
+  const resuming = command.resume !== undefined || command.continueSession
+  if (resuming && !effectiveHistoryEnabled(config, appOptions)) {
+    throw new UsageError("Resuming needs session history, but it is disabled in config")
+  }
+  if (resuming || effectiveHistoryEnabled(config, appOptions)) {
+    const { projectIdFor, readSessionEvents, SessionStore, transcriptPathFor } = await import(
+      "./core/sessions.ts"
+    )
     const { SessionRecorder } = await import("./core/session-recorder.ts")
     const store = overrides.store ?? new SessionStore()
-    const now = new Date().toISOString()
-    const handle = await store.create({
-      schemaVersion: 1,
-      engine: "codesplash",
-      localSessionId,
-      projectPath: project.cwd,
-      projectId: projectIdFor(project.cwd),
-      createdAt: now,
-      updatedAt: now,
-      lastStatus: "starting",
-      lastSequence: -1,
-      sandbox: policy.sandbox,
-      approvalPolicy: policy.approvalPolicy,
-    })
-    recorder = new SessionRecorder(handle)
+    const projectId = projectIdFor(project.cwd)
+
+    if (resuming) {
+      const targetId = command.resume ?? (await latestCodesplashSessionId(store, projectId))
+      let handle: Awaited<ReturnType<SessionStore["open"]>>
+      try {
+        handle = await store.open(projectId, targetId)
+      } catch {
+        throw new UsageError(`No recorded session "${targetId}" for this project`)
+      }
+      if (handle.meta.engine !== "codesplash") {
+        throw new UsageError(
+          `Session "${targetId}" belongs to the ${handle.meta.engine} engine; run can only resume codesplash sessions`,
+        )
+      }
+      localSessionId = handle.meta.localSessionId
+      // A crash mid-turn leaves events.jsonl ahead of meta.lastSequence (meta only syncs on
+      // turn.completed/session.status), so the on-disk events decide the next sequence — reusing
+      // an already-issued sequence would break the monotonic invariant replay relies on. The
+      // same read seeds the cumulative usage the resumed engine session continues from.
+      const { events: priorEvents } = await readSessionEvents(handle.directory)
+      let highestSequence = handle.meta.lastSequence
+      for (const event of priorEvents) {
+        if (event.sequence > highestSequence) highestSequence = event.sequence
+      }
+      firstSequence = highestSequence + 1
+      initialUsage = usageSnapshotFromEvents(priorEvents)
+      nativeTranscriptPath = transcriptPathFor(handle)
+      policy = resumedSessionPolicy(handle.meta, command.sandboxOverride, config, stderr)
+      recorder = new SessionRecorder(handle)
+    } else {
+      const now = new Date().toISOString()
+      const handle = await store.create({
+        schemaVersion: 1,
+        engine: "codesplash",
+        localSessionId,
+        projectPath: project.cwd,
+        projectId,
+        createdAt: now,
+        updatedAt: now,
+        lastStatus: "starting",
+        lastSequence: -1,
+        sandbox: policy.sandbox,
+        approvalPolicy: policy.approvalPolicy,
+      })
+      // New recorded runs persist the engine transcript too, so --resume/--continue work later.
+      nativeTranscriptPath = transcriptPathFor(handle)
+      recorder = new SessionRecorder(handle)
+    }
+  }
+
+  let driver = overrides.driver
+  if (!driver) {
+    const { CodesplashDriver } = await import("./engines/codesplash/engine.ts")
+    // The engine reuses this command's config load, -c overrides included.
+    driver = new CodesplashDriver({ config })
   }
 
   const { runHeadless } = await import("./engines/codesplash/runner.ts")
@@ -419,18 +607,72 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
     prompt,
     cwd: project.cwd,
     model: command.model,
+    effort: command.effort,
     policy,
     autoApprove: command.auto,
     maxTurns: command.maxTurns,
     outputFormat: command.outputFormat,
     recorder,
-    driver: overrides.driver,
+    driver,
     localSessionId,
+    nativeTranscriptPath,
+    firstSequence,
+    initialUsage,
     stdout: overrides.stdout,
     stderr: overrides.stderr,
   })
   await recorder?.close(exitCode === 1 ? "failed" : "closed")
   return exitCode
+}
+
+/**
+ * Cumulative usage recorded across a session's `usage.updated` events: codesplash events carry
+ * session-cumulative fields, so the merge keeps each field's last defined value (a payload that
+ * omits a field — e.g. a rate-limit-only update — leaves it intact). Returns undefined when the
+ * log recorded no usage at all.
+ */
+function usageSnapshotFromEvents(events: readonly AgentEvent[]): SessionUsageSnapshot | undefined {
+  let snapshot: SessionUsageSnapshot | undefined
+  for (const event of events) {
+    if (event.kind !== "usage.updated") continue
+    const payload = event.payload
+    snapshot ??= {}
+    if (payload.inputTokens !== undefined) snapshot.inputTokens = payload.inputTokens
+    if (payload.cachedInputTokens !== undefined) snapshot.cachedInputTokens = payload.cachedInputTokens
+    if (payload.outputTokens !== undefined) snapshot.outputTokens = payload.outputTokens
+    if (payload.estimatedCostUsd !== undefined) snapshot.estimatedCostUsd = payload.estimatedCostUsd
+    if (payload.hasUnpricedUsage !== undefined) snapshot.hasUnpricedUsage = payload.hasUnpricedUsage
+  }
+  return snapshot
+}
+
+/** The most recently updated codesplash session for `--continue`; none is a usage error. */
+async function latestCodesplashSessionId(store: SessionStore, projectId: string): Promise<string> {
+  const sessions = await store.list(projectId)
+  const latest = sessions.find((meta) => meta.engine === "codesplash")
+  if (!latest) throw new UsageError("No codesplash session to continue in this project")
+  return latest.localSessionId
+}
+
+/**
+ * Resumed runs reuse the session's recorded sandbox and approval policy unless overridden on the
+ * command line. A recorded full-access sandbox cannot be reused headless — full access always
+ * needs the interactive typed confirmation — so it degrades to workspace-write with a notice.
+ */
+function resumedSessionPolicy(
+  meta: SessionMeta,
+  sandboxOverride: ConfigSandboxMode | undefined,
+  config: AgentConfig,
+  stderr: HeadlessSink,
+): SessionPolicy {
+  let sandbox = sandboxOverride ?? meta.sandbox ?? config.codex.sandbox
+  if (sandbox === "danger-full-access") {
+    stderr.write(
+      "codesplash: the recorded session ran with full access, which needs interactive confirmation; using workspace-write (pass --sandbox to choose)\n",
+    )
+    sandbox = "workspace-write"
+  }
+  return { sandbox, approvalPolicy: meta.approvalPolicy ?? config.codex.approvalPolicy }
 }
 
 /* ------------------------------------------ main ------------------------------------------ */
@@ -464,6 +706,32 @@ async function main(): Promise<void> {
 
   if (args[0] === "run") {
     process.exitCode = await runRunCommand(args.slice(1))
+    return
+  }
+
+  if (args[0] === "review") {
+    const { runReviewCommand } = await import("./commands/review.ts")
+    const { args: rest, configOverrides } = extractConfigOverrides(args.slice(1))
+    process.exitCode = await runReviewCommand(rest, { configOverrides })
+    return
+  }
+
+  if (args[0] === "stats") {
+    const { runStatsCommand } = await import("./commands/stats.ts")
+    process.exitCode = await runStatsCommand(args.slice(1))
+    return
+  }
+
+  if (args[0] === "completions") {
+    const { runCompletionsCommand } = await import("./commands/completions.ts")
+    process.exitCode = await runCompletionsCommand(args.slice(1))
+    return
+  }
+
+  if (args[0] === "debug") {
+    const { runDebugCommand } = await import("./commands/debug-prompt.ts")
+    const { args: rest, configOverrides } = extractConfigOverrides(args.slice(1))
+    process.exitCode = await runDebugCommand(rest, { configOverrides })
     return
   }
 

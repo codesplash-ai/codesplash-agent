@@ -35,6 +35,7 @@ export type SlashCommandName =
   | "engine"
   | "model"
   | "permissions"
+  | "usage"
   | "history"
   | "quit"
 
@@ -49,6 +50,7 @@ const slashCommandNames: readonly SlashCommandName[] = [
   "engine",
   "model",
   "permissions",
+  "usage",
   "history",
   "quit",
 ]
@@ -81,6 +83,7 @@ export const slashCommandHelp: ReadonlyArray<{ command: string; description: str
   { command: "/engine", description: "Back to the engine screen (welcome)" },
   { command: "/model [name]", description: "List models, or switch for the next turn" },
   { command: "/permissions", description: "Show the sandbox and approval policy" },
+  { command: "/usage", description: "Show token usage, context left, and estimated cost" },
   { command: "/history", description: "Show where this session is stored" },
   { command: "/help", description: "Toggle this overlay (also F1)" },
   { command: "/quit", description: "Quit the app" },
@@ -240,6 +243,7 @@ type ModelOverlayState = {
 type OverlayState =
   | { kind: "help" }
   | { kind: "permissions" }
+  | { kind: "usage" }
   | { kind: "history" }
   | { kind: "models"; state: ModelOverlayState }
 
@@ -280,11 +284,11 @@ export function CodexSessionApp({
   const outline = useMemo(() => buildTranscriptOutline(state.transcript), [state.transcript])
   const activeOutlineId = selectedOutlineId ?? outline.at(-1)?.id
   const showOutline = outlineVisible && terminalWidth >= 96 && outline.length > 0
-  // CodeSplash sessions cannot resume the model's context (capabilities.resume is false): a
-  // reopen would silently discard everything the model knows, and the in-process loop already
-  // accepts a fresh turn after a failed one — so recoverable errors keep the composer live
-  // instead of offering the Ctrl+R reconnect flow.
-  const supportsReconnect = engine !== "codesplash"
+  // CodeSplash resumes through the transcript persisted next to the session's event log, which
+  // only exists when history is on disk. Without it a reopen would silently discard everything
+  // the model knows, and the in-process loop already accepts a fresh turn after a failed one —
+  // so recoverable errors keep the composer live instead of offering the Ctrl+R reconnect flow.
+  const supportsReconnect = engine !== "codesplash" || historyLocation !== undefined
   const reconnectPending = supportsReconnect && state.error?.recoverable === true
 
   useEffect(() => {
@@ -445,6 +449,9 @@ export function CodexSessionApp({
           return
         case "permissions":
           setOverlay({ kind: "permissions" })
+          return
+        case "usage":
+          setOverlay({ kind: "usage" })
           return
         case "history":
           setOverlay({ kind: "history" })
@@ -720,7 +727,13 @@ export function CodexSessionApp({
         </box>
       </box>
 
-      <SessionOverlay overlay={overlay} palette={palette} policy={policy} historyLocation={historyLocation} />
+      <SessionOverlay
+        overlay={overlay}
+        palette={palette}
+        policy={policy}
+        historyLocation={historyLocation}
+        state={state}
+      />
       <Approval request={overlay ? undefined : state.pendingRequest} palette={palette} />
     </box>
   )
@@ -731,11 +744,13 @@ function SessionOverlay({
   palette,
   policy,
   historyLocation,
+  state,
 }: {
   overlay: OverlayState | undefined
   palette: BrandPalette
   policy: SessionPolicy
   historyLocation?: string
+  state: AppViewState
 }) {
   if (!overlay) return null
 
@@ -790,6 +805,21 @@ function SessionOverlay({
           {danger
             ? "No sandbox is active for this session. Every approval is final."
             : "Change with --sandbox/--full-access flags or [codex] config; applies to the next session."}
+        </text>
+      </box>
+    )
+  }
+
+  if (overlay.kind === "usage") {
+    return (
+      <box title="Session usage · Esc closes" style={frame}>
+        {buildUsageOverlayLines(state).map((line) => (
+          <text key={line.label} fg={palette.foreground}>
+            {line.label.padEnd(16)} {line.value}
+          </text>
+        ))}
+        <text fg={palette.muted} style={{ marginTop: 1 }}>
+          {usageOverlayNote(state.usage)}
         </text>
       </box>
     )
@@ -1099,7 +1129,7 @@ function statusHelp(state: AppViewState, supportsReconnect: boolean): string {
   return "Enter send · /help commands · F1 keys"
 }
 
-export function formatContextRemaining(state: AppViewState): string | undefined {
+export function contextRemainingPercent(state: AppViewState): number | undefined {
   const total =
     state.usage.contextTokens ??
     (state.usage.inputTokens === undefined
@@ -1109,8 +1139,77 @@ export function formatContextRemaining(state: AppViewState): string | undefined 
   if (total === undefined || window === undefined || window <= 0) return undefined
 
   const remaining = Math.max(0, window - total)
-  const percent = Math.max(0, Math.min(100, Math.round((remaining / window) * 100)))
-  return `${percent}% context left`
+  return Math.max(0, Math.min(100, Math.round((remaining / window) * 100)))
+}
+
+export function formatContextRemaining(state: AppViewState): string | undefined {
+  const percent = contextRemainingPercent(state)
+  return percent === undefined ? undefined : `${percent}% context left`
+}
+
+/**
+ * True when the session's estimated cost is missing usage: the loop prices usage from the model
+ * catalog and flags every usage.updated payload with hasUnpricedUsage (false included), which is
+ * authoritative — a model legitimately priced at $0 (e.g. a local provider) reports false and is
+ * NOT partial. Only sessions recorded before the flag existed (no flag on any replayed event)
+ * fall back to the outside heuristic: a cost of exactly zero alongside observed tokens.
+ */
+export function costIsPartial(usage: AppViewState["usage"]): boolean {
+  if (usage.hasUnpricedUsage !== undefined) return usage.hasUnpricedUsage
+  if (usage.estimatedCostUsd !== 0) return false
+  return (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0) > 0
+}
+
+/** Catalog estimates only — always labelled "estimated", plus "partial" for unpriced usage. */
+export function formatEstimatedCost(usage: AppViewState["usage"]): string {
+  const cost = usage.estimatedCostUsd
+  if (cost === undefined) return "not reported"
+  return `$${cost.toFixed(4)} (estimated${costIsPartial(usage) ? ", partial" : ""})`
+}
+
+export function usageOverlayNote(usage: AppViewState["usage"]): string {
+  const base = "Costs are catalog estimates, not provider billing."
+  return costIsPartial(usage)
+    ? `${base} Some usage ran on models without pricing, so the cost shown is partial.`
+    : base
+}
+
+export type UsageOverlayLine = { label: string; value: string }
+
+/** The /usage overlay body: cumulative tokens, context left, estimated cost, rate limit. */
+export function buildUsageOverlayLines(state: AppViewState): UsageOverlayLine[] {
+  const usage = state.usage
+  const total =
+    usage.totalTokens ??
+    (usage.inputTokens === undefined && usage.outputTokens === undefined
+      ? undefined
+      : (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0))
+  const cached = usage.cachedInputTokens
+  const lines: UsageOverlayLine[] = [
+    { label: "Model", value: state.model ?? "engine default" },
+    {
+      label: "Input tokens",
+      value: `${formatTokenCount(usage.inputTokens)}${cached ? ` (${formatTokenCount(cached)} cached)` : ""}`,
+    },
+    { label: "Output tokens", value: formatTokenCount(usage.outputTokens) },
+    { label: "Total tokens", value: formatTokenCount(total) },
+    { label: "Context left", value: contextLeftValue(state) },
+    { label: "Estimated cost", value: formatEstimatedCost(usage) },
+  ]
+  const rateLimit = formatRateLimit(state)
+  if (rateLimit) lines.push({ label: "Rate limit", value: rateLimit.text })
+  return lines
+}
+
+function contextLeftValue(state: AppViewState): string {
+  const percent = contextRemainingPercent(state)
+  const window = state.usage.modelContextWindow
+  if (percent === undefined || window === undefined) return "unknown"
+  return `${percent}% of ${formatTokenCount(window)} tokens`
+}
+
+function formatTokenCount(count: number | undefined): string {
+  return count === undefined ? "—" : count.toLocaleString("en-US")
 }
 
 function outlineLabel(item: TranscriptItem): string {

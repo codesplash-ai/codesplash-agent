@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { SessionMeta } from "../../src/core/index.ts"
+import { CODESPLASH_CAPABILITIES } from "../../src/engines/codesplash/index.ts"
 import {
   displaySessionStatus,
   formatRelativeTime,
@@ -60,11 +61,16 @@ describe("session picker", () => {
     ).toBe(false)
   })
 
-  test("codesplash sessions are listed but never resumable, even with a native session ID", () => {
-    // The codesplash engine records nativeSessionId === localSessionId, but capabilities.resume
-    // is false: an in-process run has no provider thread to reopen.
-    expect(isResumableSession(makeMeta({ engine: "codesplash", nativeSessionId: "local-1" }))).toBe(false)
-    expect(isResumableSession(makeMeta({ engine: "codesplash", nativeSessionId: undefined }))).toBe(false)
+  test("codesplash rows follow the engine resume capability, not the native session ID", () => {
+    // CodeSplash resumes from the transcript in the session store, not a provider thread: a row
+    // is resumable exactly when CODESPLASH_CAPABILITIES.resume says so, and the recorded
+    // nativeSessionId (=== localSessionId) neither enables nor blocks it.
+    expect(isResumableSession(makeMeta({ engine: "codesplash", nativeSessionId: "local-1" }))).toBe(
+      CODESPLASH_CAPABILITIES.resume,
+    )
+    expect(isResumableSession(makeMeta({ engine: "codesplash", nativeSessionId: undefined }))).toBe(
+      CODESPLASH_CAPABILITIES.resume,
+    )
     expect(displaySessionStatus(makeMeta({ engine: "codesplash", lastStatus: "running" }))).toBe(
       "interrupted",
     )

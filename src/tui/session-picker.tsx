@@ -36,12 +36,13 @@ export function sandboxBadge(meta: SessionMeta): string {
 }
 
 /**
- * Pickers are engine-scoped, so a native session ID is the main resume requirement.
- * CodeSplash rows stay listed but never resume (capabilities.resume is false: its turns run
- * in-process and record nativeSessionId === localSessionId, which cannot be reopened).
+ * Pickers are engine-scoped, so a native session ID is the main resume requirement for engines
+ * with a provider thread. CodeSplash resumes from the transcript persisted in the session store
+ * (nativeSessionId is just the local id and proves nothing), so its rows follow the engine
+ * capability alone.
  */
 export function isResumableSession(meta: SessionMeta): boolean {
-  if (meta.engine === "codesplash") return CODESPLASH_CAPABILITIES.resume && Boolean(meta.nativeSessionId)
+  if (meta.engine === "codesplash") return CODESPLASH_CAPABILITIES.resume
   return Boolean(meta.nativeSessionId)
 }
 

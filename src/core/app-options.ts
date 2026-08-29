@@ -9,6 +9,8 @@ export type AppOptions = {
   sandboxOverride?: ConfigSandboxMode
   /** `--full-access`: the only route to danger-full-access; requires interactive confirmation. */
   fullAccess: boolean
+  /** Repeatable `-c/--config key=value` overrides applied when config is loaded for this run. */
+  configOverrides?: readonly string[]
 }
 
 export const defaultAppOptions: AppOptions = { noHistory: false, fullAccess: false }

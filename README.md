@@ -66,6 +66,7 @@ codesplash --doctor            # non-interactive diagnostics: runtime, engines, 
 codesplash --no-history        # write no session files this run
 codesplash --sandbox read-only # override the Codex sandbox (read-only | workspace-write)
 codesplash --full-access       # run Codex without a sandbox (requires typed confirmation)
+codesplash -c theme=dark       # override one config value for this invocation (repeatable)
 ```
 
 Inside a session: `/help` (or F1) shows every key binding and command — `/new`, `/resume`,
@@ -95,12 +96,77 @@ codesplash run -p "audit deps" --output-format stream-json --model claude-sonnet
 ```
 
 Output formats: `text` (default — assistant text on stdout, tool activity on stderr), `json` (one
-final `{result, turns, usage, status}` object), `stream-json` (every event as a JSON line, then a
-result line). Useful flags: `--auto` (accept approvals; default declines them), `--sandbox
-read-only|workspace-write`, `--max-turns N`, `--no-history`. `--full-access` is interactive-only
+final `{result, turns, usage, status, sessionId}` object), `stream-json` (every event as a JSON
+line, then a result line). Usage totals include an estimated cost from catalog pricing. Useful
+flags: `--auto` (accept approvals; default declines them), `--sandbox read-only|workspace-write`,
+`--max-turns N`, `--effort low|medium|high`, `--no-history`. `--full-access` is interactive-only
 and rejected in run mode. Exit codes: `0` completed, `1` failed, `2` usage error, `130`
 interrupted. `codesplash --doctor` shows which providers have credentials and their source
-(`env`/`stored`) — never the values.
+(`env`/`stored`) — never the values — plus any configured custom providers and the newest
+session's transcript state.
+
+#### Resuming headless sessions
+
+Recorded `run` sessions keep an engine-owned transcript next to their event history, so a later
+run can pick the conversation back up:
+
+```sh
+codesplash run --continue -p "now add tests for that"    # newest codesplash session in the project
+codesplash run --resume <session-id> -p "keep going"     # a specific session by id
+```
+
+Resumed runs reuse the session's recorded sandbox and approval policy unless overridden on the
+command line, and append to the same history (`--no-history` with resume is a usage error).
+
+#### Custom providers (BYOK)
+
+Any OpenAI- or Anthropic-protocol endpoint can serve models through `[providers.*]` tables in
+`config.toml` — for example a local Ollama:
+
+```toml
+[codesplash]
+fallbackModel = "gpt-5.1"           # optional: retried once when the primary provider errors
+
+[providers.ollama]
+protocol = "openai"                  # wire protocol: anthropic | openai
+baseUrl = "http://localhost:11434/v1"
+requiresKey = false                  # default true; keys come from OLLAMA_API_KEY (never config)
+
+[[providers.ollama.models]]
+id = "qwen3:8b"
+displayName = "Qwen3 8B"
+contextWindow = 32768
+```
+
+API keys never live in `config.toml` — a `key`/`apiKey` field there is rejected with a pointer at
+the provider's env var. Custom models appear in `/model` and are valid `--model` selectors.
+
+#### Web tools
+
+The engine ships `web_fetch` (fetch a URL as markdown/text, SSRF-guarded, 5MB cap, redirects
+re-validated per hop) and `web_search` (DuckDuckGo HTML results). Both are read-only, allowed
+under the read-only sandbox, and require approval per host/search under untrusted approvals.
+
+#### More subcommands
+
+```sh
+codesplash review                      # review uncommitted changes in one read-only turn
+codesplash review --base main          # …changes since a ref, or --commit <sha> for one commit
+codesplash stats --days 7 [--json]     # recorded usage per engine+model: sessions, tokens, cost
+codesplash completions fish            # shell completion scripts: bash | zsh | fish | powershell
+codesplash debug prompt                # the model-visible surface (system prompt, tools) as JSON
+```
+
+#### Per-invocation config overrides
+
+Every config-loading command (the TUI, `run`, `review`, `debug prompt`) accepts repeatable
+`-c/--config dotted.path=value` overrides, applied for that invocation only and never written
+back:
+
+```sh
+codesplash -c theme=dark
+codesplash run -p "quick check" -c codex.sandbox=read-only -c codesplash.fallbackModel=gpt-5.1
+```
 
 ## Security posture
 

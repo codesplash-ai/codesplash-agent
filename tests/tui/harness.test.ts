@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { initialAppViewState } from "../../src/core/index.ts"
+import { defaultConfig, initialAppViewState } from "../../src/core/index.ts"
+import type { CodesplashDriver } from "../../src/engines/codesplash/index.ts"
 import {
   composerRows,
   engineDisplayName,
@@ -98,5 +99,14 @@ describe("engine labels", () => {
   test("the session runner constructs the driver matching the requested engine", () => {
     expect(createEngineDriver("codex").id).toBe("codex")
     expect(createEngineDriver("codesplash").id).toBe("codesplash")
+  })
+
+  test("the loaded config (with -c overrides) reaches the codesplash driver", () => {
+    // Without this the interactive TUI's engine reloads config from disk and silently drops the
+    // root command's -c overrides (fallbackModel, custom providers, ...).
+    const config = structuredClone(defaultConfig)
+    config.codesplash.fallbackModel = "gpt-5.1"
+    const driver = createEngineDriver("codesplash", config) as CodesplashDriver
+    expect(driver.options.config).toBe(config)
   })
 })

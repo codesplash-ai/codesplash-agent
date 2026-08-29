@@ -44,6 +44,15 @@ export const APPROVAL_CHOICES = ["accept", "acceptForSession", "decline", "cance
 const GIT_DIFF_TIMEOUT_MS = 10_000
 const LABEL_MAX_CHARS = 80
 
+/** Nth consecutive identical tool call that is answered synthetically instead of executed. */
+const DOOM_LOOP_SYNTHETIC_AT = 3
+/** Nth consecutive identical tool call that force-ends the turn like the round cap does. */
+const DOOM_LOOP_FORCED_END_AT = 5
+const DOOM_LOOP_SYNTHETIC_TEXT =
+  "This exact call was already made twice with the same result. Change your approach instead of repeating it."
+const DOOM_LOOP_SKIPPED_TEXT = "Skipped: the harness detected a repeated tool-call loop and ended the turn."
+const DOOM_LOOP_WARNING = "Repeated tool-call loop detected; ending the turn"
+
 /**
  * Stamps every emitted AgentEvent with the codesplash envelope and a monotonic sequence starting
  * at firstSequence, mirroring how the Codex normalizer numbers events for the recorder.
@@ -86,6 +95,9 @@ export class CodesplashEventFactory {
 /** Produces a unified diff for the given workspace paths; injectable for tests. */
 export type DiffCollector = (cwd: string, paths: string[]) => Promise<string>
 
+/** A model id resolved through the provider registry to its catalog entry and adapter client. */
+export type ResolvedModel = { model: ModelInfo; provider: ProviderClient }
+
 export type CodesplashLoopOptions = {
   cwd: string
   policy: SessionPolicy
@@ -94,6 +106,24 @@ export type CodesplashLoopOptions = {
   emit: (event: AgentEvent) => void
   maxToolRounds?: number
   collectDiff?: DiffCollector
+  /** `[codesplash].fallbackModel`: retried on a zero-event provider failure at turn start. */
+  fallbackModel?: string
+  /**
+   * Resolves a model id to its catalog entry and client; undefined means unknown or unavailable.
+   * Registry-backed at wiring time, so a resolved model's provider is always available.
+   */
+  resolveModel?: (id: string) => ResolvedModel | undefined
+  /**
+   * Cumulative usage a resumed session already recorded. Seeds the session totals so post-resume
+   * `usage.updated` events continue the counts instead of restarting at zero.
+   */
+  initialUsage?: {
+    inputTokens?: number
+    cachedInputTokens?: number
+    outputTokens?: number
+    estimatedCostUsd?: number
+    hasUnpricedUsage?: boolean
+  }
 }
 
 export type TurnRequest = {
@@ -113,7 +143,7 @@ type PendingRequest = {
 }
 
 type StreamResult =
-  | { kind: "error"; error: unknown }
+  | { kind: "error"; error: unknown; sawEvent: boolean }
   | { kind: "aborted"; text: string }
   | {
       kind: "done"
@@ -134,8 +164,25 @@ export class CodesplashLoop {
   readonly #history: ChatMessage[] = []
   readonly #sessionApprovals = new Set<string>()
   readonly #pendingRequests = new Map<string, PendingRequest>()
+  readonly #fallbackModel: string | undefined
+  readonly #resolveModel: ((id: string) => ResolvedModel | undefined) | undefined
+  /** Session-cumulative usage committed from finished provider requests. */
+  readonly #usageTotals = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, costUsd: 0 }
+  #hasUnpricedUsage = false
+  /** A misconfigured fallback model warns once per session, then stays ignored. */
+  #fallbackWarned = false
   #abort: AbortController | undefined
   #turnId: string | undefined
+  /** Doom-loop tracking: canonical signature and run length of consecutive identical calls. */
+  #doomSignature: string | undefined
+  #doomCount = 0
+  /**
+   * History index where the current (or most recent) turn began. Adjusted when a fallback strips
+   * thinking blocks and drops emptied pre-turn messages, so the turn boundary never drifts.
+   */
+  #turnStartIndex = 0
+  /** Messages the most recently finished turn added, as they stand in history at turn end. */
+  #lastTurnMessages: ChatMessage[] = []
 
   constructor(options: CodesplashLoopOptions) {
     this.#cwd = options.cwd
@@ -145,6 +192,15 @@ export class CodesplashLoop {
     this.#emit = options.emit
     this.#maxToolRounds = options.maxToolRounds ?? MAX_TOOL_ROUNDS
     this.#collectDiff = options.collectDiff ?? collectGitDiff
+    this.#fallbackModel = options.fallbackModel
+    this.#resolveModel = options.resolveModel
+    if (options.initialUsage) {
+      this.#usageTotals.inputTokens = options.initialUsage.inputTokens ?? 0
+      this.#usageTotals.cachedInputTokens = options.initialUsage.cachedInputTokens ?? 0
+      this.#usageTotals.outputTokens = options.initialUsage.outputTokens ?? 0
+      this.#usageTotals.costUsd = options.initialUsage.estimatedCostUsd ?? 0
+      this.#hasUnpricedUsage = options.initialUsage.hasUnpricedUsage ?? false
+    }
   }
 
   get history(): readonly ChatMessage[] {
@@ -155,13 +211,52 @@ export class CodesplashLoop {
     return this.#abort !== undefined
   }
 
+  /** Replaces the loop's history (e.g. from a persisted transcript); only legal between turns. */
+  seedHistory(messages: ChatMessage[]): void {
+    if (this.#abort) throw new Error("Cannot seed history while a turn is active")
+    this.#history.length = 0
+    this.#history.push(...messages)
+  }
+
+  /** The current history in the same array shape sent to providers, thinking blocks included. */
+  historySnapshot(): ChatMessage[] {
+    return [...this.#history]
+  }
+
+  /**
+   * The messages the most recently finished turn added, as they stand in history at turn end.
+   * Robust against a fallback's thinking-strip dropping emptied pre-turn messages, which would
+   * make a length-based slice skip the turn's own messages.
+   */
+  get lastTurnMessages(): ChatMessage[] {
+    return [...this.#lastTurnMessages]
+  }
+
+  /**
+   * True once any provider request reported usage for a model without pricing: the cumulative
+   * estimatedCostUsd is still emitted, but the /usage surface labels it "partial".
+   */
+  get hasUnpricedUsage(): boolean {
+    return this.#hasUnpricedUsage
+  }
+
   /** Runs one full turn; provider and tool failures become events, never rejections. */
   async runTurn(request: TurnRequest): Promise<void> {
     if (this.#abort) throw new Error("A turn is already running")
     const abort = new AbortController()
     this.#abort = abort
     this.#turnId = crypto.randomUUID()
+    this.#turnStartIndex = this.#history.length
+    this.#lastTurnMessages = []
     const turnMutatedPaths = new Set<string>()
+    // Doom-loop tracking is per turn; a fresh turn starts with a clean slate.
+    this.#doomSignature = undefined
+    this.#doomCount = 0
+    // The active model may switch to the configured fallback for the remainder of THIS turn
+    // only; the next runTurn receives the session's selected model again and reverts naturally.
+    let provider = request.provider
+    let model = request.model
+    let fallbackUsed = false
 
     try {
       this.#event(
@@ -175,8 +270,25 @@ export class CodesplashLoop {
 
       let executedRounds = 0
       while (true) {
-        const response = await this.#streamResponse(request, abort.signal)
+        const response = await this.#streamResponse(provider, model, request, abort.signal)
         if (response.kind === "error") {
+          const fallback = fallbackUsed ? undefined : this.#fallbackTarget(response, model)
+          if (fallback) {
+            fallbackUsed = true
+            this.#event(
+              "loop/fallback",
+              {},
+              {
+                kind: "warning",
+                payload: { message: `Provider error on ${model.id}; falling back to ${fallback.model.id}` },
+              },
+            )
+            // Thinking signatures are model-bound; the fallback model would reject them.
+            this.#stripThinkingFromHistory()
+            provider = fallback.provider
+            model = fallback.model
+            continue
+          }
           const message = response.error instanceof Error ? response.error.message : String(response.error)
           this.#event(
             "provider/error",
@@ -264,12 +376,18 @@ export class CodesplashLoop {
           this.#completeTurn("interrupted")
           return
         }
+        if (round.doomEnded) {
+          this.#event("loop/doomLoop", {}, { kind: "warning", payload: { message: DOOM_LOOP_WARNING } })
+          this.#completeTurn("completed")
+          return
+        }
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       this.#event("loop/error", {}, { kind: "error", payload: { message, recoverable: false } })
       this.#completeTurn("failed")
     } finally {
+      this.#lastTurnMessages = this.#history.slice(this.#turnStartIndex)
       this.#abort = undefined
       this.#turnId = undefined
     }
@@ -312,7 +430,12 @@ export class CodesplashLoop {
 
   /* --------------------------------- provider stream --------------------------------- */
 
-  async #streamResponse(request: TurnRequest, signal: AbortSignal): Promise<StreamResult> {
+  async #streamResponse(
+    provider: ProviderClient,
+    model: ModelInfo,
+    request: TurnRequest,
+    signal: AbortSignal,
+  ): Promise<StreamResult> {
     const messageId = crypto.randomUUID()
     const reasoningId = crypto.randomUUID()
     let text = ""
@@ -320,9 +443,12 @@ export class CodesplashLoop {
     const thinking: Array<ThinkingBlock | RedactedThinkingBlock> = []
     const toolCalls: ToolCallBlock[] = []
     let stopReason: StopReason | undefined
+    let sawEvent = false
+    /** Latest usage snapshot for THIS request; committed into the session totals on exit. */
+    let requestUsage: ProviderUsage = {}
 
     const providerRequest: ProviderRequest = {
-      model: request.model,
+      model,
       system: request.system,
       messages: [...this.#history],
       tools: this.#registry.specs(),
@@ -330,7 +456,8 @@ export class CodesplashLoop {
     }
 
     try {
-      for await (const event of request.provider.stream(providerRequest, signal)) {
+      for await (const event of provider.stream(providerRequest, signal)) {
+        sawEvent = true
         if (event.type === "text_delta") {
           text += event.text
           this.#event(
@@ -356,7 +483,8 @@ export class CodesplashLoop {
         } else if (event.type === "tool_call") {
           toolCalls.push({ type: "tool_call", id: event.id, name: event.name, input: event.input })
         } else if (event.type === "usage") {
-          this.#emitUsage(event.usage, request.model)
+          requestUsage = event.usage
+          this.#emitUsage(event.usage, model)
         } else {
           stopReason = event.stopReason
           break
@@ -364,7 +492,10 @@ export class CodesplashLoop {
       }
     } catch (error) {
       this.#finishStreamItems(reasoningId, reasoning, messageId, text)
-      return { kind: "error", error }
+      return { kind: "error", error, sawEvent }
+    } finally {
+      // Adapters emit request-scoped snapshots; the last one folds into the session totals.
+      this.#commitRequestUsage(requestUsage, model)
     }
 
     this.#finishStreamItems(reasoningId, reasoning, messageId, text)
@@ -392,24 +523,125 @@ export class CodesplashLoop {
     }
   }
 
+  /**
+   * Emits session-cumulative token counts and estimated cost (committed totals plus the current
+   * request's snapshot). contextTokens keeps its per-request semantics: the context size of THIS
+   * request, not a session sum.
+   */
   #emitUsage(usage: ProviderUsage, model: ModelInfo): void {
     const counted = [usage.inputTokens, usage.cachedInputTokens, usage.outputTokens].filter(
       (value): value is number => typeof value === "number",
     )
+    // Computed before the payload literal: pricing this request may flip #hasUnpricedUsage.
+    const estimatedCostUsd = this.#usageTotals.costUsd + this.#requestCostUsd(usage, model)
     this.#event(
       "provider/usage",
       {},
       {
         kind: "usage.updated",
         payload: {
-          inputTokens: usage.inputTokens,
-          cachedInputTokens: usage.cachedInputTokens,
-          outputTokens: usage.outputTokens,
+          inputTokens: this.#usageTotals.inputTokens + (usage.inputTokens ?? 0),
+          cachedInputTokens: this.#usageTotals.cachedInputTokens + (usage.cachedInputTokens ?? 0),
+          outputTokens: this.#usageTotals.outputTokens + (usage.outputTokens ?? 0),
           contextTokens: counted.length > 0 ? counted.reduce((total, value) => total + value, 0) : undefined,
           modelContextWindow: model.contextWindow,
+          estimatedCostUsd,
+          // Always emitted, false included: a genuinely zero-cost priced session (e.g. a local
+          // model priced at 0.0) must be distinguishable from one with unpriced usage.
+          hasUnpricedUsage: this.#hasUnpricedUsage,
         },
       },
     )
+  }
+
+  /** Folds a finished request's usage snapshot into the session-cumulative totals. */
+  #commitRequestUsage(usage: ProviderUsage, model: ModelInfo): void {
+    this.#usageTotals.inputTokens += usage.inputTokens ?? 0
+    this.#usageTotals.cachedInputTokens += usage.cachedInputTokens ?? 0
+    this.#usageTotals.outputTokens += usage.outputTokens ?? 0
+    this.#usageTotals.costUsd += this.#requestCostUsd(usage, model)
+  }
+
+  /**
+   * Catalog-estimate cost of one request's usage in USD. Both adapters report NON-cached input
+   * in inputTokens (Anthropic's input_tokens excludes cache reads; the openai adapter subtracts
+   * prompt_tokens_details.cached_tokens), so cached tokens are priced additively at the cached
+   * rate rather than re-subtracted from input. Models without pricing contribute 0 and flag the
+   * session's cost as partial.
+   */
+  #requestCostUsd(usage: ProviderUsage, model: ModelInfo): number {
+    const input = usage.inputTokens ?? 0
+    const cached = usage.cachedInputTokens ?? 0
+    const output = usage.outputTokens ?? 0
+    const pricing = model.pricing
+    if (!pricing) {
+      if (input + cached + output > 0) this.#hasUnpricedUsage = true
+      return 0
+    }
+    const cachedRate = pricing.cachedInputPerMTok ?? pricing.inputPerMTok / 10
+    return (input * pricing.inputPerMTok + cached * cachedRate + output * pricing.outputPerMTok) / 1_000_000
+  }
+
+  /**
+   * Fallback target for a failed stream attempt, or undefined to surface the error unchanged.
+   * Applies only to a request that failed with zero events (ProviderHttpError after retry
+   * exhaustion or a network TypeError); an unknown or unavailable fallback model warns once per
+   * session and is ignored from then on.
+   */
+  #fallbackTarget(
+    response: { error: unknown; sawEvent: boolean },
+    currentModel: ModelInfo,
+  ): ResolvedModel | undefined {
+    if (response.sawEvent) return undefined
+    if (!(response.error instanceof ProviderHttpError) && !(response.error instanceof TypeError)) {
+      return undefined
+    }
+    const fallbackId = this.#fallbackModel
+    if (fallbackId === undefined || fallbackId === "") return undefined
+    const resolved = this.#resolveModel?.(fallbackId)
+    if (!resolved) {
+      if (!this.#fallbackWarned) {
+        this.#fallbackWarned = true
+        this.#event(
+          "loop/fallbackConfig",
+          {},
+          {
+            kind: "warning",
+            payload: {
+              message: `The configured fallback model "${fallbackId}" is unknown or unavailable; ignoring it.`,
+            },
+          },
+        )
+      }
+      return undefined
+    }
+    if (resolved.model.id === currentModel.id) return undefined
+    return resolved
+  }
+
+  /**
+   * Removes every thinking/redacted_thinking block from history before a fallback request:
+   * thinking signatures are bound to the model that produced them. An assistant message left
+   * empty by the strip is dropped entirely (providers reject empty content); dropping a message
+   * before the turn boundary shifts #turnStartIndex down so the boundary stays on the turn's
+   * first message.
+   */
+  #stripThinkingFromHistory(): void {
+    const stripped: ChatMessage[] = []
+    let droppedBeforeTurn = 0
+    for (const [index, message] of this.#history.entries()) {
+      const content = message.content.filter(
+        (block) => block.type !== "thinking" && block.type !== "redacted_thinking",
+      )
+      if (content.length === 0) {
+        if (index < this.#turnStartIndex) droppedBeforeTurn += 1
+        continue
+      }
+      stripped.push({ role: message.role, content })
+    }
+    this.#history.length = 0
+    this.#history.push(...stripped)
+    this.#turnStartIndex -= droppedBeforeTurn
   }
 
   /* ----------------------------------- tool rounds ----------------------------------- */
@@ -422,9 +654,11 @@ export class CodesplashLoop {
   async #runToolRound(
     calls: ToolCallBlock[],
     signal: AbortSignal,
-  ): Promise<{ results: ToolResultBlock[]; mutatedPaths: string[] }> {
+  ): Promise<{ results: ToolResultBlock[]; mutatedPaths: string[]; doomEnded: boolean }> {
     const results: Array<ToolResultBlock | undefined> = new Array(calls.length)
     const mutated = new Set<string>()
+    const decisions = this.#doomLoopDecisions(calls)
+    let doomEnded = false
 
     const run = async (index: number): Promise<void> => {
       const call = calls[index]
@@ -445,6 +679,33 @@ export class CodesplashLoop {
     for (let index = 0; index < calls.length; index += 1) {
       const call = calls[index]
       if (!call) continue
+      const decision = decisions[index] ?? "run"
+      if (decision === "end") {
+        // Calls the model ordered before the loop trigger still run; the trigger call and
+        // everything after it get skip results so history stays well-formed, then the turn ends.
+        await flushReadOnlyBatch()
+        for (let rest = index; rest < calls.length; rest += 1) {
+          const restCall = calls[rest]
+          if (!restCall) continue
+          results[rest] = {
+            type: "tool_result",
+            toolCallId: restCall.id,
+            text: DOOM_LOOP_SKIPPED_TEXT,
+            isError: true,
+          }
+        }
+        doomEnded = true
+        break
+      }
+      if (decision === "synthetic") {
+        results[index] = this.#failCall(
+          call.id,
+          call,
+          callLabel(call.name, call.input),
+          DOOM_LOOP_SYNTHETIC_TEXT,
+        )
+        continue
+      }
       const tool = this.#registry.get(call.name)
       if (!tool) {
         const message = `Unknown tool: ${call.name}`
@@ -470,7 +731,41 @@ export class CodesplashLoop {
           isError: true,
         },
     )
-    return { results: finalResults, mutatedPaths: [...mutated] }
+    return { results: finalResults, mutatedPaths: [...mutated], doomEnded }
+  }
+
+  /**
+   * Doom-loop bookkeeping in the model's call order, carried across rounds within a turn.
+   * Identical means same tool name plus canonical (sorted-key) JSON of the input; declined and
+   * failed calls count toward the run, since loops usually manifest as repeated failures. The
+   * 3rd consecutive identical call is answered synthetically instead of executed, and the 5th
+   * force-ends the turn; any different call resets the counter.
+   */
+  #doomLoopDecisions(calls: ToolCallBlock[]): Array<"run" | "synthetic" | "end"> {
+    const decisions: Array<"run" | "synthetic" | "end"> = []
+    let ended = false
+    for (const call of calls) {
+      if (ended) {
+        decisions.push("end")
+        continue
+      }
+      const signature = `${call.name}\u0000${canonicalJson(call.input)}`
+      if (signature === this.#doomSignature) {
+        this.#doomCount += 1
+      } else {
+        this.#doomSignature = signature
+        this.#doomCount = 1
+      }
+      if (this.#doomCount >= DOOM_LOOP_FORCED_END_AT) {
+        decisions.push("end")
+        ended = true
+      } else if (this.#doomCount >= DOOM_LOOP_SYNTHETIC_AT) {
+        decisions.push("synthetic")
+      } else {
+        decisions.push("run")
+      }
+    }
+    return decisions
   }
 
   /** Only read-only calls that need no approval may overlap; everything else runs in order. */
@@ -679,6 +974,19 @@ function parseAskUserInput(input: unknown): { question: string; options: string[
     return option
   })
   return { question, options: labels }
+}
+
+/**
+ * Deterministic JSON with object keys sorted at every depth, used to compare tool inputs for
+ * doom-loop detection. Tool inputs come from JSON parses, so cycles cannot occur; non-JSON
+ * values (undefined) canonicalize to a stable placeholder.
+ */
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "undefined"
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`
+  const record = value as Record<string, unknown>
+  const keys = Object.keys(record).sort()
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`
 }
 
 /** One-line provisional transcript label used until the tool reports its own. */

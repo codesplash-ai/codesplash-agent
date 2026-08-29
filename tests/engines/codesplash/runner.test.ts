@@ -263,9 +263,42 @@ describe("runHeadless json output", () => {
 
     expect(exitCode).toBe(0)
     expect(stdout.text).toBe(
-      '{"result":"The answer is 42.","turns":1,"usage":{"inputTokens":12,"outputTokens":5,"totalTokens":17},"status":"completed"}\n',
+      '{"result":"The answer is 42.","turns":1,"usage":{"inputTokens":12,"outputTokens":5,"totalTokens":17},"status":"completed","sessionId":"run-1"}\n',
     )
     expect(stderr.text).toBe("")
+  })
+
+  test("carries the estimated cost inside usage when the engine reported one", async () => {
+    const ev = eventFactory()
+    const driver = new ScriptedDriver(async (session) => {
+      session.emit(ev({ kind: "turn.started", payload: {} }))
+      session.emit(
+        ev({
+          kind: "usage.updated",
+          payload: { inputTokens: 10, outputTokens: 2, estimatedCostUsd: 0.0125 },
+        }),
+      )
+      session.emit(
+        ev({
+          kind: "usage.updated",
+          payload: { inputTokens: 30, outputTokens: 7, estimatedCostUsd: 0.0375 },
+        }),
+      )
+      session.emit(ev({ kind: "message.completed", payload: { id: "m1", text: "priced" } }))
+      session.emit(ev({ kind: "turn.completed", payload: { status: "completed" } }))
+    })
+
+    const { options, stdout } = runOptions(driver, { outputFormat: "json" })
+    const exitCode = await runHeadless(options)
+
+    expect(exitCode).toBe(0)
+    const parsed = JSON.parse(stdout.text) as {
+      sessionId: string
+      usage: { inputTokens: number; outputTokens: number; estimatedCostUsd: number }
+    }
+    expect(parsed.sessionId).toBe(LOCAL_SESSION_ID)
+    // The last cumulative usage event wins, mirroring the TUI reducer.
+    expect(parsed.usage).toEqual({ inputTokens: 30, outputTokens: 7, estimatedCostUsd: 0.0375 })
   })
 })
 
@@ -288,7 +321,8 @@ describe("runHeadless stream-json output", () => {
     expect(exitCode).toBe(0)
     const expectedEventLines = scripted.map((event) => serializeEvent(event)).join("\n")
     expect(stdout.text).toBe(
-      `${expectedEventLines}\n{"type":"result","result":"Hi","status":"completed","usage":{}}\n`,
+      `${expectedEventLines}\n` +
+        '{"type":"result","result":"Hi","status":"completed","usage":{},"sessionId":"run-1"}\n',
     )
     expect(stdout.text.split("\n")[0]).toBe(
       '{"schemaVersion":1,"timestamp":"2026-01-01T00:00:00.000Z","engine":"codesplash",' +
@@ -412,7 +446,7 @@ describe("runHeadless exit codes", () => {
     const exitCode = await runHeadless(options)
 
     expect(exitCode).toBe(1)
-    expect(stdout.text).toBe('{"result":"","turns":1,"usage":{},"status":"failed"}\n')
+    expect(stdout.text).toBe('{"result":"","turns":1,"usage":{},"status":"failed","sessionId":"run-1"}\n')
     expect(stderr.text).toBe("error: provider exploded\n")
   })
 
@@ -428,7 +462,7 @@ describe("runHeadless exit codes", () => {
     const exitCode = await runHeadless(options)
 
     expect(exitCode).toBe(1)
-    expect(stdout.text).toBe('{"result":"","turns":0,"usage":{},"status":"failed"}\n')
+    expect(stdout.text).toBe('{"result":"","turns":0,"usage":{},"status":"failed","sessionId":"run-1"}\n')
     expect(stderr.text).toBe("error: engine crashed\n")
     expect(driver.session?.closed).toBe(true)
   })
@@ -545,6 +579,50 @@ describe("runHeadless wiring", () => {
     expect(driver.openOptions?.cwd).toBe("/tmp/headless-cwd")
     expect(driver.openOptions?.localSessionId).toBe(LOCAL_SESSION_ID)
     expect(driver.session?.inputs).toEqual([{ text: "say hi" }])
+  })
+
+  test("passes nativeTranscriptPath and firstSequence through to openSession", async () => {
+    const ev = eventFactory()
+    const driver = new ScriptedDriver(async (session) => {
+      session.emit(ev({ kind: "turn.started", payload: {} }))
+      session.emit(ev({ kind: "turn.completed", payload: { status: "completed" } }))
+    })
+
+    const { options } = runOptions(driver, {
+      nativeTranscriptPath: "/tmp/sessions/abc/transcript.jsonl",
+      firstSequence: 42,
+    })
+    const exitCode = await runHeadless(options)
+
+    expect(exitCode).toBe(0)
+    expect(driver.openOptions?.nativeTranscriptPath).toBe("/tmp/sessions/abc/transcript.jsonl")
+    expect(driver.openOptions?.firstSequence).toBe(42)
+  })
+
+  test("the stream-json result line carries sessionId and the observed estimated cost", async () => {
+    const ev = eventFactory()
+    const driver = new ScriptedDriver(async (session) => {
+      session.emit(ev({ kind: "turn.started", payload: {} }))
+      session.emit(
+        ev({ kind: "usage.updated", payload: { inputTokens: 8, outputTokens: 3, estimatedCostUsd: 0.02 } }),
+      )
+      session.emit(ev({ kind: "message.completed", payload: { id: "m1", text: "ok" } }))
+      session.emit(ev({ kind: "turn.completed", payload: { status: "completed" } }))
+    })
+
+    const { options, stdout } = runOptions(driver, { outputFormat: "stream-json" })
+    const exitCode = await runHeadless(options)
+
+    expect(exitCode).toBe(0)
+    const lines = stdout.text.split("\n").filter((line) => line.length > 0)
+    const result = JSON.parse(lines[lines.length - 1] ?? "") as {
+      type: string
+      sessionId: string
+      usage: { inputTokens: number; outputTokens: number; estimatedCostUsd: number }
+    }
+    expect(result.type).toBe("result")
+    expect(result.sessionId).toBe(LOCAL_SESSION_ID)
+    expect(result.usage).toEqual({ inputTokens: 8, outputTokens: 3, estimatedCostUsd: 0.02 })
   })
 
   test("records every consumed event, the native session id, and flushes the recorder", async () => {

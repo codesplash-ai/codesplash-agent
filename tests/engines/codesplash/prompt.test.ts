@@ -38,6 +38,7 @@ const model: ModelInfo = {
   id: "claude-fable-5",
   displayName: "Claude Fable 5",
   provider: "anthropic",
+  protocol: "anthropic",
   contextWindow: 200000,
   maxOutputTokens: 32000,
   isDefault: true,
