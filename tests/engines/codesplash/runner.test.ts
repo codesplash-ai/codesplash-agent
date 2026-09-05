@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import {
   type AgentEvent,
   type AgentEventInput,
@@ -10,9 +13,11 @@ import {
   type EngineProbe,
   type EngineSession,
   type OpenSessionOptions,
+  readTrustDecision,
   type SessionPolicy,
   serializeEvent,
   type UserInput,
+  writeTrustDecision,
 } from "../../../src/core/index.ts"
 import {
   type HeadlessRunOptions,
@@ -160,6 +165,10 @@ function runOptions(
       outputFormat: "text",
       driver,
       localSessionId: LOCAL_SESSION_ID,
+      // A throwaway trust store, pre-trusted via --trust so the untrusted stderr line stays out
+      // of tests that assert exact stderr; trust-specific tests override both fields.
+      trustDataDir: trustDir,
+      trustWorkspace: true,
       stdout,
       stderr,
       ...overrides,
@@ -179,20 +188,23 @@ async function until(condition: () => boolean, label: string, timeoutMs = 2_000)
 /* -------------------------------------- env hygiene -------------------------------------- */
 
 const savedEnv: Record<string, string | undefined> = {}
+let trustDir: string
 
-beforeEach(() => {
+beforeEach(async () => {
   savedEnv.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY
   savedEnv.OPENAI_API_KEY = process.env.OPENAI_API_KEY
   delete process.env.ANTHROPIC_API_KEY
   delete process.env.OPENAI_API_KEY
+  trustDir = await mkdtemp(join(tmpdir(), "codesplash-runner-trust-"))
 })
 
-afterEach(() => {
+afterEach(async () => {
   for (const name of ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"] as const) {
     const value = savedEnv[name]
     if (value === undefined) delete process.env[name]
     else process.env[name] = value
   }
+  await rm(trustDir, { recursive: true, force: true })
 })
 
 /* ------------------------------------------ tests ------------------------------------------ */
@@ -484,6 +496,8 @@ describe("runHeadless exit codes", () => {
       autoApprove: false,
       outputFormat: "text",
       driver,
+      trustDataDir: trustDir,
+      trustWorkspace: true,
       stdout,
       stderr,
     })
@@ -575,7 +589,8 @@ describe("runHeadless wiring", () => {
 
     expect(exitCode).toBe(0)
     expect(driver.openOptions?.model).toBe("claude-sonnet-5:high")
-    expect(driver.openOptions?.policy).toBe(policy)
+    // The runner settles the effective permission mode onto the policy it passes through.
+    expect(driver.openOptions?.policy).toEqual({ ...policy, permissionMode: "default" })
     expect(driver.openOptions?.cwd).toBe("/tmp/headless-cwd")
     expect(driver.openOptions?.localSessionId).toBe(LOCAL_SESSION_ID)
     expect(driver.session?.inputs).toEqual([{ text: "say hi" }])
@@ -661,6 +676,199 @@ describe("runHeadless wiring", () => {
     ])
     expect(nativeIds).toEqual([LOCAL_SESSION_ID])
     expect(flushes).toBe(1)
+  })
+})
+
+describe("runHeadless workspace trust", () => {
+  function trivialDriver(): ScriptedDriver {
+    const ev = eventFactory()
+    return new ScriptedDriver(async (session) => {
+      session.emit(ev({ kind: "turn.started", payload: {} }))
+      session.emit(ev({ kind: "turn.completed", payload: { status: "completed" } }))
+    })
+  }
+
+  test("an undecided workspace runs untrusted with exactly one stderr line", async () => {
+    const driver = trivialDriver()
+    const { options, stderr } = runOptions(driver, { trustWorkspace: false })
+    const exitCode = await runHeadless(options)
+
+    expect(exitCode).toBe(0)
+    expect(driver.openOptions?.workspaceTrusted).toBe(false)
+    const notices = stderr.text.split("\n").filter((line) => line.startsWith("Workspace not trusted:"))
+    expect(notices).toEqual([
+      "Workspace not trusted: project rule files and .codesplash/permissions.toml are ignored (pass --trust to trust this folder).",
+    ])
+  })
+
+  test("--trust persists trusted=true, opens trusted, and prints no notice", async () => {
+    const driver = trivialDriver()
+    const { options, stderr } = runOptions(driver, { trustWorkspace: true })
+    const exitCode = await runHeadless(options)
+
+    expect(exitCode).toBe(0)
+    expect(driver.openOptions?.workspaceTrusted).toBe(true)
+    expect(stderr.text).not.toContain("Workspace not trusted")
+    const decision = await readTrustDecision("/tmp/headless-cwd", trustDir)
+    expect(decision?.trusted).toBe(true)
+    expect(typeof decision?.decidedAt).toBe("string")
+  })
+
+  test("a previously persisted trust decision opens trusted without --trust", async () => {
+    await writeTrustDecision("/tmp/headless-cwd", true, trustDir)
+    const driver = trivialDriver()
+    const { options, stderr } = runOptions(driver, { trustWorkspace: false })
+    const exitCode = await runHeadless(options)
+
+    expect(exitCode).toBe(0)
+    expect(driver.openOptions?.workspaceTrusted).toBe(true)
+    expect(stderr.text).not.toContain("Workspace not trusted")
+  })
+})
+
+describe("runHeadless permission wiring", () => {
+  function trivialDriver(): ScriptedDriver {
+    const ev = eventFactory()
+    return new ScriptedDriver(async (session) => {
+      session.emit(ev({ kind: "turn.started", payload: {} }))
+      session.emit(ev({ kind: "turn.completed", payload: { status: "completed" } }))
+    })
+  }
+
+  test("passes mode, rule overrides, and grants path into openSession and records the mode", async () => {
+    const driver = trivialDriver()
+    const recorded: string[] = []
+    const overrides = { allow: ["bash(git status *)"], deny: ["web_fetch"] }
+    const { options } = runOptions(driver, {
+      policy: { ...policy, permissionMode: "accept-edits" },
+      permissionOverrides: overrides,
+      permissionGrantsPath: "/tmp/grants/abc.toml",
+      recordPermissionMode: (mode) => {
+        recorded.push(mode)
+      },
+    })
+    const exitCode = await runHeadless(options)
+
+    expect(exitCode).toBe(0)
+    expect(driver.openOptions?.policy?.permissionMode).toBe("accept-edits")
+    expect(driver.openOptions?.permissionOverrides).toBe(overrides)
+    expect(driver.openOptions?.permissionGrantsPath).toBe("/tmp/grants/abc.toml")
+    expect(recorded).toEqual(["accept-edits"])
+  })
+
+  test("a resumed session's recorded mode is reused unless explicitly overridden", async () => {
+    const reused = trivialDriver()
+    const { options: reuseOptions } = runOptions(reused, { recordedPermissionMode: "plan" })
+    expect(await runHeadless(reuseOptions)).toBe(0)
+    expect(reused.openOptions?.policy?.permissionMode).toBe("plan")
+
+    const overridden = trivialDriver()
+    const { options: overrideOptions } = runOptions(overridden, {
+      recordedPermissionMode: "plan",
+      permissionModeOverride: "accept-edits",
+    })
+    expect(await runHeadless(overrideOptions)).toBe(0)
+    expect(overridden.openOptions?.policy?.permissionMode).toBe("accept-edits")
+
+    // An unrecognized recorded value (meta is loosely validated) falls back to the policy mode.
+    const junk = trivialDriver()
+    const { options: junkOptions } = runOptions(junk, { recordedPermissionMode: "warp-speed" })
+    expect(await runHeadless(junkOptions)).toBe(0)
+    expect(junk.openOptions?.policy?.permissionMode).toBe("default")
+  })
+
+  test("a recorded bypass mode degrades to default with a stderr notice", async () => {
+    const driver = trivialDriver()
+    const { options, stderr } = runOptions(driver, { recordedPermissionMode: "bypass" })
+    const exitCode = await runHeadless(options)
+
+    expect(exitCode).toBe(0)
+    expect(driver.openOptions?.policy?.permissionMode).toBe("default")
+    expect(stderr.text).toContain("bypass mode, which needs the --bypass-approvals launch flag")
+    expect(stderr.text).toContain("using default")
+  })
+})
+
+describe("runHeadless dangerous-floor and plan approvals", () => {
+  function askScript(payload: {
+    title: string
+    choices: string[]
+    alwaysAsk?: boolean
+    reason?: string
+  }): Script {
+    return async (session) => {
+      const ev = eventFactory()
+      session.emit(ev({ kind: "turn.started", payload: {} }))
+      const choice = await session.ask(
+        ev({
+          kind: "request.opened",
+          payload: {
+            id: "req-1",
+            requestKind: "approval",
+            detail: "",
+            ...payload,
+          },
+        }) as AgentEvent & { kind: "request.opened" },
+      )
+      session.emit(ev({ kind: "request.resolved", payload: { id: "req-1", decision: choice } }))
+      session.emit(ev({ kind: "turn.completed", payload: { status: "completed" } }))
+    }
+  }
+
+  test("an alwaysAsk approval is declined even under --auto, with a note naming it", async () => {
+    const driver = new ScriptedDriver(
+      askScript({ title: "Run bash?", choices: ["accept", "decline", "cancel"], alwaysAsk: true }),
+    )
+    const { options, stderr } = runOptions(driver, { autoApprove: true })
+    const exitCode = await runHeadless(options)
+
+    expect(exitCode).toBe(0)
+    expect(driver.session?.decisions).toEqual([{ requestId: "req-1", decision: { choice: "decline" } }])
+    expect(stderr.text).toContain(
+      "declined: Run bash? (always requires interactive approval; --auto never accepts it)",
+    )
+  })
+
+  test("the decline note names the command class when the request carries a reason", async () => {
+    const driver = new ScriptedDriver(
+      askScript({
+        title: "Run command?",
+        choices: ["accept", "decline", "cancel"],
+        alwaysAsk: true,
+        reason: "`sudo` runs a command with elevated privileges",
+      }),
+    )
+    const { options, stderr } = runOptions(driver, { autoApprove: true })
+    const exitCode = await runHeadless(options)
+
+    expect(exitCode).toBe(0)
+    expect(driver.session?.decisions).toEqual([{ requestId: "req-1", decision: { choice: "decline" } }])
+    expect(stderr.text).toContain(
+      "declined: Run command? — `sudo` runs a command with elevated privileges (always requires interactive approval; --auto never accepts it)",
+    )
+  })
+
+  test("a plan review approves under --auto", async () => {
+    const driver = new ScriptedDriver(
+      askScript({ title: "Approve this plan?", choices: ["approve", "keepPlanning", "cancel"] }),
+    )
+    const { options } = runOptions(driver, { autoApprove: true })
+    const exitCode = await runHeadless(options)
+
+    expect(exitCode).toBe(0)
+    expect(driver.session?.decisions).toEqual([{ requestId: "req-1", decision: { choice: "approve" } }])
+  })
+
+  test("a plan review is cancelled without --auto (decline-by-default posture)", async () => {
+    const driver = new ScriptedDriver(
+      askScript({ title: "Approve this plan?", choices: ["approve", "keepPlanning", "cancel"] }),
+    )
+    const { options, stderr } = runOptions(driver, { autoApprove: false })
+    const exitCode = await runHeadless(options)
+
+    expect(exitCode).toBe(0)
+    expect(driver.session?.decisions).toEqual([{ requestId: "req-1", decision: { choice: "cancel" } }])
+    expect(stderr.text).toContain("cancelled: Approve this plan?")
   })
 })
 

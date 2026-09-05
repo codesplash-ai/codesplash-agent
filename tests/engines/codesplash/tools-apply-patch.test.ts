@@ -662,3 +662,35 @@ describe("apply_patch permission policy", () => {
     })
   })
 })
+
+describe("apply_patch permissionTargets", () => {
+  test("collects every touched path from the patch parse, a move contributing both ends", async () => {
+    const cwd = await temporaryDirectory()
+    const input = patch(
+      "*** Add File: added.txt",
+      "+hi",
+      "*** Update File: src/x.ts",
+      "*** Move to: src/y.ts",
+      "@@",
+      "-a",
+      "+b",
+      "*** Delete File: gone.txt",
+    )
+    expect(applyPatchTool.permissionTargets?.(input, makeContext(cwd))).toEqual({
+      paths: [
+        resolve(cwd, "added.txt"),
+        resolve(cwd, "src/x.ts"),
+        resolve(cwd, "src/y.ts"),
+        resolve(cwd, "gone.txt"),
+      ],
+    })
+  })
+
+  test("a malformed patch throws ToolInputError (the loop then falls to the default path)", async () => {
+    const cwd = await temporaryDirectory()
+    expect(() => applyPatchTool.permissionTargets?.({}, makeContext(cwd))).toThrow(ToolInputError)
+    expect(() => applyPatchTool.permissionTargets?.({ input: "not a patch" }, makeContext(cwd))).toThrow(
+      ToolInputError,
+    )
+  })
+})

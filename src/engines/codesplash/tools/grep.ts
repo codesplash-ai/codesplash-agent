@@ -162,12 +162,19 @@ export const grepTool: HarnessTool = {
 
     let matchCount = 0
     let capped = false
+    let skippedByPermissions = 0
     const groups: string[][] = []
     for (const relativePath of candidates) {
       if (context.signal.aborted) {
         return { text: "Search aborted before completion.", isError: true, label }
       }
       const absolutePath = join(context.cwd, relativePath)
+      // Sensitive-read denials (e.g. **/.env) apply to grep content access too: skip the file
+      // before reading it and account for it in the summary line, never echoing its content.
+      if (context.permissions?.isReadDenied(absolutePath, "grep") !== undefined) {
+        skippedByPermissions += 1
+        continue
+      }
       let buffer: Buffer
       try {
         const info = await stat(absolutePath)
@@ -198,8 +205,11 @@ export const grepTool: HarnessTool = {
       if (capped) break
     }
 
+    const skippedNote =
+      skippedByPermissions > 0 ? `(${skippedByPermissions} file(s) skipped by permission rules)` : undefined
     if (matchCount === 0) {
-      return { text: "No matches found.", label }
+      const text = skippedNote === undefined ? "No matches found." : `No matches found.\n${skippedNote}`
+      return { text, label }
     }
     const outputLines: string[] = []
     for (const [index, group] of groups.entries()) {
@@ -209,6 +219,7 @@ export const grepTool: HarnessTool = {
     if (capped) {
       outputLines.push(`[... stopped at the ${MAX_MATCHES}-match cap; further matches may be omitted ...]`)
     }
+    if (skippedNote !== undefined) outputLines.push(skippedNote)
     return { text: truncateToolOutput(outputLines.join("\n")), label }
   },
 }

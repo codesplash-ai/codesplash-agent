@@ -21,6 +21,11 @@ const ROOT_FLAGS = [
   "--no-history",
   "--sandbox",
   "--full-access",
+  "--permission-mode",
+  "--allow",
+  "--ask",
+  "--deny",
+  "--bypass-approvals",
   "--config",
   "--fixture",
   "--codex-smoke",
@@ -39,6 +44,11 @@ const RUN_FLAGS = [
   "--resume",
   "--continue",
   "--effort",
+  "--permission-mode",
+  "--allow",
+  "--ask",
+  "--deny",
+  "--trust",
   "--config",
 ] as const
 
@@ -49,6 +59,11 @@ const REVIEW_FLAGS = [
   "--model",
   "--output-format",
   "--auto",
+  "--permission-mode",
+  "--allow",
+  "--ask",
+  "--deny",
+  "--trust",
   "--config",
 ] as const
 
@@ -56,6 +71,7 @@ const STATS_FLAGS = ["--days", "--json"] as const
 const DEBUG_FLAGS = ["--model", "--sandbox", "--config"] as const
 
 const SANDBOX_VALUES = ["read-only", "workspace-write"] as const
+const PERMISSION_MODE_VALUES = ["plan", "default", "accept-edits"] as const
 const OUTPUT_FORMAT_VALUES = ["text", "json", "stream-json"] as const
 const EFFORT_VALUES = ["low", "medium", "high"] as const
 const PROVIDER_VALUES = ["anthropic", "openai"] as const
@@ -125,10 +141,11 @@ _codesplash_completions() {
     --sandbox) COMPREPLY=($(compgen -W "${words(SANDBOX_VALUES)}" -- "$cur")); return ;;
     --output-format) COMPREPLY=($(compgen -W "${words(OUTPUT_FORMAT_VALUES)}" -- "$cur")); return ;;
     --effort) COMPREPLY=($(compgen -W "${words(EFFORT_VALUES)}" -- "$cur")); return ;;
+    --permission-mode) COMPREPLY=($(compgen -W "${words(PERMISSION_MODE_VALUES)}" -- "$cur")); return ;;
     login|logout) COMPREPLY=($(compgen -W "${words(PROVIDER_VALUES)}" -- "$cur")); return ;;
     completions) COMPREPLY=($(compgen -W "${words(COMPLETION_SHELLS)}" -- "$cur")); return ;;
     debug) COMPREPLY=($(compgen -W "${words(DEBUG_TOPICS)}" -- "$cur")); return ;;
-    --model|--prompt|-p|--max-turns|--base|--commit|--resume|--days|--config|-c|--api-key) return ;;
+    --model|--prompt|-p|--max-turns|--base|--commit|--resume|--days|--config|-c|--api-key|--allow|--ask|--deny) return ;;
   esac
 
   if [[ $COMP_CWORD -eq 1 ]]; then
@@ -160,10 +177,11 @@ _codesplash() {
     --sandbox) compadd ${words(SANDBOX_VALUES)}; return ;;
     --output-format) compadd ${words(OUTPUT_FORMAT_VALUES)}; return ;;
     --effort) compadd ${words(EFFORT_VALUES)}; return ;;
+    --permission-mode) compadd ${words(PERMISSION_MODE_VALUES)}; return ;;
     login|logout) compadd ${words(PROVIDER_VALUES)}; return ;;
     completions) compadd ${words(COMPLETION_SHELLS)}; return ;;
     debug) compadd ${words(DEBUG_TOPICS)}; return ;;
-    --model|--prompt|-p|--max-turns|--base|--commit|--resume|--days|--config|-c|--api-key) return ;;
+    --model|--prompt|-p|--max-turns|--base|--commit|--resume|--days|--config|-c|--api-key|--allow|--ask|--deny) return ;;
   esac
 
   if (( CURRENT == 2 )); then
@@ -196,7 +214,12 @@ function fishScript(): string {
     `complete -c codesplash -n "__fish_seen_subcommand_from completions" -a "${words(COMPLETION_SHELLS)}"`,
     `complete -c codesplash -n "__fish_seen_subcommand_from debug" -a "${words(DEBUG_TOPICS)}"`,
     `complete -c codesplash -l sandbox -x -a "${words(SANDBOX_VALUES)}"`,
+    `complete -c codesplash -l permission-mode -x -a "${words(PERMISSION_MODE_VALUES)}"`,
+    `complete -c codesplash -l allow -x`,
+    `complete -c codesplash -l ask -x`,
+    `complete -c codesplash -l deny -x`,
     `complete -c codesplash -s c -l config -x`,
+    `complete -c codesplash -n "__fish_seen_subcommand_from run review" -l trust`,
     `complete -c codesplash -n "__fish_seen_subcommand_from run review" -l output-format -x -a "${words(OUTPUT_FORMAT_VALUES)}"`,
     `complete -c codesplash -n "__fish_seen_subcommand_from run review debug" -l model -x`,
     `complete -c codesplash -n "__fish_seen_subcommand_from run review" -l auto`,
@@ -216,6 +239,7 @@ function fishScript(): string {
     `complete -c codesplash -n __fish_use_subcommand -l doctor`,
     `complete -c codesplash -n __fish_use_subcommand -l no-history`,
     `complete -c codesplash -n __fish_use_subcommand -l full-access`,
+    `complete -c codesplash -n __fish_use_subcommand -l bypass-approvals`,
     `complete -c codesplash -n __fish_use_subcommand -l fixture`,
     `complete -c codesplash -n __fish_use_subcommand -l codex-smoke`,
     `complete -c codesplash -n __fish_use_subcommand -l codex-live-smoke`,
@@ -238,6 +262,7 @@ Register-ArgumentCompleter -Native -CommandName codesplash -ScriptBlock {
         '--sandbox' { @(${quotedList(SANDBOX_VALUES)}) }
         '--output-format' { @(${quotedList(OUTPUT_FORMAT_VALUES)}) }
         '--effort' { @(${quotedList(EFFORT_VALUES)}) }
+        '--permission-mode' { @(${quotedList(PERMISSION_MODE_VALUES)}) }
         'login' { @(${quotedList(PROVIDER_VALUES)}) }
         'logout' { @(${quotedList(PROVIDER_VALUES)}) }
         'completions' { @(${quotedList(COMPLETION_SHELLS)}) }

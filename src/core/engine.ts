@@ -1,10 +1,12 @@
 /** Provider-independent contracts for live engine sessions. */
-import type { ApprovalPolicy, SandboxMode } from "./config.ts"
+import type { ApprovalPolicy, PermissionMode, SandboxMode } from "./config.ts"
 import type { AgentEvent, EngineId } from "./events.ts"
 
 export type SessionPolicy = {
   sandbox: SandboxMode
   approvalPolicy: ApprovalPolicy
+  /** First-party permission layer mode; absent means "default". */
+  permissionMode?: PermissionMode
 }
 
 export const defaultSessionPolicy: SessionPolicy = {
@@ -44,6 +46,13 @@ export type SessionUsageSnapshot = {
   hasUnpricedUsage?: boolean
 }
 
+/** CLI-tier permission rule overrides, highest-precedence rule source after the built-in floors. */
+export type PermissionRuleOverrides = {
+  allow?: readonly string[]
+  ask?: readonly string[]
+  deny?: readonly string[]
+}
+
 export type OpenSessionOptions = {
   cwd: string
   localSessionId: string
@@ -62,6 +71,20 @@ export type OpenSessionOptions = {
   nativeTranscriptPath?: string
   /** Turn IDs already present in local history, for reconciling a resumed provider thread. */
   knownTurnIds?: readonly string[]
+  /**
+   * Whether the workspace's trust decision resolved to trusted; resolved by the caller from the
+   * trust store. Engines treat absent as `true` (back-compat for existing call sites; the TUI
+   * and runner always pass the real value).
+   */
+  workspaceTrusted?: boolean
+  /** CLI-tier permission rules layered above the config's [permissions] rules. */
+  permissionOverrides?: PermissionRuleOverrides
+  /**
+   * File where the engine persists and reloads remembered permission grants (same
+   * caller-placed-file pattern as nativeTranscriptPath). Absent → the "always allow" choice is
+   * never offered.
+   */
+  permissionGrantsPath?: string
 }
 
 export type UserInput = {
@@ -94,6 +117,8 @@ export interface EngineSession {
   listModels?(): Promise<EngineModel[]>
   /** Switches the model for subsequent turns; absent when the engine cannot switch. */
   setModel?(model: string): Promise<void>
+  /** Switches the permission mode; absent when the engine has no first-party permission layer. */
+  setPermissionMode?(mode: PermissionMode): Promise<void>
 }
 
 export interface EngineDriver {

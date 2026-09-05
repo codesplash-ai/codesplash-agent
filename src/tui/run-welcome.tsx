@@ -17,7 +17,7 @@ import {
   type ThemePreference,
 } from "../core/index.ts"
 import { launchClaude } from "./run-claude.ts"
-import { type HarnessEngineId, runCodexSession } from "./run-codex-session.tsx"
+import { type HarnessEngineId, permissionLaunchOptionsFrom, runCodexSession } from "./run-codex-session.tsx"
 import { renderSessionPicker } from "./session-picker.tsx"
 import { type WelcomeAction, WelcomeApp } from "./welcome.tsx"
 
@@ -110,6 +110,8 @@ async function openEngine(
       policy,
       historyEnabled,
       resume,
+      // Only codesplash has the first-party permission layer; codex keeps its own approvals.
+      permissions: engine === "codesplash" ? permissionLaunchOptionsFrom(options) : undefined,
     })
     if (outcome === "quit") return "quit"
     if (outcome === "new") {

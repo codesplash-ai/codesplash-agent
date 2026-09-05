@@ -66,6 +66,9 @@ codesplash --doctor            # non-interactive diagnostics: runtime, engines, 
 codesplash --no-history        # write no session files this run
 codesplash --sandbox read-only # override the Codex sandbox (read-only | workspace-write)
 codesplash --full-access       # run Codex without a sandbox (requires typed confirmation)
+codesplash --permission-mode plan          # start in a permission mode (plan | default | accept-edits)
+codesplash --allow "bash(git status *)"    # CLI-tier permission rules (--allow/--ask/--deny, repeatable)
+codesplash --bypass-approvals  # skip approvals this session (requires typed confirmation)
 codesplash -c theme=dark       # override one config value for this invocation (repeatable)
 ```
 
@@ -98,8 +101,11 @@ codesplash run -p "audit deps" --output-format stream-json --model claude-sonnet
 Output formats: `text` (default — assistant text on stdout, tool activity on stderr), `json` (one
 final `{result, turns, usage, status, sessionId}` object), `stream-json` (every event as a JSON
 line, then a result line). Usage totals include an estimated cost from catalog pricing. Useful
-flags: `--auto` (accept approvals; default declines them), `--sandbox read-only|workspace-write`,
-`--max-turns N`, `--effort low|medium|high`, `--no-history`. `--full-access` is interactive-only
+flags: `--auto` (accept approvals; default declines them — dangerous commands are declined even
+under `--auto`), `--sandbox read-only|workspace-write`, `--max-turns N`,
+`--effort low|medium|high`, `--no-history`, `--permission-mode plan|default|accept-edits`,
+repeatable `--allow/--ask/--deny <rule>` permission rules, and `--trust` (see
+[Permissions](#permissions)). `--full-access` and `--bypass-approvals` are interactive-only
 and rejected in run mode. Exit codes: `0` completed, `1` failed, `2` usage error, `130`
 interrupted. `codesplash --doctor` shows which providers have credentials and their source
 (`env`/`stored`) — never the values — plus any configured custom providers and the newest
@@ -152,6 +158,9 @@ under the read-only sandbox, and require approval per host/search under untruste
 ```sh
 codesplash review                      # review uncommitted changes in one read-only turn
 codesplash review --base main          # …changes since a ref, or --commit <sha> for one commit
+                                       # reviews always start in permission mode "default" —
+                                       # config [permissions].mode is deliberately ignored;
+                                       # pass --permission-mode to choose one explicitly
 codesplash stats --days 7 [--json]     # recorded usage per engine+model: sessions, tokens, cost
 codesplash completions fish            # shell completion scripts: bash | zsh | fish | powershell
 codesplash debug prompt                # the model-visible surface (system prompt, tools) as JSON
@@ -167,6 +176,77 @@ back:
 codesplash -c theme=dark
 codesplash run -p "quick check" -c codex.sandbox=read-only -c codesplash.fallbackModel=gpt-5.1
 ```
+
+### Permissions
+
+The native CodeSplash engine runs every tool call through a policy layer: permission modes,
+allow/ask/deny rules, a dangerous-command floor, workspace trust, and remembered grants.
+
+**Modes** — cycle with Shift+Tab in a session, set with `--permission-mode` or
+`[permissions].mode` in config.toml:
+
+- `default` — each tool's normal approval flow (file writes and commands ask as configured).
+- `accept-edits` — file edits inside the workspace run without asking; everything else as default.
+- `plan` — read-only investigation: mutating tools are refused, the model writes its plan to
+  `.codesplash/plan.md` and calls `exit_plan_mode`, and you approve the plan before any change.
+  The intrinsic `enter_plan_mode`/`exit_plan_mode` tools let the model propose this itself.
+- `bypass` — no approvals. Only reachable with `--bypass-approvals` (interactive only, typed
+  confirmation on every session, never persisted). The dangerous-command floor and the
+  self-protection write floor still apply.
+
+**Rules** — `tool` or `tool(pattern)` strings in three actions (`allow`, `ask`, `deny`):
+
+```toml
+[permissions]
+mode = "default"
+allow = ["bash(git status *)", "web_fetch(*.example.com)"]
+ask = ["bash(npm *)"]
+deny = ["read_file(**/*.secret)"]
+```
+
+Pattern semantics depend on the tool: `bash` patterns match the command's words with a trailing
+`*` wildcard (`bash(git status *)` allows `git status --short` but not `git push`); file tools
+(`read_file`, `write_file`, `edit_file`, `apply_patch`) take globs matched against both relative
+and absolute paths — symlinks are resolved first, so a deny rule cannot be dodged through a link
+and an allow rule never vouches for whatever a symlink points at; `web_fetch` takes a hostname,
+exact or `*.suffix` (deny rules are also re-checked on every redirect hop). Every other tool
+supports only the bare form. The same rules are repeatable CLI flags — `--allow <rule>`, `--ask <rule>`,
+`--deny <rule>` — checked at parse time (a bad rule is a usage error, exit 2).
+
+**Precedence** (first hit wins): the self-protection write floor (`.git`, harness config/data
+directories, `~/.ssh`, `.codesplash/` except `plan.md` — enforced in every mode, bypass and full
+access included) → explicit `deny` → the dangerous-command floor → explicit `ask` → explicit
+`allow` → built-in sensitive-read denials (`.env`, private keys, `*.pem`, … — an explicit allow
+rule overrides them) → mode defaults. Rules merge across four tiers: CLI flags, the project's
+`.codesplash/permissions.toml` (trusted workspaces only), your `config.toml`, and remembered
+grants; `/permissions` in the TUI shows the merged list with each rule's source.
+
+**Dangerous floor**: destructive command shapes — `sudo`, `rm -rf`, `dd of=/dev/...`, forced
+`git push`, `curl | sh` pipes, and friends — always ask, in every mode, cannot be remembered,
+and are always declined headlessly (even under `run --auto`). The floor looks through git
+global flags (`git -C . push --force`) and recurses into `bash -c '...'` strings; a command
+the analyzer cannot parse at all (substitution, backticks, an opaque interpreter string) is
+treated the same way — it always asks and is declined headlessly, since it could hide any of
+the above.
+
+**Workspace trust**: the first interactive session in a new folder asks whether to trust it;
+until trusted, project rule files (AGENTS.md/CLAUDE.md) and `.codesplash/permissions.toml` are
+not loaded. Headless runs never prompt — they proceed untrusted with one stderr notice, and
+`run --trust` / `review --trust` persists trust for the folder.
+
+**Remembered grants**: interactive approvals can offer "Always allow", persisting a derived rule
+(e.g. `bash(git status *)`) per project under the harness data directory. Applies from the next
+matching call; delete grants from the `/permissions` overlay. Dangerous-floor approvals are
+never rememberable, shell-interpreter prefixes (`bash(bash *)`) are never derived, and a
+file-tool grant is refused when its parent directory would blanket `/`, a top-level directory,
+or the home directory.
+
+**Honest layering note**: this is a policy layer, not an OS sandbox. `bash` enforcement is
+analysis + approvals — a command the analyzer cannot parse always asks instead of matching
+rules — and
+the write-path floors apply to the file tools, not to what an approved shell command does. The
+OS-level sandbox for shell commands ships in a later milestone; until then, treat `allow` rules
+for bash as trust statements about the commands they match.
 
 ## Security posture
 

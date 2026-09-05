@@ -15,11 +15,15 @@ export type PendingRequest = {
   title: string
   detail: string
   choices: string[]
+  /** True only for dangerous-floor approvals; the TUI tags them and never offers "always". */
+  alwaysAsk?: boolean
 }
 
 export type AppViewState = {
   engine?: EngineId
   model?: string
+  /** Last permission mode a session.status reported; retained when later statuses omit it. */
+  permissionMode?: string
   sessionStatus: SessionStatus
   turnStatus: TurnStatus
   transcript: TranscriptItem[]
@@ -71,10 +75,13 @@ export function reduceAgentEvent(state: AppViewState, event: AgentEvent): AppVie
 
   switch (event.kind) {
     case "session.status":
+      // Optional payload fields are sticky: a later status that omits them must not clobber
+      // the previously known value (same semantics as model).
       return {
         ...next,
         sessionStatus: event.payload.status,
         model: event.payload.model ?? state.model,
+        permissionMode: event.payload.permissionMode ?? state.permissionMode,
       }
     case "turn.started":
       return { ...next, sessionStatus: "running", turnStatus: "running", error: undefined }

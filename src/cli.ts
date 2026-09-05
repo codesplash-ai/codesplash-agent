@@ -3,7 +3,15 @@
 import { statSync } from "node:fs"
 import { UsageError } from "./commands/usage-error.ts"
 import type { AppOptions } from "./core/app-options.ts"
-import { type AgentConfig, applyConfigOverrides, type ConfigSandboxMode } from "./core/config.ts"
+import {
+  type AgentConfig,
+  applyConfigOverrides,
+  type ConfigPermissionMode,
+  type ConfigSandboxMode,
+  isConfigPermissionMode,
+  isValidPermissionRule,
+  type PermissionMode,
+} from "./core/config.ts"
 import type { EngineDriver, SessionPolicy, SessionUsageSnapshot } from "./core/engine.ts"
 import type { AgentEvent } from "./core/events.ts"
 import type { SessionRecorder } from "./core/session-recorder.ts"
@@ -15,7 +23,8 @@ function printHelp() {
   process.stdout.write(`CodeSplash Agent
 
 Usage:
-  codesplash [path] [--no-history] [--sandbox <mode>] [--full-access] [-c <key=value>]
+  codesplash [path] [--no-history] [--sandbox <mode>] [--full-access] [--permission-mode <mode>]
+             [--allow <rule>] [--ask <rule>] [--deny <rule>] [--bypass-approvals] [-c <key=value>]
   codesplash login <anthropic|openai> [--api-key <key>]
   codesplash logout <anthropic|openai>
   codesplash run [path] [-p|--prompt <text>] [run options]
@@ -51,6 +60,13 @@ Options:
   --sandbox <mode>
                  Override the configured sandbox: read-only or workspace-write
   --full-access  Run without a sandbox after an explicit confirmation (interactive sessions only)
+  --permission-mode <mode>
+                 Start in a permission mode: plan, default, or accept-edits
+  --allow <rule>, --ask <rule>, --deny <rule>
+                 Repeatable CLI-tier permission rules, e.g. --allow "bash(git status *)"
+  --bypass-approvals
+                 Skip approvals for this session after a typed confirmation (interactive only;
+                 the dangerous-command floor and write-path self-protection still apply)
   -c, --config <key=value>
                  Override one config value for this invocation, e.g. -c codex.sandbox=read-only
                  (repeatable; dotted TOML path; never written back to config.toml)
@@ -72,6 +88,11 @@ Run options:
   --no-history               Do not write session files for this run
   --resume <id>              Append this turn to the recorded codesplash session with that id
   --continue                 Append to the project's most recently updated codesplash session
+  --permission-mode <mode>   plan, default, or accept-edits for this run (no bypass headless)
+  --allow/--ask/--deny <rule>
+                             Repeatable CLI-tier permission rules for this run
+  --trust                    Persist trust for this folder (loads project rules and
+                             .codesplash/permissions.toml from now on)
   -c, --config <key=value>   Override one config value for this run (repeatable)
 
 Review options:
@@ -81,6 +102,11 @@ Review options:
   --model <id[:effort]>      Model id, optionally with :low, :medium, or :high reasoning effort
   --output-format <format>   text (default) or json
   --auto                     Accept approval requests instead of declining them
+  --permission-mode <mode>   plan, default, or accept-edits for the review turn (without the
+                             flag reviews run in "default"; config [permissions].mode is ignored)
+  --allow/--ask/--deny <rule>
+                             Repeatable CLI-tier permission rules for the review turn
+  --trust                    Persist trust for this folder (same flag as run)
   -c, --config <key=value>   Override one config value for this run (repeatable)
 `)
 }
@@ -92,6 +118,34 @@ Review options:
  * `instanceof` agree across the CLI and the command modules.
  */
 export { UsageError }
+
+/**
+ * Validates one `--allow/--ask/--deny` rule with the same grammar config.toml enforces, so a
+ * typo is a usage error (exit 2) at parse time instead of a silently ignored rule at session
+ * open. Unknown TOOL NAMES still pass here — the engine warns about those (forward compat).
+ */
+export function checkPermissionRule(flag: string, value: string | undefined): string {
+  if (value === undefined || value === "") {
+    throw new UsageError(`${flag} expects a permission rule like "bash(git status *)" or "read_file"`)
+  }
+  if (!isValidPermissionRule(value)) {
+    throw new UsageError(
+      `${flag}: invalid rule "${value}" — expected a tool name with an optional (pattern), e.g. bash(git status *)`,
+    )
+  }
+  return value
+}
+
+/** Parses a `--permission-mode` value; "bypass" is deliberately not reachable via this flag. */
+export function checkPermissionModeValue(value: string | undefined): ConfigPermissionMode {
+  if (value !== undefined && isConfigPermissionMode(value)) return value
+  if (value === "bypass") {
+    throw new UsageError(
+      "--permission-mode cannot select bypass; bypass requires the --bypass-approvals launch flag each session",
+    )
+  }
+  throw new UsageError(`--permission-mode expects plan, default, or accept-edits, got ${value ?? "nothing"}`)
+}
 
 /** Validates one `-c/--config` override's syntax eagerly so mistakes exit 2 before any I/O. */
 function checkConfigOverride(value: string): string {
@@ -131,7 +185,19 @@ export function extractConfigOverrides(args: string[]): { args: string[]; config
 
 export function parseAppArguments(args: string[]): { path?: string; options: AppOptions } {
   const configOverrides: string[] = []
-  const options: AppOptions = { noHistory: false, fullAccess: false, configOverrides }
+  const allowRules: string[] = []
+  const askRules: string[] = []
+  const denyRules: string[] = []
+  const options: AppOptions = {
+    noHistory: false,
+    fullAccess: false,
+    configOverrides,
+    bypassApprovals: false,
+    allowRules,
+    askRules,
+    denyRules,
+    trustWorkspace: false,
+  }
   let path: string | undefined
 
   for (let index = 0; index < args.length; index++) {
@@ -140,6 +206,23 @@ export function parseAppArguments(args: string[]): { path?: string; options: App
       options.noHistory = true
     } else if (argument === "--full-access") {
       options.fullAccess = true
+    } else if (argument === "--bypass-approvals") {
+      options.bypassApprovals = true
+    } else if (argument === "--permission-mode" || argument.startsWith("--permission-mode=")) {
+      const value = argument.includes("=") ? argument.slice("--permission-mode=".length) : args[++index]
+      options.permissionModeOverride = checkPermissionModeValue(value)
+    } else if (argument === "--allow" || argument.startsWith("--allow=")) {
+      const value = argument.includes("=") ? argument.slice("--allow=".length) : args[++index]
+      allowRules.push(checkPermissionRule("--allow", value))
+    } else if (argument === "--ask" || argument.startsWith("--ask=")) {
+      const value = argument.includes("=") ? argument.slice("--ask=".length) : args[++index]
+      askRules.push(checkPermissionRule("--ask", value))
+    } else if (argument === "--deny" || argument.startsWith("--deny=")) {
+      const value = argument.includes("=") ? argument.slice("--deny=".length) : args[++index]
+      denyRules.push(checkPermissionRule("--deny", value))
+    } else if (argument === "--trust") {
+      // The interactive session asks with the trust screen instead; only run/review take a flag.
+      throw new UsageError("--trust is for run and review; interactive sessions show a trust screen")
     } else if (argument === "-c" || argument === "--config") {
       const value = args[++index]
       if (value === undefined) throw new UsageError("--config expects a dotted.path=value override")
@@ -330,6 +413,16 @@ export type RunCommand = {
   continueSession: boolean
   /** Repeatable `-c/--config key=value` overrides applied to this run's config load. */
   configOverrides: string[]
+  /** `--permission-mode`: explicit mode for this run; wins over config and a resumed session. */
+  permissionMode?: ConfigPermissionMode
+  /** Repeatable `--allow <rule>`: CLI-tier allow rules. */
+  allowRules: string[]
+  /** Repeatable `--ask <rule>`: CLI-tier ask rules. */
+  askRules: string[]
+  /** Repeatable `--deny <rule>`: CLI-tier deny rules. */
+  denyRules: string[]
+  /** `--trust`: persist a trusted decision for the workspace before the run starts. */
+  trust: boolean
 }
 
 function defaultIsDirectory(path: string): boolean {
@@ -359,6 +452,11 @@ export function parseRunArguments(
   let noHistory = false
   let resume: string | undefined
   let continueSession = false
+  let permissionMode: ConfigPermissionMode | undefined
+  let trust = false
+  const allowRules: string[] = []
+  const askRules: string[] = []
+  const denyRules: string[] = []
   const configOverrides: string[] = []
   const positionals: string[] = []
 
@@ -422,6 +520,24 @@ export function parseRunArguments(
       }
     } else if (argument === "--no-history") {
       noHistory = true
+    } else if (argument === "--permission-mode" || argument.startsWith("--permission-mode=")) {
+      const value = argument.includes("=") ? argument.slice("--permission-mode=".length) : args[++index]
+      permissionMode = checkPermissionModeValue(value)
+    } else if (argument === "--allow" || argument.startsWith("--allow=")) {
+      const value = argument.includes("=") ? argument.slice("--allow=".length) : args[++index]
+      allowRules.push(checkPermissionRule("--allow", value))
+    } else if (argument === "--ask" || argument.startsWith("--ask=")) {
+      const value = argument.includes("=") ? argument.slice("--ask=".length) : args[++index]
+      askRules.push(checkPermissionRule("--ask", value))
+    } else if (argument === "--deny" || argument.startsWith("--deny=")) {
+      const value = argument.includes("=") ? argument.slice("--deny=".length) : args[++index]
+      denyRules.push(checkPermissionRule("--deny", value))
+    } else if (argument === "--trust") {
+      trust = true
+    } else if (argument === "--bypass-approvals") {
+      throw new UsageError(
+        "--bypass-approvals: run mode approves with --auto; dangerous commands are always declined headlessly",
+      )
     } else if (argument === "--full-access") {
       throw new UsageError("--full-access is for interactive sessions only; run mode cannot confirm it")
     } else if (argument.startsWith("-")) {
@@ -465,6 +581,11 @@ export function parseRunArguments(
     resume,
     continueSession,
     configOverrides,
+    permissionMode,
+    allowRules,
+    askRules,
+    denyRules,
+    trust,
   }
 }
 
@@ -526,6 +647,12 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
     noHistory: command.noHistory,
     fullAccess: false,
     sandboxOverride: command.sandboxOverride,
+    permissionModeOverride: command.permissionMode,
+    bypassApprovals: false, // run mode has no bypass; the flag is rejected at parse time
+    allowRules: command.allowRules,
+    askRules: command.askRules,
+    denyRules: command.denyRules,
+    trustWorkspace: command.trust,
   }
   let policy = effectiveSessionPolicy(config, appOptions)
   let localSessionId: string = crypto.randomUUID()
@@ -533,6 +660,19 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
   let nativeTranscriptPath: string | undefined
   let firstSequence: number | undefined
   let initialUsage: SessionUsageSnapshot | undefined
+  let recordedPermissionMode: string | undefined
+  let recordPermissionMode: ((mode: PermissionMode) => void) | undefined
+
+  // Permission plumbing that exists with or without history: the CLI rule tier, the trust store's
+  // data directory (env-derived dirs included), and the project's remembered-grants file.
+  const { dataDirectory } = await import("./core/config.ts")
+  const trustDataDir = dataDirectory(env)
+  const { permissionGrantsPathFor, projectIdFor: grantsProjectIdFor } = await import("./core/sessions.ts")
+  const permissionGrantsPath = permissionGrantsPathFor(trustDataDir, grantsProjectIdFor(project.cwd))
+  const permissionOverrides =
+    command.allowRules.length + command.askRules.length + command.denyRules.length > 0
+      ? { allow: command.allowRules, ask: command.askRules, deny: command.denyRules }
+      : undefined
 
   const resuming = command.resume !== undefined || command.continueSession
   if (resuming && !effectiveHistoryEnabled(config, appOptions)) {
@@ -573,7 +713,12 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
       initialUsage = usageSnapshotFromEvents(priorEvents)
       nativeTranscriptPath = transcriptPathFor(handle)
       policy = resumedSessionPolicy(handle.meta, command.sandboxOverride, config, stderr)
+      // The runner settles mode precedence (flag > recorded > policy) and reports what it used;
+      // the write goes through the recorder's chain so it never races other meta updates.
+      recordedPermissionMode = handle.meta.permissionMode
       recorder = new SessionRecorder(handle)
+      const resumedRecorder = recorder
+      recordPermissionMode = (mode) => resumedRecorder.recordPermissionMode(mode)
     } else {
       const now = new Date().toISOString()
       const handle = await store.create({
@@ -588,10 +733,15 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
         lastSequence: -1,
         sandbox: policy.sandbox,
         approvalPolicy: policy.approvalPolicy,
+        permissionMode: policy.permissionMode,
       })
       // New recorded runs persist the engine transcript too, so --resume/--continue work later.
+      // The created meta already carries the policy's mode; the runner re-records the settled one
+      // through the recorder's write chain (never a bare updateMeta, which would race it).
       nativeTranscriptPath = transcriptPathFor(handle)
       recorder = new SessionRecorder(handle)
+      const freshRecorder = recorder
+      recordPermissionMode = (mode) => freshRecorder.recordPermissionMode(mode)
     }
   }
 
@@ -618,6 +768,13 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
     nativeTranscriptPath,
     firstSequence,
     initialUsage,
+    permissionModeOverride: command.permissionMode,
+    recordedPermissionMode,
+    permissionOverrides,
+    permissionGrantsPath,
+    trustWorkspace: command.trust,
+    trustDataDir,
+    recordPermissionMode,
     stdout: overrides.stdout,
     stderr: overrides.stderr,
   })
@@ -672,7 +829,13 @@ function resumedSessionPolicy(
     )
     sandbox = "workspace-write"
   }
-  return { sandbox, approvalPolicy: meta.approvalPolicy ?? config.codex.approvalPolicy }
+  // permissionMode here is only the last-resort fallback: the headless runner resolves the
+  // explicit --permission-mode flag and the session's recorded mode ahead of it.
+  return {
+    sandbox,
+    approvalPolicy: meta.approvalPolicy ?? config.codex.approvalPolicy,
+    permissionMode: config.permissions.mode,
+  }
 }
 
 /* ------------------------------------------ main ------------------------------------------ */

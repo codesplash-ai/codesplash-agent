@@ -17,6 +17,7 @@ import {
   type EngineSession,
   loadConfig,
   type OpenSessionOptions,
+  type PermissionMode,
   type SessionPolicy,
   type UserInput,
 } from "../../core/index.ts"
@@ -37,11 +38,13 @@ import type {
   ContentBlock,
   ImageBlock,
   ModelInfo,
+  PermissionRuntime,
   ProviderClient,
   ProviderId,
   ReasoningEffort,
 } from "./contracts.ts"
 import { CodesplashEventFactory, CodesplashLoop } from "./loop.ts"
+import { createPermissionRuntime, type PermissionRuntimeOptions } from "./permissions.ts"
 import { buildSystemPrompt } from "./prompt.ts"
 import { builtinTools, createToolRegistry, type ToolRegistry } from "./tools/registry.ts"
 import { appendTranscriptMessages, loadTranscript } from "./transcript.ts"
@@ -62,7 +65,15 @@ export type CodesplashDriverOptions = {
   providers?: Partial<Record<string, ProviderClient>>
   /** Harness config; when absent it is loaded lazily the first time probe/openSession needs it. */
   config?: AgentConfig
+  /** Permission-runtime factory override, e.g. scripted runtimes in tests; defaults to createPermissionRuntime. */
+  permissions?: PermissionRuntimeFactory
 }
+
+/** Factory shape for a session's permission runtime; injectable so tests script the runtime. */
+export type PermissionRuntimeFactory = (options: PermissionRuntimeOptions) => Promise<PermissionRuntime>
+
+/** Re-exported for factory injectors (tests) so they need not import permissions.ts directly. */
+export type { PermissionRuntimeOptions as PermissionRuntimeFactoryOptions }
 
 export class CodesplashDriver implements EngineDriver {
   readonly id = "codesplash" as const
@@ -140,7 +151,48 @@ export class CodesplashDriver implements EngineDriver {
     const seededHistory = options.nativeTranscriptPath
       ? await loadTranscript(options.nativeTranscriptPath)
       : []
-    return new CodesplashSession(options, config, registry, providers, seededHistory)
+    // The permission runtime is built before the session object exists, so its creation-time
+    // warnings (unknown rule tools, corrupt grants files) buffer in the bridge and flush as
+    // warning events once the session can emit them.
+    const bridge = new PermissionEventBridge()
+    const factory = this.options.permissions ?? createPermissionRuntime
+    const permissions = await factory({
+      cwd: options.cwd,
+      mode: options.policy?.permissionMode ?? "default",
+      workspaceTrusted: options.workspaceTrusted ?? true,
+      configRules: config.permissions,
+      overrides: options.permissionOverrides,
+      grantsPath: options.permissionGrantsPath,
+      onWarning: (message) => bridge.warning(message),
+      onModeChange: (mode) => bridge.modeChanged(mode),
+    })
+    return new CodesplashSession(options, config, registry, providers, seededHistory, permissions, bridge)
+  }
+}
+
+/**
+ * Routes permission-runtime callbacks into session events. The runtime is created before the
+ * session exists, so warnings raised during creation are buffered and flushed on attach; mode
+ * changes only ever happen on a live session.
+ */
+class PermissionEventBridge {
+  readonly #buffered: string[] = []
+  #warn: ((message: string) => void) | undefined
+  #modeChanged: ((mode: PermissionMode) => void) | undefined
+
+  warning(message: string): void {
+    if (this.#warn) this.#warn(message)
+    else this.#buffered.push(message)
+  }
+
+  modeChanged(mode: PermissionMode): void {
+    this.#modeChanged?.(mode)
+  }
+
+  attach(warn: (message: string) => void, modeChanged: (mode: PermissionMode) => void): void {
+    this.#warn = warn
+    this.#modeChanged = modeChanged
+    for (const message of this.#buffered.splice(0)) warn(message)
   }
 }
 
@@ -157,9 +209,13 @@ class CodesplashSession implements EngineSession {
   readonly #config: AgentConfig
   readonly #policy: SessionPolicy
   readonly #cwd: string
+  readonly #permissions: PermissionRuntime
+  /** Bypass can only be re-entered mid-session when the session was OPENED in bypass mode. */
+  readonly #bypassAllowed: boolean
   #model: ModelInfo
   #reasoningEffort: ReasoningEffort | undefined
-  #systemPrompt: { modelId: string; text: string } | undefined
+  /** Cached by model + permission mode + workspace trust; any of the three rebuilds the prompt. */
+  #systemPrompt: { key: string; text: string } | undefined
   #turnPromise: Promise<void> | undefined
   /** Set synchronously in send() before any await so concurrent sends are refused reliably. */
   #turnReserved = false
@@ -173,7 +229,9 @@ class CodesplashSession implements EngineSession {
     config: AgentConfig,
     providerRegistry: ProviderRegistry,
     providers: Record<string, ProviderClient>,
-    seededHistory: ChatMessage[] = [],
+    seededHistory: ChatMessage[],
+    permissions: PermissionRuntime,
+    bridge: PermissionEventBridge,
   ) {
     this.events = this.#queue
     this.#config = config
@@ -181,6 +239,8 @@ class CodesplashSession implements EngineSession {
     this.#providers = providers
     this.#policy = options.policy ?? defaultSessionPolicy
     this.#cwd = options.cwd
+    this.#permissions = permissions
+    this.#bypassAllowed = options.policy?.permissionMode === "bypass"
     this.#factory = new CodesplashEventFactory(options.localSessionId, options.firstSequence ?? 0)
     this.#registry = createToolRegistry(builtinTools())
     this.#loop = new CodesplashLoop({
@@ -190,6 +250,7 @@ class CodesplashSession implements EngineSession {
       events: this.#factory,
       emit: (event) => this.#push(event),
       fallbackModel: config.codesplash.fallbackModel,
+      permissions,
       // Resume: continue the recorded cumulative usage instead of restarting the counts at zero.
       initialUsage: options.initialUsage,
       // Registry-backed: only models on available providers resolve, and test overrides in the
@@ -206,6 +267,23 @@ class CodesplashSession implements EngineSession {
     this.#push(
       this.#factory.event("session/opening", {}, { kind: "session.status", payload: { status: "starting" } }),
     )
+    // Attached after the opening status: runtime-creation warnings land between it and "ready",
+    // and later mode changes (setPermissionMode, the loop's plan tools) become status events.
+    bridge.attach(
+      (message) =>
+        this.#push(this.#factory.event("permissions/warning", {}, { kind: "warning", payload: { message } })),
+      (mode) =>
+        this.#push(
+          this.#factory.event(
+            "permissions/modeChanged",
+            {},
+            {
+              kind: "session.status",
+              payload: { status: this.#loop.isTurnActive ? "running" : "ready", permissionMode: mode },
+            },
+          ),
+        ),
+    )
     const selection = options.model
       ? this.#selectModel(options.model)
       : { model: this.#providerRegistry.defaultModel(), effort: undefined }
@@ -217,7 +295,11 @@ class CodesplashSession implements EngineSession {
         {},
         {
           kind: "session.status",
-          payload: { status: "ready", model: formatModelSelector(this.#model, this.#reasoningEffort) },
+          payload: {
+            status: "ready",
+            model: formatModelSelector(this.#model, this.#reasoningEffort),
+            permissionMode: this.#permissions.mode,
+          },
         },
       ),
     )
@@ -335,6 +417,23 @@ class CodesplashSession implements EngineSession {
   }
 
   /**
+   * Switches the first-party permission mode for subsequent turns. Refused mid-turn (like
+   * setModel); "bypass" is refused unless the session was OPENED in bypass mode — entering
+   * bypass mid-session requires the launch flag, while leaving it (and returning) is fine.
+   * A valid change goes through the runtime, whose onModeChange emits the status event.
+   */
+  async setPermissionMode(mode: PermissionMode): Promise<void> {
+    this.#requireOpen()
+    if (this.#turnReserved || this.#loop.isTurnActive) {
+      throw new Error("Wait for the current turn before switching permission modes")
+    }
+    if (mode === "bypass" && !this.#bypassAllowed) {
+      throw new Error("Bypass mode requires launching with --bypass-approvals")
+    }
+    this.#permissions.setMode(mode)
+  }
+
+  /**
    * Parses a selector against the registry (available providers only). A model that exists but
    * whose provider has no key gets an actionable message naming the key env var — never its value.
    */
@@ -411,14 +510,21 @@ class CodesplashSession implements EngineSession {
   }
 
   async #systemPromptFor(): Promise<string> {
-    if (this.#systemPrompt?.modelId === this.#model.id) return this.#systemPrompt.text
+    const permissionMode = this.#permissions.mode
+    const workspaceTrusted = this.options.workspaceTrusted ?? true
+    // Plan mode injects its own prompt section and untrusted folders skip project rules, so the
+    // cache key covers mode and trust alongside the model (mode can flip between turns).
+    const key = `${this.#model.id} ${permissionMode} ${workspaceTrusted}`
+    if (this.#systemPrompt?.key === key) return this.#systemPrompt.text
     const text = await buildSystemPrompt({
       cwd: this.#cwd,
       model: this.#model,
       policy: this.#policy,
       toolNames: this.#registry.specs().map((spec) => spec.name),
+      permissionMode,
+      workspaceTrusted,
     })
-    this.#systemPrompt = { modelId: this.#model.id, text }
+    this.#systemPrompt = { key, text }
     return text
   }
 

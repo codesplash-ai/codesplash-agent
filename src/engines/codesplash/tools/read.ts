@@ -1,7 +1,13 @@
 /** read_file: paged reads capped at 2000 lines / 50KB per call; directories and >5MB files refused. */
 import { readFile, stat } from "node:fs/promises"
 import { isAbsolute, relative, resolve } from "node:path"
-import { type HarnessTool, type ToolContext, ToolInputError, type ToolOutcome } from "../contracts.ts"
+import {
+  type HarnessTool,
+  type PermissionTargets,
+  type ToolContext,
+  ToolInputError,
+  type ToolOutcome,
+} from "../contracts.ts"
 
 const MAX_LINES_PER_CALL = 2000
 const MAX_BYTES_PER_CALL = 50 * 1024
@@ -132,6 +138,9 @@ export const readFileTool: HarnessTool = {
     additionalProperties: false,
   },
   isReadOnly: () => true,
+  permissionTargets: (input, context): PermissionTargets => ({
+    paths: [resolve(context.cwd, parseInput(input).path)],
+  }),
   permission: () => ({ kind: "none" }),
   run: async (input, context) => runRead(parseInput(input), context),
 }

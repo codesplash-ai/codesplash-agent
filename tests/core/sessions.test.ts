@@ -5,6 +5,7 @@ import { join } from "node:path"
 import { type AgentEvent, createAgentEvent } from "../../src/core/events.ts"
 import {
   listProjectSessions,
+  permissionGrantsPathFor,
   projectIdFor,
   readSessionEvents,
   readSessionMeta,
@@ -204,6 +205,46 @@ describe("session store", () => {
     const handle = await store.create(makeMeta({ engine: "codesplash" }))
     expect(transcriptPathFor(handle)).toBe(join(handle.directory, "transcript.jsonl"))
     expect(join(transcriptPathFor(handle), "..")).toBe(join(handle.eventsPath, ".."))
+  })
+
+  test("permissionMode round-trips through meta writes, reads, and updates", async () => {
+    const root = await temporaryDirectory()
+    const store = new SessionStore(root)
+    const handle = await store.create(makeMeta({ engine: "codesplash", permissionMode: "accept-edits" }))
+
+    const reread = await readSessionMeta(handle.directory)
+    expect(reread?.permissionMode).toBe("accept-edits")
+
+    // Resume-style update: a later run may switch the recorded mode.
+    await handle.updateMeta({ permissionMode: "plan" })
+    const updated = await readSessionMeta(handle.directory)
+    expect(updated?.permissionMode).toBe("plan")
+
+    // Absent stays absent: metas written before the field existed keep validating.
+    const legacy = await store.create(makeMeta({ localSessionId: "legacy" }))
+    expect((await readSessionMeta(legacy.directory))?.permissionMode).toBeUndefined()
+  })
+
+  test("a non-string permissionMode fails the loose meta validation", async () => {
+    const root = await temporaryDirectory()
+    const store = new SessionStore(root)
+    const handle = await store.create(makeMeta())
+    const raw = JSON.parse(await readFile(join(handle.directory, "meta.json"), "utf8")) as Record<
+      string,
+      unknown
+    >
+    raw.permissionMode = 42
+    await writeFile(join(handle.directory, "meta.json"), JSON.stringify(raw))
+
+    expect(await readSessionMeta(handle.directory)).toBeUndefined()
+  })
+
+  test("permissionGrantsPathFor builds <dataDir>/permissions/<projectId>.toml without creating it", async () => {
+    const dataDir = await temporaryDirectory()
+    const projectId = projectIdFor("/canonical/project")
+    const path = permissionGrantsPathFor(dataDir, projectId)
+    expect(path).toBe(join(dataDir, "permissions", `${projectId}.toml`))
+    expect(await stat(join(dataDir, "permissions")).catch(() => undefined)).toBeUndefined()
   })
 })
 

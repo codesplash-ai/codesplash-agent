@@ -44,32 +44,80 @@ class Sink {
   }
 }
 
+/** Default AppOptions shape parseAppArguments returns when no flag is passed. */
+function defaultParsedAppOptions() {
+  return {
+    noHistory: false,
+    fullAccess: false,
+    configOverrides: [],
+    bypassApprovals: false,
+    allowRules: [],
+    askRules: [],
+    denyRules: [],
+    trustWorkspace: false,
+  }
+}
+
 describe("parseAppArguments", () => {
   test("parses the project path and defaults", () => {
     expect(parseAppArguments([])).toEqual({
       path: undefined,
-      options: { noHistory: false, fullAccess: false, configOverrides: [] },
+      options: defaultParsedAppOptions(),
     })
     expect(parseAppArguments(["/tmp/project"])).toEqual({
       path: "/tmp/project",
-      options: { noHistory: false, fullAccess: false, configOverrides: [] },
+      options: defaultParsedAppOptions(),
     })
   })
 
   test("parses history, sandbox, and full-access flags in any order", () => {
     expect(parseAppArguments(["--no-history", "/tmp/project", "--sandbox", "read-only"])).toEqual({
       path: "/tmp/project",
-      options: { noHistory: true, fullAccess: false, sandboxOverride: "read-only", configOverrides: [] },
+      options: { ...defaultParsedAppOptions(), noHistory: true, sandboxOverride: "read-only" },
     })
     expect(parseAppArguments(["--sandbox=workspace-write", "--full-access"])).toEqual({
       path: undefined,
-      options: {
-        noHistory: false,
-        fullAccess: true,
-        sandboxOverride: "workspace-write",
-        configOverrides: [],
-      },
+      options: { ...defaultParsedAppOptions(), fullAccess: true, sandboxOverride: "workspace-write" },
     })
+  })
+
+  test("parses --permission-mode in both forms; bypass is not a mode value", () => {
+    expect(parseAppArguments(["--permission-mode", "plan"]).options.permissionModeOverride).toBe("plan")
+    expect(parseAppArguments(["--permission-mode=accept-edits"]).options.permissionModeOverride).toBe(
+      "accept-edits",
+    )
+    expect(() => parseAppArguments(["--permission-mode", "bypass"])).toThrow(UsageError)
+    expect(() => parseAppArguments(["--permission-mode", "bypass"])).toThrow("--bypass-approvals")
+    expect(() => parseAppArguments(["--permission-mode", "yolo"])).toThrow(
+      "--permission-mode expects plan, default, or accept-edits, got yolo",
+    )
+    expect(() => parseAppArguments(["--permission-mode"])).toThrow("got nothing")
+  })
+
+  test("collects repeatable --allow/--ask/--deny rules and syntax-checks each one", () => {
+    const { options } = parseAppArguments([
+      "--allow",
+      "bash(git status *)",
+      "--allow=read_file",
+      "--ask",
+      "web_fetch(*.example.com)",
+      "--deny",
+      "read_file(**/*.secret)",
+    ])
+    expect(options.allowRules).toEqual(["bash(git status *)", "read_file"])
+    expect(options.askRules).toEqual(["web_fetch(*.example.com)"])
+    expect(options.denyRules).toEqual(["read_file(**/*.secret)"])
+
+    expect(() => parseAppArguments(["--allow", "Bash(x)"])).toThrow(UsageError)
+    expect(() => parseAppArguments(["--allow", "Bash(x)"])).toThrow('invalid rule "Bash(x)"')
+    expect(() => parseAppArguments(["--deny", "bash()"])).toThrow(UsageError)
+    expect(() => parseAppArguments(["--ask"])).toThrow("--ask expects a permission rule")
+  })
+
+  test("--bypass-approvals is accepted; --trust points at the interactive gate", () => {
+    expect(parseAppArguments(["--bypass-approvals"]).options.bypassApprovals).toBe(true)
+    expect(() => parseAppArguments(["--trust"])).toThrow(UsageError)
+    expect(() => parseAppArguments(["--trust"])).toThrow("--trust is for run and review")
   })
 
   test("collects repeatable -c/--config overrides in every spelling", () => {
@@ -192,7 +240,7 @@ describe("version and doctor", () => {
     expect(report).toContain("CodeSplash Agent 9.9.9")
     expect(report).toContain("unsupported version")
     expect(report).toContain("○ Not installed")
-    expect(report).toContain("codesplash ○ No API keys found — set ANTHROPIC_API_KEY or OPENAI_API_KEY")
+    expect(report).toContain("codesplash  ○ No API keys found — set ANTHROPIC_API_KEY or OPENAI_API_KEY")
     expect(report).toContain("defaults; not created yet")
   })
 
@@ -214,7 +262,7 @@ describe("version and doctor", () => {
         detail: "Anthropic API key · OpenAI API key",
       },
     })
-    expect(report).toContain("codesplash ● v9.9.9 · Anthropic API key · OpenAI API key")
+    expect(report).toContain("codesplash  ● v9.9.9 · Anthropic API key · OpenAI API key")
   })
 
   test("renders custom-provider and transcript rows when the report carries them", () => {
@@ -233,45 +281,102 @@ describe("version and doctor", () => {
         "Ollama (custom, openai protocol) · http://localhost:11434/v1 · no key needed",
         "Proxy (custom, anthropic protocol) · https://proxy.example/v1 · PROXY_API_KEY missing",
       ],
+      permissions: "mode default · 2 allow / 1 deny · workspace trusted",
       transcript: "/tmp/data/sessions/p1/s1/transcript.jsonl",
     })
     expect(report).toContain(
-      "provider   Ollama (custom, openai protocol) · http://localhost:11434/v1 · no key needed",
+      "provider    Ollama (custom, openai protocol) · http://localhost:11434/v1 · no key needed",
     )
     expect(report).toContain("PROXY_API_KEY missing")
-    expect(report).toContain("transcript /tmp/data/sessions/p1/s1/transcript.jsonl")
+    expect(report).toContain("permissions mode default · 2 allow / 1 deny · workspace trusted")
+    expect(report).toContain("transcript  /tmp/data/sessions/p1/s1/transcript.jsonl")
   })
+
+  test("the permissions line never leaks rule contents — only counts, mode, and trust state", async () => {
+    const configDir = await makeTempDir("codesplash-doctor-config-")
+    const dataDir = await makeTempDir("codesplash-doctor-data-")
+    const cwd = await makeTempDir("codesplash-doctor-project-")
+    await Bun.write(
+      join(configDir, "config.toml"),
+      [
+        "[permissions]",
+        'mode = "accept-edits"',
+        'allow = ["bash(git status *)", "read_file"]',
+        'deny = ["read_file(**/*.secret)"]',
+        "",
+      ].join("\n"),
+    )
+    const previousConfigDir = process.env.CODESPLASH_AGENT_CONFIG_DIR
+    const previousDataDir = process.env.CODESPLASH_AGENT_DATA_DIR
+    process.env.CODESPLASH_AGENT_CONFIG_DIR = configDir
+    process.env.CODESPLASH_AGENT_DATA_DIR = dataDir
+    try {
+      const { collectDoctorReport } = await import("../src/doctor.ts")
+      const report = await collectDoctorReport(cwd)
+      expect(report.permissions).toBe("mode accept-edits · 2 allow / 1 deny · workspace not trusted")
+
+      const { writeTrustDecision } = await import("../src/core/trust.ts")
+      await writeTrustDecision(cwd, true, dataDir)
+      const trusted = await collectDoctorReport(cwd)
+      expect(trusted.permissions).toBe("mode accept-edits · 2 allow / 1 deny · workspace trusted")
+      expect(formatDoctorReport(trusted)).not.toContain("git status")
+      expect(formatDoctorReport(trusted)).not.toContain("*.secret")
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CODESPLASH_AGENT_CONFIG_DIR
+      else process.env.CODESPLASH_AGENT_CONFIG_DIR = previousConfigDir
+      if (previousDataDir === undefined) delete process.env.CODESPLASH_AGENT_DATA_DIR
+      else process.env.CODESPLASH_AGENT_DATA_DIR = previousDataDir
+    }
+  }, 30000)
 })
 
 describe("effective options", () => {
+  const baseOptions = defaultParsedAppOptions()
+
   test("flags override config with flag > config > default precedence", () => {
     const config = structuredClone(defaultConfig)
     config.codex.sandbox = "read-only"
     config.history.enabled = true
 
-    expect(effectiveSessionPolicy(config, { noHistory: false, fullAccess: false })).toEqual({
+    expect(effectiveSessionPolicy(config, { ...baseOptions })).toEqual({
       sandbox: "read-only",
       approvalPolicy: "on-request",
+      permissionMode: "default",
+    })
+    expect(effectiveSessionPolicy(config, { ...baseOptions, sandboxOverride: "workspace-write" })).toEqual({
+      sandbox: "workspace-write",
+      approvalPolicy: "on-request",
+      permissionMode: "default",
     })
     expect(
       effectiveSessionPolicy(config, {
-        noHistory: false,
-        fullAccess: false,
-        sandboxOverride: "workspace-write",
-      }),
-    ).toEqual({ sandbox: "workspace-write", approvalPolicy: "on-request" })
-    expect(
-      effectiveSessionPolicy(config, {
-        noHistory: false,
+        ...baseOptions,
         fullAccess: true,
         sandboxOverride: "workspace-write",
       }).sandbox,
     ).toBe("danger-full-access")
 
-    expect(effectiveHistoryEnabled(config, { noHistory: false, fullAccess: false })).toBe(true)
-    expect(effectiveHistoryEnabled(config, { noHistory: true, fullAccess: false })).toBe(false)
+    expect(effectiveHistoryEnabled(config, { ...baseOptions })).toBe(true)
+    expect(effectiveHistoryEnabled(config, { ...baseOptions, noHistory: true })).toBe(false)
     config.history.enabled = false
-    expect(effectiveHistoryEnabled(config, { noHistory: false, fullAccess: false })).toBe(false)
+    expect(effectiveHistoryEnabled(config, { ...baseOptions })).toBe(false)
+  })
+
+  test("permission mode resolves bypass flag > explicit override > config mode", () => {
+    const config = structuredClone(defaultConfig)
+    config.permissions.mode = "accept-edits"
+
+    expect(effectiveSessionPolicy(config, { ...baseOptions }).permissionMode).toBe("accept-edits")
+    expect(
+      effectiveSessionPolicy(config, { ...baseOptions, permissionModeOverride: "plan" }).permissionMode,
+    ).toBe("plan")
+    expect(
+      effectiveSessionPolicy(config, {
+        ...baseOptions,
+        permissionModeOverride: "plan",
+        bypassApprovals: true,
+      }).permissionMode,
+    ).toBe("bypass")
   })
 })
 
@@ -321,6 +426,14 @@ describe("parseLogoutArguments", () => {
 describe("parseRunArguments", () => {
   const notADirectory = () => false
   const aDirectory = () => true
+  /** Fields every parsed RunCommand carries when no permission flag is passed. */
+  const permissionDefaults = {
+    permissionMode: undefined,
+    allowRules: [],
+    askRules: [],
+    denyRules: [],
+    trust: false,
+  }
 
   test("parses every flag in both space and equals forms", () => {
     expect(
@@ -354,6 +467,7 @@ describe("parseRunArguments", () => {
       resume: undefined,
       continueSession: false,
       configOverrides: [],
+      ...permissionDefaults,
     })
     expect(
       parseRunArguments(
@@ -381,6 +495,7 @@ describe("parseRunArguments", () => {
       resume: "session-1",
       continueSession: false,
       configOverrides: [],
+      ...permissionDefaults,
     })
   })
 
@@ -398,6 +513,7 @@ describe("parseRunArguments", () => {
       resume: undefined,
       continueSession: false,
       configOverrides: [],
+      ...permissionDefaults,
     })
   })
 
@@ -411,6 +527,39 @@ describe("parseRunArguments", () => {
 
     expect(parseRunArguments(["-p", "go", "--resume", "abc-123"], notADirectory).resume).toBe("abc-123")
     expect(parseRunArguments(["-p", "go", "--continue"], notADirectory).continueSession).toBe(true)
+  })
+
+  test("parses --permission-mode, permission rules, and --trust", () => {
+    const parsed = parseRunArguments(
+      [
+        "-p",
+        "go",
+        "--permission-mode",
+        "plan",
+        "--allow",
+        "bash(git status *)",
+        "--deny=read_file(**/*.pem)",
+        "--trust",
+      ],
+      notADirectory,
+    )
+    expect(parsed.permissionMode).toBe("plan")
+    expect(parsed.allowRules).toEqual(["bash(git status *)"])
+    expect(parsed.denyRules).toEqual(["read_file(**/*.pem)"])
+    expect(parsed.trust).toBe(true)
+
+    expect(() => parseRunArguments(["--permission-mode", "bypass"], notADirectory)).toThrow(
+      "--bypass-approvals",
+    )
+    expect(() => parseRunArguments(["--allow", "9bad"], notADirectory)).toThrow(UsageError)
+    expect(() => parseRunArguments(["--ask", "Read(x)"], notADirectory)).toThrow('invalid rule "Read(x)"')
+  })
+
+  test("--bypass-approvals is rejected headless with the run-mode explanation", () => {
+    expect(() => parseRunArguments(["-p", "x", "--bypass-approvals"], notADirectory)).toThrow(UsageError)
+    expect(() => parseRunArguments(["-p", "x", "--bypass-approvals"], notADirectory)).toThrow(
+      "run mode approves with --auto; dangerous commands are always declined headlessly",
+    )
   })
 
   test("resume conflicts and bad values are usage errors", () => {
@@ -606,6 +755,11 @@ describe("subcommand usage errors exit 2", () => {
       "--uncommitted",
       "--base",
       "--commit",
+      "--permission-mode",
+      "--allow",
+      "--deny",
+      "--bypass-approvals",
+      "--trust",
     ]) {
       expect(help.stdout).toContain(needle)
     }

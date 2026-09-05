@@ -3,6 +3,8 @@
  * runs tool rounds (read-only calls concurrently, mutating calls sequentially), gates calls
  * behind approval requests, and emits the normalized AgentEvent stream the harness UI consumes.
  */
+import { readFile } from "node:fs/promises"
+import { join } from "node:path"
 import {
   type AgentEvent,
   type AgentEventInput,
@@ -16,8 +18,14 @@ import {
   ASK_USER_TOOL_NAME,
   type ChatMessage,
   type ContentBlock,
+  ENTER_PLAN_MODE_TOOL_NAME,
+  EXIT_PLAN_MODE_TOOL_NAME,
   type HarnessTool,
   type ModelInfo,
+  type PermissionDecision,
+  type PermissionMode,
+  type PermissionRuntime,
+  type PermissionTargets,
   type ProviderClient,
   ProviderHttpError,
   type ProviderRequest,
@@ -31,6 +39,7 @@ import {
   ToolInputError,
   type ToolResultBlock,
 } from "./contracts.ts"
+import { derivePersistableRule } from "./permissions.ts"
 import type { ToolRegistry } from "./tools/registry.ts"
 import { truncateToolOutput } from "./tools/truncate.ts"
 
@@ -40,6 +49,19 @@ export const MAX_TOOL_ROUNDS = 50
 export const READ_ONLY_CONCURRENCY = 4
 /** Choice set understood by the existing A/S/D/C approval UI. */
 export const APPROVAL_CHOICES = ["accept", "acceptForSession", "decline", "cancel"] as const
+/** Choice set for the exit_plan_mode plan review. */
+export const PLAN_APPROVAL_CHOICES = ["approve", "keepPlanning", "cancel"] as const
+/** Approval-request cap on the plan text shown as the exit_plan_mode detail. */
+export const PLAN_DETAIL_MAX_BYTES = 8 * 1024
+
+/** Workspace-relative location of the plan file plan mode writes and exit_plan_mode reads. */
+const PLAN_FILE_RELATIVE_PATH = join(".codesplash", "plan.md")
+const PLAN_MODE_UNAVAILABLE_TEXT = "Plan mode is not available in this session."
+const ENTER_PLAN_MODE_RESULT_TEXT =
+  "Plan mode is on. Investigate read-only, write the plan to .codesplash/plan.md, then call exit_plan_mode."
+const PLAN_APPROVED_RESULT_TEXT =
+  "The user approved the plan. Plan mode is off — proceed with the implementation."
+const KEEP_PLANNING_RESULT_TEXT = "The user chose to keep planning."
 
 const GIT_DIFF_TIMEOUT_MS = 10_000
 const LABEL_MAX_CHARS = 80
@@ -104,6 +126,12 @@ export type CodesplashLoopOptions = {
   registry: ToolRegistry
   events: CodesplashEventFactory
   emit: (event: AgentEvent) => void
+  /**
+   * Permission engine consulted before every tool call (rules, modes, dangerous floor). Absent
+   * (no runtime injected) → every call takes the tools' own default permission() flow and the
+   * plan-mode tools report themselves unavailable.
+   */
+  permissions?: PermissionRuntime
   maxToolRounds?: number
   collectDiff?: DiffCollector
   /** `[codesplash].fallbackModel`: retried on a zero-event provider failure at turn start. */
@@ -166,6 +194,9 @@ export class CodesplashLoop {
   readonly #pendingRequests = new Map<string, PendingRequest>()
   readonly #fallbackModel: string | undefined
   readonly #resolveModel: ((id: string) => ResolvedModel | undefined) | undefined
+  readonly #permissions: PermissionRuntime | undefined
+  /** Mode to restore when a plan is approved; recorded by enter_plan_mode, "default" otherwise. */
+  #modeBeforePlan: PermissionMode = "default"
   /** Session-cumulative usage committed from finished provider requests. */
   readonly #usageTotals = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, costUsd: 0 }
   #hasUnpricedUsage = false
@@ -194,6 +225,7 @@ export class CodesplashLoop {
     this.#collectDiff = options.collectDiff ?? collectGitDiff
     this.#fallbackModel = options.fallbackModel
     this.#resolveModel = options.resolveModel
+    this.#permissions = options.permissions
     if (options.initialUsage) {
       this.#usageTotals.inputTokens = options.initialUsage.inputTokens ?? 0
       this.#usageTotals.cachedInputTokens = options.initialUsage.cachedInputTokens ?? 0
@@ -768,16 +800,56 @@ export class CodesplashLoop {
     return decisions
   }
 
-  /** Only read-only calls that need no approval may overlap; everything else runs in order. */
+  /**
+   * Only read-only calls that need no approval may overlap; everything else runs in order.
+   * Approval-free means a permission decision of "allow", or "default" with the tool's own
+   * permission() reporting "none" (as before permissions existed). "deny"/"ask" stay barriers so
+   * their results and requests land in the model's call order.
+   */
   #canRunConcurrently(tool: HarnessTool, call: ToolCallBlock, signal: AbortSignal): boolean {
-    if (tool.name === ASK_USER_TOOL_NAME) return false
+    if (
+      tool.name === ASK_USER_TOOL_NAME ||
+      tool.name === ENTER_PLAN_MODE_TOOL_NAME ||
+      tool.name === EXIT_PLAN_MODE_TOOL_NAME
+    ) {
+      return false
+    }
     try {
-      return (
-        tool.isReadOnly(call.input) && tool.permission(call.input, this.#toolContext(signal)).kind === "none"
-      )
+      if (!tool.isReadOnly(call.input)) return false
+      const decision = this.#permissionDecision(tool, call, signal).decision
+      if (decision.kind === "allow") return true
+      if (decision.kind !== "default") return false
+      return tool.permission(call.input, this.#toolContext(signal)).kind === "none"
     } catch {
       return false
     }
+  }
+
+  /**
+   * Permission-engine verdict for one call, plus the extracted targets for rule derivation. A
+   * permissionTargets throw (malformed input) forces the default path so run()/parse surfaces
+   * the input error exactly as it did before the permission engine existed.
+   */
+  #permissionDecision(
+    tool: HarnessTool,
+    call: ToolCallBlock,
+    signal: AbortSignal,
+  ): { decision: PermissionDecision; targets: PermissionTargets | undefined } {
+    const permissions = this.#permissions
+    if (permissions === undefined) return { decision: { kind: "default" }, targets: undefined }
+    let targets: PermissionTargets | undefined
+    if (tool.permissionTargets !== undefined) {
+      try {
+        targets = tool.permissionTargets(call.input, this.#toolContext(signal))
+      } catch (error) {
+        // Only a malformed input falls through to the default flow (run()/parse then surfaces
+        // the same ToolInputError). Anything else rethrows so an unexpected bug fails the call
+        // closed instead of silently skipping the deny rules and floors.
+        if (!(error instanceof ToolInputError)) throw error
+        return { decision: { kind: "default" }, targets: undefined }
+      }
+    }
+    return { decision: permissions.decide(tool.name, targets, tool.isReadOnly(call.input)), targets }
   }
 
   async #runToolCall(
@@ -794,32 +866,48 @@ export class CodesplashLoop {
     }
 
     try {
-      if (tool.name === ASK_USER_TOOL_NAME) return await this.#runAskUser(call, itemId, signal)
-
-      const permission = tool.permission(call.input, this.#toolContext(signal))
-      if (permission.kind === "approval") {
-        const preApproved =
-          permission.sessionKey !== undefined && this.#sessionApprovals.has(permission.sessionKey)
-        if (!preApproved) {
-          const choice = await this.#awaitDecision(
-            "approval",
-            permission.title,
-            permission.detail,
-            [...APPROVAL_CHOICES],
+      if (
+        tool.name === ASK_USER_TOOL_NAME ||
+        tool.name === ENTER_PLAN_MODE_TOOL_NAME ||
+        tool.name === EXIT_PLAN_MODE_TOOL_NAME
+      ) {
+        // Intrinsic tools honor explicit deny rules (a configured deny must not be silently
+        // inert); every other decision kind proceeds with their loop-executed behavior.
+        const { decision } = this.#permissionDecision(tool, call, signal)
+        if (decision.kind === "deny") {
+          return this.#failCall(
             itemId,
-            signal,
+            call,
+            provisionalLabel,
+            `Denied by permission rule: ${decision.reason}`,
           )
-          if (choice === "acceptForSession" && permission.sessionKey !== undefined) {
-            this.#sessionApprovals.add(permission.sessionKey)
-          }
-          if (choice === "decline" || choice === "cancel") {
-            const message =
-              choice === "decline"
-                ? `The user declined the request to run ${tool.name}.`
-                : `The user cancelled the request to run ${tool.name}.`
-            return this.#failCall(itemId, call, provisionalLabel, message)
-          }
         }
+        if (tool.name === ASK_USER_TOOL_NAME) return await this.#runAskUser(call, itemId, signal)
+        if (tool.name === ENTER_PLAN_MODE_TOOL_NAME) return this.#runEnterPlanMode(call, itemId)
+        return await this.#runExitPlanMode(call, itemId, signal)
+      }
+
+      // The permission engine is consulted first: deny short-circuits with no request, allow
+      // skips approval entirely, ask opens a rule-driven approval, and default falls through to
+      // the tool's own permission() flow exactly as before.
+      const { decision, targets } = this.#permissionDecision(tool, call, signal)
+      if (decision.kind === "deny") {
+        return this.#failCall(itemId, call, provisionalLabel, `Denied by permission rule: ${decision.reason}`)
+      }
+      if (decision.kind === "ask") {
+        const refusal = await this.#askApproval(
+          tool,
+          call,
+          itemId,
+          provisionalLabel,
+          decision,
+          targets,
+          signal,
+        )
+        if (refusal !== undefined) return refusal
+      } else if (decision.kind === "default") {
+        const refusal = await this.#defaultApproval(tool, call, itemId, provisionalLabel, targets, signal)
+        if (refusal !== undefined) return refusal
       }
 
       const outcome = await tool.run(call.input, this.#toolContext(signal))
@@ -851,6 +939,217 @@ export class CodesplashLoop {
     return { type: "tool_result", toolCallId: call.id, text: `The user chose: ${choice}` }
   }
 
+  /* --------------------------------- permission flows --------------------------------- */
+
+  /**
+   * Rule-driven "ask" approval. Title/detail reuse the tool's own permission() when it reports
+   * an approval; otherwise a generic prompt with the provisional label. acceptAlways is offered
+   * only for persistable, non-dangerous asks; dangerous-floor asks (alwaysAsk) tag the request
+   * so auto-answering consumers decline them. Session approvals deliberately do NOT apply here:
+   * an explicit or dangerous ask must reach the user even after acceptForSession.
+   * Returns the refusal result, or undefined when the call may run.
+   */
+  async #askApproval(
+    tool: HarnessTool,
+    call: ToolCallBlock,
+    itemId: string,
+    provisionalLabel: string,
+    decision: Extract<PermissionDecision, { kind: "ask" }>,
+    targets: PermissionTargets | undefined,
+    signal: AbortSignal,
+  ): Promise<ToolResultBlock | undefined> {
+    let title = `Run ${tool.name}?`
+    // The full command, never the 80-char-clipped label: a destructive tail past the clip must
+    // not be approved sight-unseen.
+    let detail = targets?.command ?? provisionalLabel
+    try {
+      const permission = tool.permission(call.input, this.#toolContext(signal))
+      if (permission.kind === "approval") {
+        title = permission.title
+        detail = permission.detail
+      }
+    } catch {
+      // Keep the generic title/detail; run() surfaces any input error after approval.
+    }
+    // Surface WHY the engine asked (dangerous command class, ask rule, plan mode) in the prompt.
+    if (decision.reason !== undefined) {
+      detail = detail === "" ? decision.reason : `${detail}\n\n${decision.reason}`
+    }
+    const persistableRule = decision.alwaysAsk === true ? undefined : decision.persistableRule
+    const choices =
+      persistableRule === undefined
+        ? ["accept", "decline", "cancel"]
+        : ["accept", "acceptAlways", "decline", "cancel"]
+    const choice = await this.#awaitDecision(
+      "approval",
+      title,
+      detail,
+      choices,
+      itemId,
+      signal,
+      decision.alwaysAsk,
+      decision.reason,
+    )
+    if (choice === "acceptAlways" && persistableRule !== undefined) {
+      await this.#persistGrant(persistableRule)
+    }
+    if (choice === "decline" || choice === "cancel") {
+      return this.#failCall(itemId, call, provisionalLabel, this.#refusalMessage(tool.name, choice))
+    }
+    return undefined
+  }
+
+  /**
+   * The pre-permissions approval flow, byte-for-byte, with one addition: when a permission
+   * runtime is present and a persistable rule can be derived for the call, acceptAlways joins
+   * the choices (grouped with the other accept variants) and persists the rule before running.
+   * Returns the refusal result, or undefined when the call may run.
+   */
+  async #defaultApproval(
+    tool: HarnessTool,
+    call: ToolCallBlock,
+    itemId: string,
+    provisionalLabel: string,
+    targets: PermissionTargets | undefined,
+    signal: AbortSignal,
+  ): Promise<ToolResultBlock | undefined> {
+    const permission = tool.permission(call.input, this.#toolContext(signal))
+    if (permission.kind !== "approval") return undefined
+    const preApproved =
+      permission.sessionKey !== undefined && this.#sessionApprovals.has(permission.sessionKey)
+    if (preApproved) return undefined
+    const persistableRule = this.#derivePersistableRule(tool.name, targets)
+    const choices = [...APPROVAL_CHOICES] as string[]
+    if (persistableRule !== undefined) choices.splice(2, 0, "acceptAlways")
+    const choice = await this.#awaitDecision(
+      "approval",
+      permission.title,
+      permission.detail,
+      choices,
+      itemId,
+      signal,
+    )
+    if (choice === "acceptForSession" && permission.sessionKey !== undefined) {
+      this.#sessionApprovals.add(permission.sessionKey)
+    }
+    if (choice === "acceptAlways" && persistableRule !== undefined) {
+      await this.#persistGrant(persistableRule)
+    }
+    if (choice === "decline" || choice === "cancel") {
+      return this.#failCall(itemId, call, provisionalLabel, this.#refusalMessage(tool.name, choice))
+    }
+    return undefined
+  }
+
+  /**
+   * Rule the default-path acceptAlways would persist. A runtime that derives its own rules
+   * (the concrete permission engine, which returns undefined without a grants path so
+   * "always allow" is never offered when it cannot be persisted) is preferred; runtimes
+   * without the helper fall back to the loop's standalone derivation.
+   */
+  #derivePersistableRule(toolName: string, targets: PermissionTargets | undefined): string | undefined {
+    const runtime = this.#permissions
+    if (runtime === undefined) return undefined
+    const viaRuntime = (
+      runtime as {
+        derivePersistableRule?: (tool: string, targets: PermissionTargets | undefined) => string | undefined
+      }
+    ).derivePersistableRule
+    if (typeof viaRuntime === "function") return viaRuntime.call(runtime, toolName, targets)
+    return derivePersistableRule(toolName, targets, this.#cwd)
+  }
+
+  #refusalMessage(toolName: string, choice: "decline" | "cancel"): string {
+    return choice === "decline"
+      ? `The user declined the request to run ${toolName}.`
+      : `The user cancelled the request to run ${toolName}.`
+  }
+
+  /** Persists an acceptAlways grant; a store failure warns but never blocks the approved run. */
+  async #persistGrant(rule: string): Promise<void> {
+    try {
+      await this.#permissions?.persistGrant(rule)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.#event(
+        "loop/persistGrant",
+        {},
+        { kind: "warning", payload: { message: `Could not persist the permission rule: ${message}` } },
+      )
+    }
+  }
+
+  /* ----------------------------------- plan mode ----------------------------------- */
+
+  /**
+   * enter_plan_mode is intrinsic: flips the permission runtime into plan mode with no approval,
+   * remembering the current mode so an approved exit_plan_mode can restore it.
+   */
+  #runEnterPlanMode(call: ToolCallBlock, itemId: string): ToolResultBlock {
+    const label = ENTER_PLAN_MODE_TOOL_NAME
+    const permissions = this.#permissions
+    if (permissions === undefined) {
+      return this.#failCall(itemId, call, label, PLAN_MODE_UNAVAILABLE_TEXT)
+    }
+    if (permissions.mode === "plan") {
+      return this.#failCall(itemId, call, label, "Already in plan mode.")
+    }
+    this.#modeBeforePlan = permissions.mode
+    permissions.setMode("plan")
+    this.#emitToolItem(itemId, label, ENTER_PLAN_MODE_RESULT_TEXT, "completed")
+    return { type: "tool_result", toolCallId: call.id, text: ENTER_PLAN_MODE_RESULT_TEXT }
+  }
+
+  /**
+   * exit_plan_mode is intrinsic: opens a plan-approval request whose detail is the plan text
+   * (from the input, falling back to .codesplash/plan.md). Approval restores the pre-plan mode;
+   * keepPlanning/cancel leave plan mode on with a non-error result.
+   */
+  async #runExitPlanMode(call: ToolCallBlock, itemId: string, signal: AbortSignal): Promise<ToolResultBlock> {
+    const label = EXIT_PLAN_MODE_TOOL_NAME
+    const permissions = this.#permissions
+    if (permissions === undefined) {
+      return this.#failCall(itemId, call, label, PLAN_MODE_UNAVAILABLE_TEXT)
+    }
+    if (permissions.mode !== "plan") {
+      return this.#failCall(itemId, call, label, "Not in plan mode; call enter_plan_mode first.")
+    }
+    const plan = planTextFromInput(call.input) ?? (await this.#readPlanFile())
+    if (plan === undefined) {
+      return this.#failCall(
+        itemId,
+        call,
+        label,
+        "No plan to review: pass `plan` or write the plan to .codesplash/plan.md first.",
+      )
+    }
+    const choice = await this.#awaitDecision(
+      "approval",
+      "Approve this plan?",
+      capPlanDetail(plan),
+      [...PLAN_APPROVAL_CHOICES],
+      itemId,
+      signal,
+    )
+    if (choice === "approve") {
+      permissions.setMode(this.#modeBeforePlan)
+      this.#emitToolItem(itemId, label, PLAN_APPROVED_RESULT_TEXT, "completed")
+      return { type: "tool_result", toolCallId: call.id, text: PLAN_APPROVED_RESULT_TEXT }
+    }
+    this.#emitToolItem(itemId, label, KEEP_PLANNING_RESULT_TEXT, "completed")
+    return { type: "tool_result", toolCallId: call.id, text: KEEP_PLANNING_RESULT_TEXT }
+  }
+
+  /** Contents of <cwd>/.codesplash/plan.md; undefined when missing, unreadable, or blank. */
+  async #readPlanFile(): Promise<string | undefined> {
+    try {
+      const text = await readFile(join(this.#cwd, PLAN_FILE_RELATIVE_PATH), { encoding: "utf8" })
+      return text.trim() === "" ? undefined : text
+    } catch {
+      return undefined
+    }
+  }
+
   /* ------------------------------------ requests ------------------------------------ */
 
   #awaitDecision(
@@ -860,12 +1159,28 @@ export class CodesplashLoop {
     choices: string[],
     itemId: string,
     signal: AbortSignal,
+    alwaysAsk?: boolean,
+    reason?: string,
   ): Promise<string> {
     const requestId = crypto.randomUUID()
     this.#event(
       "request/opened",
       { itemId, requestId },
-      { kind: "request.opened", payload: { id: requestId, requestKind, title, detail, choices } },
+      {
+        kind: "request.opened",
+        payload: {
+          id: requestId,
+          requestKind,
+          title,
+          detail,
+          choices,
+          // Tagged only when true: dangerous-floor approvals that auto-answering consumers
+          // (the headless runner) must decline even under --auto. The reason names the command
+          // class so a headless decline note can say what was refused.
+          ...(alwaysAsk === true ? { alwaysAsk: true } : {}),
+          ...(reason !== undefined ? { reason } : {}),
+        },
+      },
       true,
     )
     return new Promise<string>((resolve) => {
@@ -930,7 +1245,7 @@ export class CodesplashLoop {
   }
 
   #toolContext(signal: AbortSignal): ToolContext {
-    return { cwd: this.#cwd, policy: this.#policy, signal }
+    return { cwd: this.#cwd, policy: this.#policy, signal, permissions: this.#permissions }
   }
 
   #event(providerEvent: string, native: NativeEventIds, input: AgentEventInput, sensitive = false): void {
@@ -975,6 +1290,37 @@ function parseAskUserInput(input: unknown): { question: string; options: string[
   })
   return { question, options: labels }
 }
+
+/** The exit_plan_mode `plan` input when present and non-blank; a non-string plan is an input error. */
+function planTextFromInput(input: unknown): string | undefined {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return undefined
+  const { plan } = input as Record<string, unknown>
+  if (plan === undefined) return undefined
+  if (typeof plan !== "string") {
+    throw new ToolInputError("exit_plan_mode `plan` must be a string when provided.")
+  }
+  return plan.trim() === "" ? undefined : plan
+}
+
+/** Caps the plan-approval detail at 8KB, appending a truncation note when it was cut. */
+function capPlanDetail(plan: string): string {
+  if (Buffer.byteLength(plan, "utf8") <= PLAN_DETAIL_MAX_BYTES) return plan
+  const clipped = Buffer.from(plan, "utf8")
+    .subarray(0, PLAN_DETAIL_MAX_BYTES)
+    .toString("utf8")
+    .replace(/�+$/, "")
+  return `${clipped}\n[... plan truncated at ${PLAN_DETAIL_MAX_BYTES / 1024}KB for this approval ...]`
+}
+
+/* ----------------------------- persistable-rule derivation ----------------------------- */
+
+/**
+ * Rule an acceptAlways decision on the DEFAULT approval path would persist. Re-exported from
+ * the permission engine so the loop's fallback (runtimes without a derivePersistableRule
+ * method, e.g. scripted test doubles) certifies exactly the production derivation — physical
+ * (realpath) workspace containment included — rather than a diverging lexical copy.
+ */
+export { derivePersistableRule }
 
 /**
  * Deterministic JSON with object keys sorted at every depth, used to compare tool inputs for

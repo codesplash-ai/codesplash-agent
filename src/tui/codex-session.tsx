@@ -17,12 +17,13 @@ import type {
   EngineId,
   EngineModel,
   PendingRequest,
+  PermissionMode,
   ProjectPreflight,
   SessionController,
   SessionPolicy,
   TranscriptItem,
 } from "../core/index.ts"
-import { defaultSessionPolicy, suspendToShell } from "../core/index.ts"
+import { defaultSessionPolicy, isPermissionMode, suspendToShell } from "../core/index.ts"
 import { extractImageAttachments } from "./attachments.ts"
 import type { BrandPalette } from "./brand.ts"
 
@@ -82,7 +83,7 @@ export const slashCommandHelp: ReadonlyArray<{ command: string; description: str
   { command: "/resume", description: "Open the session picker" },
   { command: "/engine", description: "Back to the engine screen (welcome)" },
   { command: "/model [name]", description: "List models, or switch for the next turn" },
-  { command: "/permissions", description: "Show the sandbox and approval policy" },
+  { command: "/permissions", description: "Show permission mode, rules, sandbox, and trust" },
   { command: "/usage", description: "Show token usage, context left, and estimated cost" },
   { command: "/history", description: "Show where this session is stored" },
   { command: "/help", description: "Toggle this overlay (also F1)" },
@@ -93,7 +94,9 @@ export const keyboardHelpEntries: ReadonlyArray<{ keys: string; action: string }
   { keys: "Enter", action: "Send the prompt" },
   { keys: "Shift+Enter / Ctrl+J", action: "Insert a newline" },
   { keys: "Esc", action: "Interrupt the running turn / close overlay" },
-  { keys: "A · S · D · C", action: "Answer an approval request" },
+  { keys: "A · S · P · D · C", action: "Answer an approval request (P always allows)" },
+  { keys: "A · K", action: "Approve a plan / keep planning" },
+  { keys: "Shift+Tab", action: "Cycle permission mode (CodeSplash)" },
   { keys: "Ctrl+L", action: "Jump to the latest output" },
   { keys: "Ctrl+O", action: "Toggle the conversation outline" },
   { keys: "⌥↑ / ⌥↓", action: "Jump between outline sections" },
@@ -158,6 +161,139 @@ export const composerCursorStyle = {
 } satisfies CursorStyleOptions
 
 const composerCursorBlinkMs = 530
+
+/**
+ * Structural mirror of the permission engine's ParsedPermissionRule: the session screen renders
+ * rule views without importing the engine module, so the codesplash permission layer stays an
+ * optional dependency of this engine-agnostic file.
+ */
+export type PermissionRuleView = {
+  tool: string
+  pattern?: string
+  action: "allow" | "ask" | "deny"
+  source: "cli" | "project" | "user" | "grants" | "builtin"
+  raw: string
+}
+
+/** Permission-layer surface a codesplash session hands the screen; absent for other engines. */
+export type SessionPermissionsUi = {
+  /** True only when the session was launched with --bypass-approvals and the user confirmed. */
+  bypassAllowed: boolean
+  workspaceTrusted: boolean
+  /** Switches the live session's mode; the engine emits session.status with the new mode back. */
+  setMode(mode: PermissionMode): Promise<void>
+  /** Merged rule list built from the same inputs the session was opened with. */
+  loadRules(): Promise<PermissionRuleView[]>
+  /** Deletes a remembered grant; absent when no grants file is configured for this session. */
+  removeGrant?(rule: string): Promise<void>
+}
+
+/** Shift+Tab cycle order; "bypass" participates only when the launch flag allowed it. */
+export const permissionModeCycle: readonly PermissionMode[] = ["default", "accept-edits", "plan", "bypass"]
+
+export function nextPermissionMode(current: PermissionMode, bypassAllowed: boolean): PermissionMode {
+  const order = bypassAllowed ? permissionModeCycle : permissionModeCycle.filter((mode) => mode !== "bypass")
+  // An unknown current mode (e.g. "bypass" after the flag was declined) restarts at "default".
+  return order[(order.indexOf(current) + 1) % order.length] ?? "default"
+}
+
+/** Live mode: the last session.status wins; before any status the opening policy does. */
+export function currentPermissionMode(state: AppViewState, policy: SessionPolicy): PermissionMode {
+  if (state.permissionMode !== undefined && isPermissionMode(state.permissionMode)) {
+    return state.permissionMode
+  }
+  return policy.permissionMode ?? "default"
+}
+
+export function permissionModeCycleHint(bypassAllowed: boolean): string {
+  return `Shift+Tab cycles default → accept-edits → plan${bypassAllowed ? " → bypass" : ""}`
+}
+
+/** Status-line badge text; "default" renders no badge at all. */
+export function permissionModeBadgeLabel(mode: PermissionMode): string | undefined {
+  if (mode === "plan") return "PLAN"
+  if (mode === "accept-edits") return "ACCEPT EDITS"
+  if (mode === "bypass") return "BYPASS"
+  return undefined
+}
+
+/** BYPASS uses the same inverse alarm styling as FULL ACCESS; the other modes stay accent text. */
+export function PermissionModeBadge({ mode, palette }: { mode: PermissionMode; palette: BrandPalette }) {
+  const label = permissionModeBadgeLabel(mode)
+  if (!label) return null
+  if (mode === "bypass") {
+    return (
+      <text fg={palette.background} bg={palette.destructive}>
+        <b> {label} </b>
+      </text>
+    )
+  }
+  return (
+    <text fg={palette.accent}>
+      <b>{label}</b>
+    </text>
+  )
+}
+
+export function permissionTrustLabel(trusted: boolean): string {
+  return trusted ? "trusted" : "untrusted — project rule files and .codesplash/permissions.toml are ignored"
+}
+
+/** Overlay source tags; "builtin" renders as "built-in". */
+export function permissionSourceTag(source: PermissionRuleView["source"]): string {
+  return source === "builtin" ? "built-in" : source
+}
+
+export type PermissionRuleRow = { text: string; isGrant: boolean; selected: boolean }
+export type PermissionRuleSection = { header: string; rows: PermissionRuleRow[] }
+
+/**
+ * Sorts the merged rules into allow/ask/deny sections for the /permissions overlay. Only
+ * remembered grants are selectable; selectedGrant indexes them in section order.
+ */
+export function buildPermissionRuleSections(
+  rules: PermissionRuleView[],
+  selectedGrant: number,
+): PermissionRuleSection[] {
+  let grantIndex = 0
+  return (["allow", "ask", "deny"] as const).map((action) => {
+    const matching = rules.filter((rule) => rule.action === action)
+    return {
+      header: `${action.charAt(0).toUpperCase()}${action.slice(1)} (${matching.length})`,
+      rows: matching.map((rule) => {
+        const isGrant = rule.source === "grants"
+        const selected = isGrant && grantIndex === selectedGrant
+        if (isGrant) grantIndex += 1
+        return {
+          text: `${rule.raw}  [${permissionSourceTag(rule.source)}]`,
+          isGrant,
+          selected,
+        }
+      }),
+    }
+  })
+}
+
+/**
+ * Deletes the currently selected remembered grant, reloads the merged rules, and clamps the
+ * selection. Removal only affects new sessions — the note travels back for the overlay.
+ */
+export async function deleteSelectedGrant(
+  ui: Pick<SessionPermissionsUi, "loadRules" | "removeGrant">,
+  rules: PermissionRuleView[],
+  selectedGrant: number,
+): Promise<{ rules: PermissionRuleView[]; selectedGrant: number; notice?: string }> {
+  const grant = rules.filter((rule) => rule.source === "grants")[selectedGrant]
+  if (!grant || !ui.removeGrant) return { rules, selectedGrant }
+  await ui.removeGrant(grant.raw)
+  const refreshed = await ui.loadRules()
+  const remaining = refreshed.filter((rule) => rule.source === "grants").length
+  return {
+    rules: refreshed,
+    selectedGrant: Math.max(0, Math.min(selectedGrant, remaining - 1)),
+    notice: `Removed ${grant.raw} (applies to new sessions)`,
+  }
+}
 
 type LatestScrollable = Pick<ScrollBoxRenderable, "scrollTo" | "stickyScroll" | "stickyStart">
 type SectionScrollable = Pick<ScrollBoxRenderable, "scrollChildIntoView" | "stickyScroll">
@@ -240,9 +376,15 @@ type ModelOverlayState = {
   error?: string
 }
 
+/** Rule-list portion of the /permissions overlay; absent for engines without the layer. */
+type PermissionsOverlayRules =
+  | { phase: "loading" }
+  | { phase: "error"; message: string }
+  | { phase: "ready"; rules: PermissionRuleView[]; selectedGrant: number; notice?: string }
+
 type OverlayState =
   | { kind: "help" }
-  | { kind: "permissions" }
+  | { kind: "permissions"; rules?: PermissionsOverlayRules }
   | { kind: "usage" }
   | { kind: "history" }
   | { kind: "models"; state: ModelOverlayState }
@@ -256,6 +398,8 @@ type CodexSessionAppProps = {
   historyLocation?: string
   /** Engine shown in the status line and transcript headers; the flow itself is engine-agnostic. */
   engine?: EngineId
+  /** First-party permission layer surface; only codesplash sessions provide one. */
+  permissions?: SessionPermissionsUi
   onAction(action: CodexSessionAction): void
 }
 
@@ -266,6 +410,7 @@ export function CodexSessionApp({
   policy = defaultSessionPolicy,
   historyLocation,
   engine = "codex",
+  permissions,
   onAction,
 }: CodexSessionAppProps) {
   const renderer = useRenderer()
@@ -425,6 +570,43 @@ export function CodexSessionApp({
     )
   }, [controller])
 
+  const cyclePermissionMode = useCallback(() => {
+    // Engines without a first-party permission layer ignore the key entirely.
+    if (!permissions) return
+    if (state.turnStatus === "running") {
+      setCommandError("Permission mode is locked while a turn runs — interrupt or wait, then Shift+Tab")
+      return
+    }
+    const next = nextPermissionMode(currentPermissionMode(state, policy), permissions.bypassAllowed)
+    void runCommand(() => permissions.setMode(next))
+  }, [permissions, policy, runCommand, state])
+
+  const openPermissionsOverlay = useCallback(() => {
+    if (!permissions) {
+      // Engine-agnostic sessions (codex) keep the static sandbox/approvals view.
+      setOverlay({ kind: "permissions" })
+      return
+    }
+    setOverlay({ kind: "permissions", rules: { phase: "loading" } })
+    permissions.loadRules().then(
+      (rules) =>
+        setOverlay((current) =>
+          current?.kind === "permissions"
+            ? { kind: "permissions", rules: { phase: "ready", rules, selectedGrant: 0 } }
+            : current,
+        ),
+      (error) =>
+        setOverlay((current) =>
+          current?.kind === "permissions"
+            ? {
+                kind: "permissions",
+                rules: { phase: "error", message: error instanceof Error ? error.message : String(error) },
+              }
+            : current,
+        ),
+    )
+  }, [permissions])
+
   const runSlashCommand = useCallback(
     (command: ParsedSlashCommand) => {
       switch (command.name) {
@@ -448,7 +630,7 @@ export function CodexSessionApp({
           onAction("quit")
           return
         case "permissions":
-          setOverlay({ kind: "permissions" })
+          openPermissionsOverlay()
           return
         case "usage":
           setOverlay({ kind: "usage" })
@@ -462,7 +644,7 @@ export function CodexSessionApp({
           return
       }
     },
-    [controller, historyLocation, onAction, openModelOverlay, runCommand],
+    [controller, historyLocation, onAction, openModelOverlay, openPermissionsOverlay, runCommand],
   )
 
   useKeyboard((key) => {
@@ -484,11 +666,48 @@ export function CodexSessionApp({
       return
     }
 
+    // Shift+Tab cycles the permission mode even with the /permissions overlay open, so the
+    // overlay's mode line updates live. Terminals encode it as CSI Z, parsed as shift+"tab".
+    if (key.name === "tab" && key.shift) {
+      key.preventDefault()
+      cyclePermissionMode()
+      return
+    }
+
     if (overlay) {
       if (key.name === "escape") {
         key.preventDefault()
         setOverlay(undefined)
         return
+      }
+      if (overlay.kind === "permissions" && overlay.rules?.phase === "ready" && permissions) {
+        const ready = overlay.rules
+        const grantCount = ready.rules.filter((rule) => rule.source === "grants").length
+        if (grantCount > 0 && (key.name === "up" || key.name === "down")) {
+          key.preventDefault()
+          const direction = key.name === "up" ? -1 : 1
+          setOverlay({
+            kind: "permissions",
+            rules: {
+              ...ready,
+              selectedGrant: Math.max(0, Math.min(grantCount - 1, ready.selectedGrant + direction)),
+            },
+          })
+          return
+        }
+        if (key.name === "d" && grantCount > 0 && permissions.removeGrant) {
+          key.preventDefault()
+          void deleteSelectedGrant(permissions, ready.rules, ready.selectedGrant).then(
+            (next) =>
+              setOverlay((current) =>
+                current?.kind === "permissions" && current.rules?.phase === "ready"
+                  ? { kind: "permissions", rules: { phase: "ready", ...next } }
+                  : current,
+              ),
+            (error) => setCommandError(error instanceof Error ? error.message : String(error)),
+          )
+          return
+        }
       }
       if (overlay.kind === "models" && !overlay.state.loading && overlay.state.models.length > 0) {
         if (key.name === "up" || key.name === "down") {
@@ -720,6 +939,12 @@ export function CodexSessionApp({
             {context ? ` · ${context}` : ""} ·{" "}
           </text>
           <PolicyBadge policy={policy} palette={palette} />
+          {permissions && permissionModeBadgeLabel(currentPermissionMode(state, policy)) ? (
+            <>
+              <text fg={palette.accent}> · </text>
+              <PermissionModeBadge mode={currentPermissionMode(state, policy)} palette={palette} />
+            </>
+          ) : null}
           {rateLimit ? (
             <text fg={rateLimit.critical ? palette.destructive : palette.accent}> · {rateLimit.text}</text>
           ) : null}
@@ -733,6 +958,7 @@ export function CodexSessionApp({
         policy={policy}
         historyLocation={historyLocation}
         state={state}
+        permissions={permissions}
       />
       <Approval request={overlay ? undefined : state.pendingRequest} palette={palette} />
     </box>
@@ -745,12 +971,14 @@ function SessionOverlay({
   policy,
   historyLocation,
   state,
+  permissions,
 }: {
   overlay: OverlayState | undefined
   palette: BrandPalette
   policy: SessionPolicy
   historyLocation?: string
   state: AppViewState
+  permissions?: SessionPermissionsUi
 }) {
   if (!overlay) return null
 
@@ -794,18 +1022,92 @@ function SessionOverlay({
 
   if (overlay.kind === "permissions") {
     const danger = policy.sandbox === "danger-full-access"
+
+    // Engine-agnostic sessions (codex) keep the old static sandbox/approvals view.
+    if (!permissions) {
+      return (
+        <box title="Permissions · Esc closes" style={frame}>
+          <box style={{ height: 1, flexDirection: "row" }}>
+            <text fg={palette.foreground}>Sandbox: </text>
+            <PolicyBadge policy={policy} palette={palette} />
+          </box>
+          <text fg={palette.foreground}>Approvals: {policy.approvalPolicy}</text>
+          <text fg={danger ? palette.destructive : palette.muted} style={{ marginTop: 1 }}>
+            {danger
+              ? "No sandbox is active for this session. Every approval is final."
+              : "Change with --sandbox/--full-access flags or [codex] config; applies to the next session."}
+          </text>
+        </box>
+      )
+    }
+
+    const mode = currentPermissionMode(state, policy)
+    const rules = overlay.rules
+    const hasGrants = rules?.phase === "ready" && rules.rules.some((rule) => rule.source === "grants")
     return (
       <box title="Permissions · Esc closes" style={frame}>
+        <box style={{ height: 1, flexDirection: "row" }}>
+          <text fg={palette.foreground}>Mode: {mode} </text>
+          <PermissionModeBadge mode={mode} palette={palette} />
+        </box>
+        <text fg={palette.muted}>{permissionModeCycleHint(permissions.bypassAllowed)}</text>
         <box style={{ height: 1, flexDirection: "row" }}>
           <text fg={palette.foreground}>Sandbox: </text>
           <PolicyBadge policy={policy} palette={palette} />
         </box>
         <text fg={palette.foreground}>Approvals: {policy.approvalPolicy}</text>
-        <text fg={danger ? palette.destructive : palette.muted} style={{ marginTop: 1 }}>
-          {danger
-            ? "No sandbox is active for this session. Every approval is final."
-            : "Change with --sandbox/--full-access flags or [codex] config; applies to the next session."}
+        <text fg={permissions.workspaceTrusted ? palette.foreground : palette.destructive}>
+          Workspace trust: {permissionTrustLabel(permissions.workspaceTrusted)}
         </text>
+        {danger ? (
+          <text fg={palette.destructive}>
+            No sandbox is active for this session. Every approval is final.
+          </text>
+        ) : null}
+        {rules?.phase === "loading" ? (
+          <text fg={palette.muted} style={{ marginTop: 1 }}>
+            Loading rules…
+          </text>
+        ) : null}
+        {rules?.phase === "error" ? (
+          <text fg={palette.destructive} style={{ marginTop: 1 }}>
+            {rules.message}
+          </text>
+        ) : null}
+        {rules?.phase === "ready" ? (
+          <>
+            {buildPermissionRuleSections(rules.rules, rules.selectedGrant).map((section) => (
+              <box key={section.header} style={{ marginTop: 1 }}>
+                <text fg={palette.accent}>
+                  <b>{section.header}</b>
+                </text>
+                {section.rows.length === 0 ? (
+                  <text fg={palette.muted}> (none)</text>
+                ) : (
+                  section.rows.map((row, index) => (
+                    <text
+                      key={`${index}:${row.text}`}
+                      fg={row.selected ? palette.action : palette.foreground}
+                    >
+                      {row.selected ? "› " : "  "}
+                      {row.text}
+                    </text>
+                  ))
+                )}
+              </box>
+            ))}
+            {rules.notice ? (
+              <text fg={palette.accent} style={{ marginTop: 1 }}>
+                {rules.notice}
+              </text>
+            ) : null}
+            {hasGrants && permissions.removeGrant ? (
+              <text fg={palette.muted} style={{ marginTop: 1 }}>
+                ↑↓ select a remembered grant · d deletes (applies to new sessions)
+              </text>
+            ) : null}
+          </>
+        ) : null}
       </box>
     )
   }
@@ -1066,6 +1368,7 @@ export function PolicyBadge({ policy, palette }: { policy: SessionPolicy; palett
 
 function Approval({ request, palette }: { request?: PendingRequest; palette: BrandPalette }) {
   if (!request) return null
+  const tag = approvalTagLine(request)
 
   return (
     <box
@@ -1084,6 +1387,11 @@ function Approval({ request, palette }: { request?: PendingRequest; palette: Bra
         padding: 1,
       }}
     >
+      {tag ? (
+        <text fg={palette.destructive}>
+          <b>{tag}</b>
+        </text>
+      ) : null}
       {request.detail ? <text fg={palette.foreground}>{request.detail}</text> : null}
       {request.requestKind === "user-input" ? (
         <>
@@ -1095,10 +1403,42 @@ function Approval({ request, palette }: { request?: PendingRequest; palette: Bra
           <text fg={palette.action}>1-{request.choices.length} answer · Esc dismiss</text>
         </>
       ) : (
-        <text fg={palette.action}>A Accept · S Session · D Decline · C Cancel</text>
+        <text fg={palette.action}>{approvalKeyHint(request)}</text>
       )}
     </box>
   )
+}
+
+/** Tag for dangerous-floor approvals: they always ask and can never be remembered. */
+export function approvalTagLine(request: PendingRequest): string | undefined {
+  return request.alwaysAsk ? "always asks — dangerous command; cannot be remembered" : undefined
+}
+
+/** Key + label for each approval choice the engines can offer; rendered in choice order. */
+export const approvalChoiceKeyLabels: Readonly<Record<string, string>> = {
+  accept: "A Accept",
+  acceptForSession: "S Session",
+  acceptAlways: "P Always allow (persists)",
+  approve: "A Approve",
+  keepPlanning: "K Keep planning",
+  decline: "D Decline",
+  cancel: "C Cancel",
+}
+
+/** Rendered key hint for approval-kind requests, built from the request's actual choices. */
+export function approvalKeyHint(request: PendingRequest): string {
+  const labels = request.choices.map((choice) => approvalChoiceKeyLabels[choice] ?? choice)
+  return [...labels, "Esc dismiss"].join(" · ")
+}
+
+/** Keys mapped to the choices they may resolve; only choices the request offers are accepted. */
+const approvalKeyChoices: Readonly<Record<string, readonly string[]>> = {
+  a: ["accept", "approve"],
+  s: ["acceptForSession"],
+  p: ["acceptAlways"],
+  d: ["decline"],
+  k: ["keepPlanning"],
+  c: ["cancel"],
 }
 
 export function approvalChoiceForKey(name: string, request: PendingRequest): string | undefined {
@@ -1110,17 +1450,7 @@ export function approvalChoiceForKey(name: string, request: PendingRequest): str
     if (!/^[1-9]$/.test(name)) return undefined
     return request.choices[Number(name) - 1]
   }
-  const requested =
-    name === "a"
-      ? "accept"
-      : name === "s"
-        ? "acceptForSession"
-        : name === "d"
-          ? "decline"
-          : name === "c"
-            ? "cancel"
-            : undefined
-  return requested && request.choices.includes(requested) ? requested : undefined
+  return approvalKeyChoices[name]?.find((choice) => request.choices.includes(choice))
 }
 
 function statusHelp(state: AppViewState, supportsReconnect: boolean): string {

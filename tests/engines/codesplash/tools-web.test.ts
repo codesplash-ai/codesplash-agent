@@ -1,6 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import type { SessionPolicy } from "../../../src/core/index.ts"
-import { type ToolContext, ToolInputError } from "../../../src/engines/codesplash/contracts.ts"
+import {
+  type PermissionDecision,
+  type PermissionRuntime,
+  type ToolContext,
+  ToolInputError,
+} from "../../../src/engines/codesplash/contracts.ts"
 import { builtinTools } from "../../../src/engines/codesplash/tools/registry.ts"
 import {
   blockedAddressClass,
@@ -109,6 +114,8 @@ beforeAll(() => {
           return new Response("", { status: 302 })
         case "/redirect/private":
           return new Response("", { status: 302, headers: { location: "http://private.test/secret" } })
+        case "/redirect/other-host":
+          return new Response("", { status: 302, headers: { location: "http://other.test/page.html" } })
         case "/ddg":
           lastSearchQuery = url.searchParams.get("q") ?? undefined
           return text(ddgHtml(12), "text/html")
@@ -140,6 +147,20 @@ function abortedContext(): ToolContext {
   const controller = new AbortController()
   controller.abort()
   return contextFor(onRequest, controller.signal)
+}
+
+/** Minimal PermissionRuntime whose decide() answers from a per-host table (default otherwise). */
+function rulesRuntime(decideHost: (host: string) => PermissionDecision | undefined): PermissionRuntime {
+  return {
+    mode: "default",
+    setMode: () => {},
+    decide: (toolName, targets) =>
+      (toolName === "web_fetch" && targets?.urlHost !== undefined
+        ? decideHost(targets.urlHost)
+        : undefined) ?? { kind: "default" },
+    isReadDenied: () => undefined,
+    persistGrant: async () => {},
+  }
 }
 
 type FetchHarness = {
@@ -214,6 +235,22 @@ describe("web_fetch metadata and permissions", () => {
     const tool = createWebFetchTool()
     expect(tool.permission({ url: "https://fixture.test/", timeoutSeconds: 500 }, contextFor())).toEqual({
       kind: "none",
+    })
+  })
+
+  test("permissionTargets reports the URL host and throws ToolInputError on a bad URL", () => {
+    const tool = createWebFetchTool()
+    expect(tool.permissionTargets?.({ url: "https://fixture.test:8443/page.html" }, contextFor())).toEqual({
+      urlHost: "fixture.test",
+    })
+    expect(() => tool.permissionTargets?.({ url: "not a url" }, contextFor())).toThrow(ToolInputError)
+    expect(() => tool.permissionTargets?.({}, contextFor())).toThrow(ToolInputError)
+  })
+
+  test("permissionTargets strips a trailing-dot FQDN so host rules cannot be evaded", () => {
+    const tool = createWebFetchTool()
+    expect(tool.permissionTargets?.({ url: "https://evil.test./x" }, contextFor())).toEqual({
+      urlHost: "evil.test",
     })
   })
 
@@ -452,6 +489,43 @@ describe("web_fetch redirects", () => {
     expect(outcome.isError).toBe(true)
     expect(outcome.text).toContain("redirects")
     expect(fetchCalls).toHaveLength(1 + MAX_REDIRECT_HOPS)
+  })
+
+  test("a redirect hop to a rule-denied host is refused without fetching it", async () => {
+    const { tool, fetchCalls } = makeFetchHarness()
+    const context: ToolContext = {
+      ...contextFor(),
+      permissions: rulesRuntime((host) =>
+        host === "other.test"
+          ? { kind: "deny", reason: 'deny rule "web_fetch(other.test)" (user)' }
+          : undefined,
+      ),
+    }
+    const outcome = await tool.run({ url: "http://fixture.test/redirect/other-host" }, context)
+    expect(outcome.isError).toBe(true)
+    expect(outcome.text).toContain("refused a redirect")
+    expect(outcome.text).toContain('deny rule "web_fetch(other.test)" (user)')
+    // Only the redirecting URL itself was fetched, never the denied host.
+    expect(fetchCalls).toEqual([`http://${PUBLIC_ADDRESS}/redirect/other-host`])
+  })
+
+  test("a redirect hop to a host that would require approval is refused too", async () => {
+    const { tool } = makeFetchHarness()
+    const context: ToolContext = {
+      ...contextFor(),
+      permissions: rulesRuntime((host) => (host === "other.test" ? { kind: "ask" } : undefined)),
+    }
+    const outcome = await tool.run({ url: "http://fixture.test/redirect/other-host" }, context)
+    expect(outcome.isError).toBe(true)
+    expect(outcome.text).toContain("requires approval")
+  })
+
+  test("redirect hops without matching rules follow as before", async () => {
+    const { tool } = makeFetchHarness()
+    const context: ToolContext = { ...contextFor(), permissions: rulesRuntime(() => undefined) }
+    const outcome = await tool.run({ url: "http://fixture.test/redirect/a" }, context)
+    expect(outcome.isError).toBeUndefined()
+    expect(outcome.text).toContain("Main Title")
   })
 
   test("a redirect without a Location header is an isError result", async () => {

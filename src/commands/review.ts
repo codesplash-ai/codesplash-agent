@@ -5,10 +5,14 @@
  * message, exit 1), and only caller mistakes throw UsageError.
  */
 import {
+  type ConfigPermissionMode,
   configDirectory,
   configFilePath,
+  dataDirectory,
   type EngineDriver,
   inspectProject,
+  isConfigPermissionMode,
+  isValidPermissionRule,
   loadConfig,
   registerChildProcess,
 } from "../core/index.ts"
@@ -35,9 +39,44 @@ export type ReviewCommand = {
   model?: string
   outputFormat: ReviewOutputFormat
   auto: boolean
+  /** `--permission-mode`: explicit permission mode for the review turn. */
+  permissionMode?: ConfigPermissionMode
+  /** Repeatable `--allow`/`--ask`/`--deny`: CLI-tier permission rules. */
+  allowRules: string[]
+  askRules: string[]
+  denyRules: string[]
+  /** `--trust`: persist a trusted decision for the workspace before the review runs. */
+  trust: boolean
 }
 
 /* -------------------------------------- parsing -------------------------------------- */
+
+/**
+ * Same permission-rule grammar check the config loader and cli.ts use (kept local: command
+ * modules never import cli.ts). Violations are usage errors so they exit 2 at parse time.
+ */
+function checkPermissionRule(flag: string, value: string | undefined): string {
+  if (value === undefined || value === "") {
+    throw new UsageError(`${flag} expects a permission rule like "bash(git status *)" or "read_file"`)
+  }
+  if (!isValidPermissionRule(value)) {
+    throw new UsageError(
+      `${flag}: invalid rule "${value}" — expected a tool name with an optional (pattern), e.g. bash(git status *)`,
+    )
+  }
+  return value
+}
+
+/** Parses a `--permission-mode` value; "bypass" is deliberately not reachable via this flag. */
+function checkPermissionModeValue(value: string | undefined): ConfigPermissionMode {
+  if (value !== undefined && isConfigPermissionMode(value)) return value
+  if (value === "bypass") {
+    throw new UsageError(
+      "--permission-mode cannot select bypass; bypass requires the --bypass-approvals launch flag each session",
+    )
+  }
+  throw new UsageError(`--permission-mode expects plan, default, or accept-edits, got ${value ?? "nothing"}`)
+}
 
 export function parseReviewArguments(args: string[]): ReviewCommand {
   const modes: ReviewMode[] = []
@@ -45,6 +84,11 @@ export function parseReviewArguments(args: string[]): ReviewCommand {
   let model: string | undefined
   let outputFormat: ReviewOutputFormat = "text"
   let auto = false
+  let permissionMode: ConfigPermissionMode | undefined
+  let trust = false
+  const allowRules: string[] = []
+  const askRules: string[] = []
+  const denyRules: string[] = []
 
   for (let index = 0; index < args.length; index++) {
     const argument = args[index] as string
@@ -72,6 +116,24 @@ export function parseReviewArguments(args: string[]): ReviewCommand {
       outputFormat = value
     } else if (argument === "--auto") {
       auto = true
+    } else if (argument === "--permission-mode" || argument.startsWith("--permission-mode=")) {
+      const value = argument.includes("=") ? argument.slice("--permission-mode=".length) : args[++index]
+      permissionMode = checkPermissionModeValue(value)
+    } else if (argument === "--allow" || argument.startsWith("--allow=")) {
+      const value = argument.includes("=") ? argument.slice("--allow=".length) : args[++index]
+      allowRules.push(checkPermissionRule("--allow", value))
+    } else if (argument === "--ask" || argument.startsWith("--ask=")) {
+      const value = argument.includes("=") ? argument.slice("--ask=".length) : args[++index]
+      askRules.push(checkPermissionRule("--ask", value))
+    } else if (argument === "--deny" || argument.startsWith("--deny=")) {
+      const value = argument.includes("=") ? argument.slice("--deny=".length) : args[++index]
+      denyRules.push(checkPermissionRule("--deny", value))
+    } else if (argument === "--trust") {
+      trust = true
+    } else if (argument === "--bypass-approvals") {
+      throw new UsageError(
+        "--bypass-approvals: review approves with --auto; dangerous commands are always declined headlessly",
+      )
     } else if (argument.startsWith("-")) {
       throw new UsageError(`Unknown option ${argument} for review`)
     } else if (path === undefined) {
@@ -85,7 +147,18 @@ export function parseReviewArguments(args: string[]): ReviewCommand {
     throw new UsageError("--uncommitted, --base, and --commit are mutually exclusive; pass at most one")
   }
 
-  return { path, mode: modes[0] ?? { kind: "uncommitted" }, model, outputFormat, auto }
+  return {
+    path,
+    mode: modes[0] ?? { kind: "uncommitted" },
+    model,
+    outputFormat,
+    auto,
+    permissionMode,
+    allowRules,
+    askRules,
+    denyRules,
+    trust,
+  }
 }
 
 /* ----------------------------------- git collection ----------------------------------- */
@@ -286,7 +359,14 @@ export async function runReviewCommand(
 
   // Reviews never mutate the workspace: the read-only sandbox refuses writes at the tool layer,
   // and on-request approvals keep bash gated behind the runner's accept/decline handling. The
-  // default driver reuses this command's config load, -c overrides included.
+  // default driver reuses this command's config load, -c overrides included. Permission flags
+  // pass straight through to the runner; the policy deliberately carries no permissionMode
+  // fallback, so without --permission-mode a review runs in "default" mode regardless of the
+  // configured [permissions].mode (a config-wide plan mode must not hijack reviews).
+  const permissionOverrides =
+    command.allowRules.length + command.askRules.length + command.denyRules.length > 0
+      ? { allow: command.allowRules, ask: command.askRules, deny: command.denyRules }
+      : undefined
   return runHeadless({
     prompt,
     cwd: project.cwd,
@@ -294,6 +374,10 @@ export async function runReviewCommand(
     policy: { sandbox: "read-only", approvalPolicy: "on-request" },
     autoApprove: command.auto,
     outputFormat: command.outputFormat,
+    permissionModeOverride: command.permissionMode,
+    permissionOverrides,
+    trustWorkspace: command.trust,
+    trustDataDir: dataDirectory(env),
     driver: overrides.driver ?? new CodesplashDriver({ config }),
     stdout: overrides.stdout,
     stderr: overrides.stderr,

@@ -291,3 +291,14 @@ describe("bash tool credential hygiene", () => {
     }
   })
 })
+
+describe("bash permissionTargets", () => {
+  test("reports the command line and throws ToolInputError on malformed input", () => {
+    const context = makeContext()
+    expect(bashTool.permissionTargets?.({ command: "git status --short" }, context)).toEqual({
+      command: "git status --short",
+    })
+    expect(() => bashTool.permissionTargets?.({}, context)).toThrow(ToolInputError)
+    expect(() => bashTool.permissionTargets?.({ command: "   " }, context)).toThrow(ToolInputError)
+  })
+})

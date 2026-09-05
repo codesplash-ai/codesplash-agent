@@ -4,7 +4,10 @@
  * composes them. Keep this file free of dependencies beyond core types and platform builtins so
  * modules can be built and tested in isolation.
  */
-import type { SessionPolicy } from "../../core/index.ts"
+import type { PermissionMode, SessionPolicy } from "../../core/index.ts"
+
+/** Re-exported so permission modules can stay contracts-only importers. */
+export type { PermissionMode }
 
 /* ---------------------------------- providers ---------------------------------- */
 
@@ -144,12 +147,54 @@ export type RetryOptions = {
   signal?: AbortSignal
 }
 
+/* --------------------------------- permissions --------------------------------- */
+
+/** What a tool call would touch, extracted before it runs so rules can be matched against it. */
+export type PermissionTargets = {
+  /** The shell command line (bash tool). */
+  command?: string
+  /** RESOLVED ABSOLUTE paths the call reads or mutates (file tools). */
+  paths?: string[]
+  /** Hostname of the URL being fetched (web_fetch). */
+  urlHost?: string
+}
+
+/** Verdict from the permission engine for one tool call, evaluated before the call runs. */
+export type PermissionDecision =
+  | { kind: "allow"; reason: string }
+  | { kind: "deny"; reason: string }
+  | {
+      kind: "ask"
+      /** True for dangerous-floor approvals: never auto-approved, never persistable. */
+      alwaysAsk?: boolean
+      /** Rule an acceptAlways decision would persist; absent → no "always allow" choice. */
+      persistableRule?: string
+      reason?: string
+    }
+  /** Fall through to the tool's own permission() flow, unchanged. */
+  | { kind: "default" }
+
+/**
+ * The permission engine as the loop and tools consume it. Implemented by
+ * engines/codesplash/permissions.ts; kept here so contracts-only modules can depend on it.
+ */
+export interface PermissionRuntime {
+  readonly mode: PermissionMode
+  setMode(mode: PermissionMode): void
+  decide(toolName: string, targets: PermissionTargets | undefined, isReadOnly: boolean): PermissionDecision
+  /** Read-path denial for grep content access; reason string when denied. */
+  isReadDenied(resolvedPath: string, toolName: string): string | undefined
+  persistGrant(rule: string): Promise<void>
+}
+
 /* ------------------------------------ tools ------------------------------------ */
 
 export type ToolContext = {
   cwd: string
   policy: SessionPolicy
   signal: AbortSignal
+  /** Permission engine for this session; absent when no runtime was injected (e.g. tests). */
+  permissions?: PermissionRuntime
 }
 
 export type ToolPermission =
@@ -187,6 +232,11 @@ export interface HarnessTool {
   isReadOnly(input: unknown): boolean
   /** Permission required for this call under the given policy; evaluated before every call. */
   permission(input: unknown, context: ToolContext): ToolPermission
+  /**
+   * What this call would touch, for permission-rule matching. May throw ToolInputError; the
+   * loop then falls through to the default path and lets run() surface the input error.
+   */
+  permissionTargets?(input: unknown, context: ToolContext): PermissionTargets
   run(input: unknown, context: ToolContext): Promise<ToolOutcome>
 }
 
@@ -204,6 +254,13 @@ export class ToolInputError extends Error {
  */
 export const ASK_USER_TOOL_NAME = "ask_user"
 
+/**
+ * The plan-mode tools are intrinsic like ask_user: their specs come from the registry, but the
+ * loop executes them itself (mode switch, plan-approval request) and never calls run().
+ */
+export const ENTER_PLAN_MODE_TOOL_NAME = "enter_plan_mode"
+export const EXIT_PLAN_MODE_TOOL_NAME = "exit_plan_mode"
+
 /* -------------------------------- prompt assembly -------------------------------- */
 
 export type SystemPromptOptions = {
@@ -211,6 +268,10 @@ export type SystemPromptOptions = {
   model: ModelInfo
   policy: SessionPolicy
   toolNames: string[]
+  /** Permission mode the session opened in (or switched to); shapes the plan-mode section. */
+  permissionMode?: PermissionMode
+  /** Absent means trusted; false skips project rule discovery and says why in the prompt. */
+  workspaceTrusted?: boolean
 }
 
 export type ProjectRulesFile = {

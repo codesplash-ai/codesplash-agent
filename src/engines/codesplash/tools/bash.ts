@@ -3,6 +3,7 @@ import { registerChildProcess } from "../../../core/index.ts"
 import { spawnEnvWithoutStoredCredentials } from "../auth.ts"
 import {
   type HarnessTool,
+  type PermissionTargets,
   type ToolContext,
   ToolInputError,
   type ToolOutcome,
@@ -168,6 +169,10 @@ export const bashTool: HarnessTool = {
 
   isReadOnly(): boolean {
     return false
+  },
+
+  permissionTargets(input: unknown): PermissionTargets {
+    return { command: parseInput(input).command }
   },
 
   permission(input: unknown, context: ToolContext): ToolPermission {

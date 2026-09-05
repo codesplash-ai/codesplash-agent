@@ -36,7 +36,10 @@ export type TurnStatus = "idle" | "running" | "completed" | "interrupted" | "fai
 export type ItemStatus = "running" | "completed" | "failed"
 
 export type AgentEvent =
-  | EventOf<"session.status", { status: SessionStatus; detail?: string; model?: string }>
+  | EventOf<
+      "session.status",
+      { status: SessionStatus; detail?: string; model?: string; permissionMode?: string }
+    >
   | EventOf<"turn.started", Record<string, never>>
   | EventOf<"turn.completed", { status: Exclude<TurnStatus, "idle" | "running"> }>
   | EventOf<"user.message", { id: string; text: string }>
@@ -49,7 +52,23 @@ export type AgentEvent =
   | EventOf<"diff.updated", { id: string; path?: string; unified: string }>
   | EventOf<
       "request.opened",
-      { id: string; requestKind: "approval" | "user-input"; title: string; detail: string; choices: string[] }
+      {
+        id: string
+        requestKind: "approval" | "user-input"
+        title: string
+        detail: string
+        choices: string[]
+        /**
+         * True only for dangerous-floor approvals: consumers that auto-answer (the headless
+         * runner) must decline these even under --auto, and no remember-choice is offered.
+         */
+        alwaysAsk?: boolean
+        /**
+         * Why the permission engine asked (e.g. the dangerous command class); headless decline
+         * notes print it so the user learns what was refused and why.
+         */
+        reason?: string
+      }
     >
   | EventOf<"request.resolved", { id: string; decision: string }>
   | EventOf<

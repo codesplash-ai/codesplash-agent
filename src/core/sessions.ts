@@ -21,6 +21,8 @@ export type SessionMeta = {
   /** Codex-only; Claude launches own their permission model inside the official CLI. */
   sandbox?: SandboxMode
   approvalPolicy?: ApprovalPolicy
+  /** Codesplash-only first-party permission mode; loosely validated like sandbox. */
+  permissionMode?: string
 }
 
 export type SessionEventsRead = {
@@ -50,6 +52,15 @@ export function sessionDirectory(root: string, projectId: string, localSessionId
  */
 export function transcriptPathFor(handle: Pick<SessionHandle, "directory">): string {
   return join(handle.directory, "transcript.jsonl")
+}
+
+/**
+ * Where a project's remembered permission grants live: `<dataDir>/permissions/<projectId>.toml`.
+ * The engine owns the file's format and creates it (and the directory) on first grant; nothing
+ * is created here.
+ */
+export function permissionGrantsPathFor(dataDir: string, projectId: string): string {
+  return join(dataDir, "permissions", `${projectId}.toml`)
 }
 
 export async function listProjectSessions(
@@ -251,7 +262,8 @@ function isSessionMeta(value: unknown): value is SessionMeta {
     typeof value.lastStatus === "string" &&
     typeof value.lastSequence === "number" &&
     (value.sandbox === undefined || typeof value.sandbox === "string") &&
-    (value.approvalPolicy === undefined || typeof value.approvalPolicy === "string")
+    (value.approvalPolicy === undefined || typeof value.approvalPolicy === "string") &&
+    (value.permissionMode === undefined || typeof value.permissionMode === "string")
   )
 }
 

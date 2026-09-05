@@ -2,6 +2,51 @@
 
 ## Unreleased
 
+### Permissions (CodeSplash native engine)
+
+- Permission modes: `default`, `accept-edits` (workspace file edits run without asking), `plan`
+  (read-only investigation with a reviewable plan in `.codesplash/plan.md` and intrinsic
+  `enter_plan_mode`/`exit_plan_mode` tools), and `bypass` (no approvals — only via the new
+  `--bypass-approvals` flag with a typed confirmation, never persisted, never headless).
+  Shift+Tab cycles modes in a session; the status line shows PLAN / ACCEPT EDITS / BYPASS.
+- Permission rules: `allow`/`ask`/`deny` lists of `tool` / `tool(pattern)` strings — bash
+  command patterns, file-tool globs, `web_fetch` hostnames — in `[permissions]` in config.toml,
+  in a trusted project's `.codesplash/permissions.toml`, and as repeatable syntax-checked
+  `--allow`/`--ask`/`--deny` flags on the TUI, `run`, and `review`.
+- Dangerous-command floor: `sudo`, `rm -rf`, `dd of=/dev/...`, forced `git push`,
+  curl-pipe-to-shell, and similar shapes always ask, in every mode (bypass included), can never
+  be remembered, and are always declined headlessly — even under `run --auto`. The floor looks
+  through git global flags (`git -C . push --force`) and recurses into `bash -c '...'` strings;
+  unanalyzable commands (substitution, backticks, opaque interpreter strings) get the same
+  always-ask treatment since they could hide any floor shape. Headless declines name the
+  command class on stderr.
+- Symlink-aware rule matching: deny/ask rules and the built-in sensitive-read protection match
+  the physical (realpath) target as well as the written path, and allow rules vouch only for
+  what is physically touched — a symlink inside an allowed subtree cannot extend the rule to
+  its target. `web_fetch` deny rules are re-checked on every redirect hop and see through
+  trailing-dot hostnames (`evil.com.`).
+- Remembered-grant hygiene: shell-interpreter patterns (`bash(bash *)`) are never derived, and
+  a file grant whose parent directory would blanket `/`, a first-level directory, or the home
+  directory is refused rather than persisted.
+- Self-protection write floor in every mode and sandbox: the file tools refuse writes into
+  `.git`, the harness config/data directories, `~/.ssh`, and `.codesplash/` (except
+  `.codesplash/plan.md`). Built-in sensitive-read denials (`.env`, key files, `*.pem`, …) with
+  explicit-allow overrides, honored by grep too.
+- Workspace trust: the first interactive codesplash session in a folder asks before loading
+  AGENTS.md/CLAUDE.md and project permission rules; decisions persist in the data directory.
+  Headless runs proceed untrusted with one stderr notice; `run --trust` / `review --trust`
+  persists trust without the prompt.
+- Remembered grants: approvals can offer "Always allow (persists)", storing a derived rule per
+  project (`<data>/permissions/<project>.toml`); the reworked `/permissions` overlay shows the
+  merged rules with their sources (cli/project/user/grants/built-in) and deletes grants.
+- `--permission-mode <plan|default|accept-edits>` on the TUI, `run`, and `review`;
+  `[permissions].mode` in config.toml; recorded per session and reused on `--resume`/`--continue`
+  (a recorded bypass degrades to default headless). `codesplash --doctor` gains a one-line
+  permissions summary (mode, rule counts, workspace trust). Shell completions cover the flags.
+- Honest layering note (also in the README): until the OS sandbox lands, bash enforcement is
+  policy-level (command analysis + approvals), not kernel-level; write floors apply to the file
+  tools, not to what an approved shell command does.
+
 ### CodeSplash native engine
 
 - First-party CodeSplash engine: sessions run in-process against the Anthropic/OpenAI APIs with

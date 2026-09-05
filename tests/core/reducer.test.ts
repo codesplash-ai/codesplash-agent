@@ -94,6 +94,61 @@ describe("reduceAgentEvent", () => {
     expect(state.pendingRequest).toBeUndefined()
   })
 
+  test("retains permissionMode and model when a later session.status omits them", () => {
+    let state = reduceAgentEvent(
+      initialAppViewState,
+      createAgentEvent(
+        { ...base, sequence: 0 },
+        {
+          kind: "session.status",
+          payload: { status: "ready", model: "claude-fable-5", permissionMode: "plan" },
+        },
+      ),
+    )
+    expect(state.permissionMode).toBe("plan")
+    expect(state.model).toBe("claude-fable-5")
+
+    // A later status without the optional fields must not clobber the known values.
+    state = reduceAgentEvent(
+      state,
+      createAgentEvent({ ...base, sequence: 1 }, { kind: "session.status", payload: { status: "running" } }),
+    )
+    expect(state.permissionMode).toBe("plan")
+    expect(state.model).toBe("claude-fable-5")
+
+    // A status that does carry a new mode replaces it.
+    state = reduceAgentEvent(
+      state,
+      createAgentEvent(
+        { ...base, sequence: 2 },
+        { kind: "session.status", payload: { status: "ready", permissionMode: "default" } },
+      ),
+    )
+    expect(state.permissionMode).toBe("default")
+  })
+
+  test("stores the alwaysAsk tag on dangerous-floor approval requests", () => {
+    const state = reduceAgentEvent(
+      initialAppViewState,
+      createAgentEvent(
+        { ...base, sequence: 0 },
+        {
+          kind: "request.opened",
+          payload: {
+            id: "approval-2",
+            requestKind: "approval",
+            title: "Run command?",
+            detail: "sudo rm -rf /",
+            choices: ["accept", "decline", "cancel"],
+            alwaysAsk: true,
+          },
+        },
+      ),
+    )
+
+    expect(state.pendingRequest?.alwaysAsk).toBe(true)
+  })
+
   test("keeps a recoverable process failure visible as failed session state", () => {
     let state = reduceAgentEvent(
       initialAppViewState,

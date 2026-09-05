@@ -5,9 +5,18 @@ import type { ThemePreference } from "../core/index.ts"
 import { registerCleanup } from "../core/index.ts"
 import { type BrandPalette, brandThemes } from "./brand.ts"
 
-/** Only a deliberate, exact "yes" confirms running without a sandbox. */
+/** Only a deliberate, exact "yes" confirms a dangerous session policy. */
 export function confirmationAccepted(input: string): boolean {
   return input.trim().toLowerCase() === "yes"
+}
+
+/** One typed-confirmation screen per dangerous launch flag; the shell below renders any of them. */
+export type TypedConfirmationContent = {
+  /** Box title, e.g. "FULL ACCESS REQUESTED". */
+  title: string
+  /** Bold destructive lead line naming the flag and what it disables. */
+  heading: string
+  warnings: readonly string[]
 }
 
 export const fullAccessWarnings = [
@@ -17,12 +26,32 @@ export const fullAccessWarnings = [
   "Approval prompts still appear, but a wrong approval has no safety net.",
 ] as const
 
-type FullAccessConfirmationProps = {
+export const fullAccessConfirmationContent: TypedConfirmationContent = {
+  title: "FULL ACCESS REQUESTED",
+  heading: "--full-access disables the Codex sandbox.",
+  warnings: fullAccessWarnings,
+}
+
+export const bypassApprovalsWarnings = [
+  "CodeSplash will auto-approve tool calls in this session — no approval prompts.",
+  "File edits and shell commands run immediately under the current sandbox policy.",
+  "Dangerous commands (sudo, rm -rf, force-push, …) still stop and ask, and protected paths (.git, harness config, ~/.ssh) stay blocked.",
+  "Bypass lasts only for this session and is never persisted.",
+] as const
+
+export const bypassApprovalsConfirmationContent: TypedConfirmationContent = {
+  title: "BYPASS APPROVALS REQUESTED",
+  heading: "--bypass-approvals auto-approves tool calls for this session.",
+  warnings: bypassApprovalsWarnings,
+}
+
+type TypedConfirmationProps = {
+  content: TypedConfirmationContent
   palette: BrandPalette
   onDecision(confirmed: boolean): void
 }
 
-export function FullAccessConfirmationApp({ palette, onDecision }: FullAccessConfirmationProps) {
+export function TypedConfirmationApp({ content, palette, onDecision }: TypedConfirmationProps) {
   const renderer = useRenderer()
   const textareaRef = useRef<TextareaRenderable>(null)
 
@@ -49,7 +78,7 @@ export function FullAccessConfirmationApp({ palette, onDecision }: FullAccessCon
       }}
     >
       <box
-        title="FULL ACCESS REQUESTED"
+        title={content.title}
         style={{
           width: "86%",
           maxWidth: 100,
@@ -61,9 +90,9 @@ export function FullAccessConfirmationApp({ palette, onDecision }: FullAccessCon
         }}
       >
         <text fg={palette.destructive}>
-          <b>--full-access disables the Codex sandbox.</b>
+          <b>{content.heading}</b>
         </text>
-        {fullAccessWarnings.map((line) => (
+        {content.warnings.map((line) => (
           <text key={line} fg={palette.foreground}>
             · {line}
           </text>
@@ -100,8 +129,17 @@ export function FullAccessConfirmationApp({ palette, onDecision }: FullAccessCon
   )
 }
 
-/** Renders the confirmation on its own renderer; resolves false when the user backs out. */
-export async function renderFullAccessConfirmation(themePreference: ThemePreference): Promise<boolean> {
+export function FullAccessConfirmationApp({ palette, onDecision }: Omit<TypedConfirmationProps, "content">) {
+  return (
+    <TypedConfirmationApp content={fullAccessConfirmationContent} palette={palette} onDecision={onDecision} />
+  )
+}
+
+/** Renders a typed confirmation on its own renderer; resolves false when the user backs out. */
+export async function renderTypedConfirmation(
+  content: TypedConfirmationContent,
+  themePreference: ThemePreference,
+): Promise<boolean> {
   const renderer = await createCliRenderer({
     exitOnCtrlC: false,
     targetFps: 60,
@@ -122,7 +160,16 @@ export async function renderFullAccessConfirmation(themePreference: ThemePrefere
     }
 
     createRoot(renderer).render(
-      <FullAccessConfirmationApp palette={brandThemes[theme]} onDecision={finish} />,
+      <TypedConfirmationApp content={content} palette={brandThemes[theme]} onDecision={finish} />,
     )
   })
+}
+
+export async function renderFullAccessConfirmation(themePreference: ThemePreference): Promise<boolean> {
+  return renderTypedConfirmation(fullAccessConfirmationContent, themePreference)
+}
+
+/** --bypass-approvals is confirmed on every session open, resume included; never persisted. */
+export async function renderBypassConfirmation(themePreference: ThemePreference): Promise<boolean> {
+  return renderTypedConfirmation(bypassApprovalsConfirmationContent, themePreference)
 }

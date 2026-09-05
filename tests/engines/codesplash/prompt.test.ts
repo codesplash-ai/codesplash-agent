@@ -211,4 +211,51 @@ describe("buildSystemPrompt", () => {
 
     expect(prompt).not.toContain("Project instructions")
   })
+
+  test("plan mode appends the plan-mode section; other modes do not", async () => {
+    const cwd = await makeTempDir()
+    const base = { cwd, model, policy: workspaceWrite, toolNames }
+
+    const plan = await buildSystemPrompt({ ...base, permissionMode: "plan" })
+    expect(plan).toContain("## Plan mode")
+    expect(plan).toContain(".codesplash/plan.md")
+    expect(plan).toContain("exit_plan_mode")
+
+    for (const permissionMode of ["default", "accept-edits", "bypass"] as const) {
+      expect(await buildSystemPrompt({ ...base, permissionMode })).not.toContain("## Plan mode")
+    }
+    expect(await buildSystemPrompt(base)).not.toContain("## Plan mode")
+  })
+
+  test("an untrusted workspace skips project rule discovery entirely and says why", async () => {
+    const repo = await makeTempDir()
+    await gitInit(repo)
+    await writeFile(join(repo, "AGENTS.md"), "Secret project doctrine.")
+    const base = { cwd: repo, model, policy: workspaceWrite, toolNames }
+
+    const untrusted = await buildSystemPrompt({ ...base, workspaceTrusted: false })
+    expect(untrusted).not.toContain("Secret project doctrine.")
+    expect(untrusted).toContain("untrusted")
+    expect(untrusted).toContain("Project instructions")
+
+    // Trusted (explicit or absent) still injects the rules.
+    const trusted = await buildSystemPrompt({ ...base, workspaceTrusted: true })
+    expect(trusted).toContain("Secret project doctrine.")
+    expect(await buildSystemPrompt(base)).toContain("Secret project doctrine.")
+  })
+
+  test("untrusted without rule files still notes the skip, never silently omits it", async () => {
+    const cwd = await makeTempDir()
+
+    const prompt = await buildSystemPrompt({
+      cwd,
+      model,
+      policy: workspaceWrite,
+      toolNames,
+      workspaceTrusted: false,
+    })
+
+    expect(prompt).toContain("untrusted")
+    expect(prompt).toContain("AGENTS.md/CLAUDE.md")
+  })
 })

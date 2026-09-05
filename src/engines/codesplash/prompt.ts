@@ -37,7 +37,10 @@ export async function discoverProjectRules(cwd: string): Promise<ProjectRulesFil
 
 /** Builds the system prompt: identity, environment, policy summary, tool guidance, project rules. */
 export async function buildSystemPrompt(options: SystemPromptOptions): Promise<string> {
-  const rules = await discoverProjectRules(options.cwd)
+  const workspaceTrusted = options.workspaceTrusted !== false
+  // An untrusted folder's rule files are not the user's vetted instructions: discovery is skipped
+  // ENTIRELY (never read, never truncated in) and the prompt says so instead of silently omitting.
+  const rules = workspaceTrusted ? await discoverProjectRules(options.cwd) : []
 
   const sections = [
     "You are CodeSplash Agent, a coding harness running in a terminal. You complete the user's coding tasks by inspecting and editing their workspace with the tools below.",
@@ -58,12 +61,30 @@ export async function buildSystemPrompt(options: SystemPromptOptions): Promise<s
     ].join("\n"),
   ]
 
+  if (options.permissionMode === "plan") sections.push(planModeSection())
+
   if (rules.length > 0) {
     const blocks = rules.map((rule) => `### ${rule.path}\n\n${rule.text}`)
     sections.push(`## Project instructions\n\n${blocks.join("\n\n")}`)
+  } else if (!workspaceTrusted) {
+    sections.push(
+      "## Project instructions\n\nNot loaded: this workspace folder is untrusted, so project rule files (AGENTS.md/CLAUDE.md) were skipped.",
+    )
   }
 
   return sections.join("\n\n")
+}
+
+/** Read-only posture, the plan file's path, and how to leave plan mode. */
+function planModeSection(): string {
+  return [
+    "## Plan mode",
+    "",
+    "Plan mode is on: work read-only while you investigate. Write your implementation plan to",
+    ".codesplash/plan.md (the only file you may write in this mode), then call exit_plan_mode to",
+    "ask the user to approve it. Other mutating tools and non-read-only bash commands are refused",
+    "until the plan is approved.",
+  ].join("\n")
 }
 
 /** Mirrors the permission-policy table enforced by the tools. */

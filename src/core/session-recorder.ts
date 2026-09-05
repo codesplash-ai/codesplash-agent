@@ -108,6 +108,12 @@ export class SessionRecorder {
     this.#enqueue(() => this.#handle.updateMeta({ nativeSessionId }))
   }
 
+  /** Records the run's effective permission mode; serialized on the same write chain as events. */
+  recordPermissionMode(permissionMode: string): void {
+    if (this.#failure) return
+    this.#enqueue(() => this.#handle.updateMeta({ permissionMode }))
+  }
+
   flush(): Promise<void> {
     return this.#chain
   }

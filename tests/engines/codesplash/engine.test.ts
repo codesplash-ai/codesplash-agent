@@ -7,12 +7,19 @@ import type { AgentConfig, AgentEvent, CustomProviderConfig, EngineSession } fro
 import { defaultConfig } from "../../../src/core/index.ts"
 import { setApiKey } from "../../../src/engines/codesplash/auth.ts"
 import {
+  type PermissionDecision,
+  type PermissionMode,
+  type PermissionRuntime,
   type ProviderClient,
   ProviderHttpError,
   type ProviderRequest,
   type ProviderStreamEvent,
 } from "../../../src/engines/codesplash/contracts.ts"
-import { CodesplashDriver } from "../../../src/engines/codesplash/engine.ts"
+import {
+  CodesplashDriver,
+  type PermissionRuntimeFactory,
+  type PermissionRuntimeFactoryOptions,
+} from "../../../src/engines/codesplash/engine.ts"
 import { APP_VERSION } from "../../../src/version.ts"
 
 const ANTHROPIC_KEY_VALUE = "unit-test-anthropic-key-value"
@@ -63,6 +70,49 @@ function fakeProvider(
         for (const event of script) yield event
       })()
     },
+  }
+}
+
+/** Scripted PermissionRuntime: mode flips route through onModeChange like the real runtime. */
+class FakePermissionRuntime implements PermissionRuntime {
+  mode: PermissionMode
+  readonly persisted: string[] = []
+
+  constructor(readonly options: PermissionRuntimeFactoryOptions) {
+    this.mode = options.mode
+  }
+
+  setMode(mode: PermissionMode): void {
+    this.mode = mode
+    this.options.onModeChange?.(mode)
+  }
+
+  decide(): PermissionDecision {
+    return { kind: "default" }
+  }
+
+  isReadDenied(): string | undefined {
+    return undefined
+  }
+
+  async persistGrant(rule: string): Promise<void> {
+    this.persisted.push(rule)
+  }
+}
+
+type PermissionCapture = { options?: PermissionRuntimeFactoryOptions; runtime?: FakePermissionRuntime }
+
+/** Injectable factory standing in for createPermissionRuntime (permissions.ts is not exercised here). */
+function fakePermissions(
+  capture: PermissionCapture = {},
+  onCreate?: (options: PermissionRuntimeFactoryOptions) => void,
+): PermissionRuntimeFactory {
+  return async (options) => {
+    onCreate?.(options)
+    const runtime = new FakePermissionRuntime(options)
+    capture.options = options
+    capture.runtime = runtime
+    return runtime
   }
 }
 
@@ -151,6 +201,7 @@ describe("CodesplashDriver sessions", () => {
         anthropic: fakeProvider("anthropic", []),
         openai: fakeProvider("openai", []),
       },
+      permissions: fakePermissions(),
     })
     const session = await driver.openSession({ cwd, localSessionId: "local-session-1", model })
     const { events, done } = collectEvents(session)
@@ -284,7 +335,10 @@ describe("CodesplashDriver sessions", () => {
         { type: "done", stopReason: "end_turn" },
       ],
     ])
-    const driver = new CodesplashDriver({ providers: { anthropic: provider } })
+    const driver = new CodesplashDriver({
+      providers: { anthropic: provider },
+      permissions: fakePermissions(),
+    })
     const session = await driver.openSession({ cwd, localSessionId: "local-send-1" })
     const { events, done } = collectEvents(session)
 
@@ -316,7 +370,10 @@ describe("CodesplashDriver sessions", () => {
         { type: "done", stopReason: "end_turn" },
       ],
     ])
-    const driver = new CodesplashDriver({ providers: { anthropic: provider } })
+    const driver = new CodesplashDriver({
+      providers: { anthropic: provider },
+      permissions: fakePermissions(),
+    })
     const session = await driver.openSession({ cwd, localSessionId: "local-double-send" })
     const { events, done } = collectEvents(session)
 
@@ -373,7 +430,11 @@ describe("CodesplashDriver sessions", () => {
       ...structuredClone(defaultConfig),
       codesplash: { fallbackModel: "gpt-5.1" },
     }
-    const driver = new CodesplashDriver({ config, providers: { anthropic, openai } })
+    const driver = new CodesplashDriver({
+      config,
+      providers: { anthropic, openai },
+      permissions: fakePermissions(),
+    })
     const session = await driver.openSession({ cwd, localSessionId: "local-fallback-1" })
     const { events, done } = collectEvents(session)
 
@@ -392,6 +453,246 @@ describe("CodesplashDriver sessions", () => {
     const turn = events.find((event) => event.kind === "turn.completed")
     expect(turn?.kind === "turn.completed" && turn.payload.status).toBe("completed")
 
+    await session.close()
+    await done
+  })
+})
+
+/* ---------------------------------- permission wiring ---------------------------------- */
+
+describe("CodesplashDriver permissions", () => {
+  let cwd: string
+
+  beforeEach(async () => {
+    process.env.ANTHROPIC_API_KEY = ANTHROPIC_KEY_VALUE
+    cwd = await mkdtemp(join(tmpdir(), "codesplash-engine-perm-"))
+  })
+
+  afterEach(async () => {
+    await rm(cwd, { recursive: true, force: true })
+  })
+
+  function textTurn(text: string): ProviderStreamEvent[] {
+    return [
+      { type: "text_delta", text },
+      { type: "done", stopReason: "end_turn" },
+    ]
+  }
+
+  /** Retries until the previous turn's finalizers have released the turn reservation. */
+  async function whenIdle<T>(run: () => Promise<T>, timeoutMs = 2_000): Promise<T> {
+    const deadline = Date.now() + timeoutMs
+    while (true) {
+      try {
+        return await run()
+      } catch (error) {
+        if (Date.now() >= deadline) throw error
+        await Bun.sleep(5)
+      }
+    }
+  }
+
+  test("builds the runtime from open options, config rules, overrides, and grants path", async () => {
+    const capture: PermissionCapture = {}
+    const config: AgentConfig = structuredClone(defaultConfig)
+    config.permissions = { mode: "default", allow: ["bash(git status *)"], ask: [], deny: ["web_fetch"] }
+    const driver = new CodesplashDriver({
+      config,
+      providers: { anthropic: fakeProvider("anthropic", []) },
+      permissions: fakePermissions(capture),
+    })
+    const session = await driver.openSession({
+      cwd,
+      localSessionId: "perm-build-1",
+      policy: { sandbox: "workspace-write", approvalPolicy: "on-request", permissionMode: "accept-edits" },
+      workspaceTrusted: false,
+      permissionOverrides: { allow: ["read_file(docs/**)"] },
+      permissionGrantsPath: join(cwd, "grants.toml"),
+    })
+    const { events, done } = collectEvents(session)
+
+    expect(capture.options?.cwd).toBe(cwd)
+    expect(capture.options?.mode).toBe("accept-edits")
+    expect(capture.options?.workspaceTrusted).toBe(false)
+    expect(capture.options?.configRules).toBe(config.permissions)
+    expect(capture.options?.overrides).toEqual({ allow: ["read_file(docs/**)"] })
+    expect(capture.options?.grantsPath).toBe(join(cwd, "grants.toml"))
+
+    const ready = await until(
+      () => events.find((event) => event.kind === "session.status" && event.payload.status === "ready"),
+      "ready status",
+    )
+    expect(ready.kind === "session.status" && ready.payload.permissionMode).toBe("accept-edits")
+    await session.close()
+    await done
+  })
+
+  test("absent policy and trust default to mode default and trusted true", async () => {
+    const capture: PermissionCapture = {}
+    const driver = new CodesplashDriver({
+      providers: { anthropic: fakeProvider("anthropic", []) },
+      permissions: fakePermissions(capture),
+    })
+    const session = await driver.openSession({ cwd, localSessionId: "perm-default-1" })
+    const { events, done } = collectEvents(session)
+
+    expect(capture.options?.mode).toBe("default")
+    expect(capture.options?.workspaceTrusted).toBe(true)
+    expect(capture.options?.overrides).toBeUndefined()
+    expect(capture.options?.grantsPath).toBeUndefined()
+    const ready = await until(
+      () => events.find((event) => event.kind === "session.status" && event.payload.status === "ready"),
+      "ready status",
+    )
+    expect(ready.kind === "session.status" && ready.payload.permissionMode).toBe("default")
+    await session.close()
+    await done
+  })
+
+  test("runtime-creation warnings surface as warning events before ready", async () => {
+    const driver = new CodesplashDriver({
+      providers: { anthropic: fakeProvider("anthropic", []) },
+      permissions: fakePermissions({}, (options) => {
+        options.onWarning?.('Unknown tool in permission rule "frobnicate(x)"; rule ignored')
+      }),
+    })
+    const session = await driver.openSession({ cwd, localSessionId: "perm-warn-1" })
+    const { events, done } = collectEvents(session)
+
+    const warning = await until(() => events.find((event) => event.kind === "warning"), "creation warning")
+    expect(warning.kind === "warning" && warning.payload.message).toContain("frobnicate")
+    const readyIndex = events.findIndex(
+      (event) => event.kind === "session.status" && event.payload.status === "ready",
+    )
+    expect(events.indexOf(warning)).toBeLessThan(readyIndex)
+    await session.close()
+    await done
+  })
+
+  test("setPermissionMode flips the runtime and announces the mode via session.status", async () => {
+    const capture: PermissionCapture = {}
+    const driver = new CodesplashDriver({
+      providers: { anthropic: fakeProvider("anthropic", []) },
+      permissions: fakePermissions(capture),
+    })
+    const session = await driver.openSession({ cwd, localSessionId: "perm-switch-1" })
+    const { events, done } = collectEvents(session)
+
+    await session.setPermissionMode?.("plan")
+    expect(capture.runtime?.mode).toBe("plan")
+    const announced = await until(
+      () =>
+        events.find((event) => event.kind === "session.status" && event.payload.permissionMode === "plan"),
+      "mode change status",
+    )
+    expect(announced.kind === "session.status" && announced.payload.status).toBe("ready")
+    await session.close()
+    await done
+  })
+
+  test("setPermissionMode is refused while a turn is active", async () => {
+    const provider = fakeProvider("anthropic", [textTurn("reply")])
+    const driver = new CodesplashDriver({
+      providers: { anthropic: provider },
+      permissions: fakePermissions(),
+    })
+    const session = await driver.openSession({ cwd, localSessionId: "perm-midturn-1" })
+    const { events, done } = collectEvents(session)
+
+    const first = session.send({ text: "go" })
+    await expect(session.setPermissionMode?.("plan")).rejects.toThrow(
+      "Wait for the current turn before switching permission modes",
+    )
+    await first
+    await until(() => events.find((event) => event.kind === "turn.completed"), "turn.completed")
+    await session.close()
+    await done
+  })
+
+  test("bypass cannot be entered unless the session was opened in bypass mode", async () => {
+    const plain = new CodesplashDriver({
+      providers: { anthropic: fakeProvider("anthropic", []) },
+      permissions: fakePermissions(),
+    })
+    const plainSession = await plain.openSession({ cwd, localSessionId: "perm-bypass-1" })
+    const plainEvents = collectEvents(plainSession)
+    await expect(plainSession.setPermissionMode?.("bypass")).rejects.toThrow("--bypass-approvals")
+    await plainSession.close()
+    await plainEvents.done
+
+    // Opened in bypass: leaving it and returning are both allowed.
+    const capture: PermissionCapture = {}
+    const bypass = new CodesplashDriver({
+      providers: { anthropic: fakeProvider("anthropic", []) },
+      permissions: fakePermissions(capture),
+    })
+    const bypassSession = await bypass.openSession({
+      cwd,
+      localSessionId: "perm-bypass-2",
+      policy: { sandbox: "workspace-write", approvalPolicy: "on-request", permissionMode: "bypass" },
+    })
+    const bypassEvents = collectEvents(bypassSession)
+    await bypassSession.setPermissionMode?.("default")
+    expect(capture.runtime?.mode).toBe("default")
+    await bypassSession.setPermissionMode?.("bypass")
+    expect(capture.runtime?.mode).toBe("bypass")
+    await bypassSession.close()
+    await bypassEvents.done
+  })
+
+  test("the system prompt is rebuilt when the permission mode changes between turns", async () => {
+    const provider = fakeProvider("anthropic", [textTurn("one"), textTurn("two"), textTurn("three")])
+    const driver = new CodesplashDriver({
+      providers: { anthropic: provider },
+      permissions: fakePermissions(),
+    })
+    const session = await driver.openSession({ cwd, localSessionId: "perm-prompt-1" })
+    const { events, done } = collectEvents(session)
+
+    await session.send({ text: "first" })
+    await until(() => events.find((event) => event.kind === "turn.completed"), "first turn")
+    expect(provider.requests[0]?.system).not.toContain("## Plan mode")
+
+    await whenIdle(() => session.setPermissionMode?.("plan") ?? Promise.resolve())
+    await whenIdle(() => session.send({ text: "second" }))
+    await until(
+      () => (events.filter((event) => event.kind === "turn.completed").length >= 2 ? true : undefined),
+      "second turn",
+    )
+    expect(provider.requests[1]?.system).toContain("## Plan mode")
+    expect(provider.requests[1]?.system).toContain(".codesplash/plan.md")
+
+    // Back to default: the cached plan prompt must not leak into later turns.
+    await whenIdle(() => session.setPermissionMode?.("default") ?? Promise.resolve())
+    await whenIdle(() => session.send({ text: "third" }))
+    await until(
+      () => (events.filter((event) => event.kind === "turn.completed").length >= 3 ? true : undefined),
+      "third turn",
+    )
+    expect(provider.requests[2]?.system).not.toContain("## Plan mode")
+
+    await session.close()
+    await done
+  })
+
+  test("an untrusted workspace's system prompt skips project rules and says why", async () => {
+    await Bun.write(join(cwd, "AGENTS.md"), "Ancient project wisdom.")
+    const provider = fakeProvider("anthropic", [textTurn("reply")])
+    const driver = new CodesplashDriver({
+      providers: { anthropic: provider },
+      permissions: fakePermissions(),
+    })
+    const session = await driver.openSession({
+      cwd,
+      localSessionId: "perm-untrusted-1",
+      workspaceTrusted: false,
+    })
+    const { events, done } = collectEvents(session)
+
+    await session.send({ text: "hello" })
+    await until(() => events.find((event) => event.kind === "turn.completed"), "turn.completed")
+    expect(provider.requests[0]?.system).not.toContain("Ancient project wisdom.")
+    expect(provider.requests[0]?.system).toContain("untrusted")
     await session.close()
     await done
   })
@@ -491,6 +792,7 @@ describe("CodesplashDriver custom providers", () => {
     const driver = new CodesplashDriver({
       config: customConfig(ollamaProvider()),
       providers: { ollama: provider },
+      permissions: fakePermissions(),
     })
     const session = await driver.openSession({ cwd, localSessionId: "local-custom-1" })
     const { events, done } = collectEvents(session)
@@ -544,6 +846,7 @@ describe("CodesplashDriver custom providers", () => {
         }),
       ),
       providers: { anthropic: fakeProvider("anthropic", []), ollama: fakeProvider("openai", []) },
+      permissions: fakePermissions(),
     })
     const session = await driver.openSession({ cwd, localSessionId: "local-custom-2" })
     const { events, done } = collectEvents(session)

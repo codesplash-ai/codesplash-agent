@@ -11,12 +11,29 @@ import { join } from "node:path"
 import type { AgentEvent, EngineSession } from "../../../src/core/index.ts"
 import type {
   ChatMessage,
+  PermissionDecision,
+  PermissionMode,
   ProviderClient,
   ProviderRequest,
   ProviderStreamEvent,
 } from "../../../src/engines/codesplash/contracts.ts"
-import { CodesplashDriver } from "../../../src/engines/codesplash/engine.ts"
+import { CodesplashDriver, type PermissionRuntimeFactory } from "../../../src/engines/codesplash/engine.ts"
 import { appendTranscriptMessages, loadTranscript } from "../../../src/engines/codesplash/transcript.ts"
+
+/** Minimal scripted permission runtime so sessions build without permissions.ts side effects. */
+function fakePermissions(): PermissionRuntimeFactory {
+  return async (options) => ({
+    mode: options.mode as PermissionMode,
+    setMode(): void {},
+    decide(): PermissionDecision {
+      return { kind: "default" }
+    },
+    isReadDenied(): string | undefined {
+      return undefined
+    },
+    async persistGrant(): Promise<void> {},
+  })
+}
 
 const ANTHROPIC_KEY_VALUE = "unit-test-anthropic-key-value"
 
@@ -111,7 +128,10 @@ async function openWithTranscript(
   nativeTranscriptPath: string,
   localSessionId = "local-resume-1",
 ): Promise<{ session: EngineSession; events: AgentEvent[]; done: Promise<void> }> {
-  const driver = new CodesplashDriver({ providers: { anthropic: provider } })
+  const driver = new CodesplashDriver({
+    providers: { anthropic: provider },
+    permissions: fakePermissions(),
+  })
   const session = await driver.openSession({ cwd, localSessionId, nativeTranscriptPath })
   const { events, done } = collectEvents(session)
   return { session, events, done }
@@ -178,7 +198,10 @@ describe("resume usage continuity", () => {
         { type: "done", stopReason: "end_turn" },
       ],
     ])
-    const driver = new CodesplashDriver({ providers: { anthropic: provider } })
+    const driver = new CodesplashDriver({
+      providers: { anthropic: provider },
+      permissions: fakePermissions(),
+    })
     const session = await driver.openSession({
       cwd,
       localSessionId: "local-usage-1",
@@ -268,7 +291,10 @@ describe("per-turn transcript append", () => {
 
   test("without nativeTranscriptPath nothing is persisted", async () => {
     const provider = fakeProvider([textTurn("ephemeral")])
-    const driver = new CodesplashDriver({ providers: { anthropic: provider } })
+    const driver = new CodesplashDriver({
+      providers: { anthropic: provider },
+      permissions: fakePermissions(),
+    })
     const session = await driver.openSession({ cwd, localSessionId: "local-no-transcript" })
     const { events, done } = collectEvents(session)
     await session.send({ text: "hi" })

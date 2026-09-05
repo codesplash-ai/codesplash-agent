@@ -9,6 +9,9 @@ import {
   dataDirectory,
   defaultConfig,
   defaultKeyEnvVar,
+  isConfigPermissionMode,
+  isPermissionMode,
+  isValidPermissionRule,
   loadConfig,
   saveConfig,
   validateConfig,
@@ -34,6 +37,7 @@ describe("agent config", () => {
       theme: "light" as const,
       history: { enabled: false },
       codex: { sandbox: "read-only" as const, approvalPolicy: "untrusted" as const },
+      permissions: { mode: "default" as const, allow: [], ask: [], deny: [] },
       codesplash: {},
       providers: [],
     }
@@ -41,6 +45,7 @@ describe("agent config", () => {
     await saveConfig(config, path)
 
     expect(await loadConfig(path)).toEqual(config)
+    // Default [permissions] does not serialize at all, like [codesplash]/[providers].
     expect(await readFile(path, "utf8")).toBe(
       [
         "schemaVersion = 1",
@@ -97,6 +102,147 @@ describe("agent config", () => {
     await Bun.write(path, 'schemaVersion = 1\n[codex]\nsandbox = "danger-full-access"\n')
 
     expect(loadConfig(path)).rejects.toThrow("full access requires the --full-access flag per session")
+  })
+
+  test("parses [permissions] with defaults for omitted fields", async () => {
+    const directory = await temporaryDirectory()
+    const path = join(directory, "config.toml")
+    await Bun.write(
+      path,
+      [
+        "schemaVersion = 1",
+        "[permissions]",
+        'mode = "plan"',
+        'allow = ["bash(git status *)", "web_fetch(docs.example.com)"]',
+        'deny = ["read_file(**/*.secret)"]',
+      ].join("\n"),
+    )
+
+    const config = await loadConfig(path)
+    expect(config.permissions).toEqual({
+      mode: "plan",
+      allow: ["bash(git status *)", "web_fetch(docs.example.com)"],
+      ask: [],
+      deny: ["read_file(**/*.secret)"],
+    })
+  })
+
+  test("accepts unknown tool names in permission rules (forward compatibility)", async () => {
+    const directory = await temporaryDirectory()
+    const path = join(directory, "config.toml")
+    await Bun.write(path, 'schemaVersion = 1\n[permissions]\nallow = ["future_tool(x)"]\n')
+
+    expect((await loadConfig(path)).permissions.allow).toEqual(["future_tool(x)"])
+  })
+
+  test("rejects bypass as a persisted permission mode", async () => {
+    const directory = await temporaryDirectory()
+    const path = join(directory, "config.toml")
+    await Bun.write(path, 'schemaVersion = 1\n[permissions]\nmode = "bypass"\n')
+
+    expect(loadConfig(path)).rejects.toThrow(
+      '[permissions].mode: "bypass" cannot be a persisted default; bypass requires the --bypass-approvals flag per session',
+    )
+  })
+
+  test("aggregates [permissions] problems, naming each offending rule", () => {
+    const error = capture(() =>
+      validateConfig(
+        {
+          permissions: {
+            mode: "yolo",
+            allow: ["bash(git status *)", "Bad Rule", "bash()"],
+            ask: "read_file",
+            deny: [7],
+          },
+        },
+        "test.toml",
+      ),
+    )
+    expect(error.message).toContain(
+      '[permissions].mode: got "yolo", expected "plan", "default", or "accept-edits"',
+    )
+    expect(error.message).toContain('[permissions].allow[2]: invalid rule "Bad Rule"')
+    expect(error.message).toContain('[permissions].allow[3]: invalid rule "bash()"')
+    expect(error.message).toContain('[permissions].ask: got "read_file", expected an array of rule strings')
+    expect(error.message).toContain("[permissions].deny[1]: got 7, expected a rule string")
+    // The valid rule in the same array is not reported.
+    expect(error.message).not.toContain('invalid rule "bash(git status *)"')
+  })
+
+  test("rejects a non-table [permissions] value", () => {
+    const error = capture(() => validateConfig({ permissions: "plan" }, "test.toml"))
+    expect(error.message).toContain("[permissions]: expected a table")
+  })
+
+  test("saveConfig round-trips [permissions] and writes only non-default fields", async () => {
+    const directory = await temporaryDirectory()
+    const path = join(directory, "config.toml")
+    const config = {
+      ...structuredClone(defaultConfig),
+      permissions: {
+        mode: "accept-edits" as const,
+        allow: ["bash(git status *)"],
+        ask: [],
+        deny: ["read_file(**/*.secret)"],
+      },
+    }
+
+    await saveConfig(config, path)
+    expect(await loadConfig(path)).toEqual(config)
+
+    const source = await readFile(path, "utf8")
+    expect(source).toContain("[permissions]")
+    expect(source).toContain('mode = "accept-edits"')
+    expect(source).toContain('allow = ["bash(git status *)"]')
+    // The empty ask tier stays out of the file entirely.
+    expect(source).not.toContain("ask =")
+
+    // A settings toggle re-saving the loaded config must not drop the table.
+    const reloaded = await loadConfig(path)
+    reloaded.theme = "dark"
+    await saveConfig(reloaded, path)
+    expect(await loadConfig(path)).toEqual({ ...config, theme: "dark" })
+  })
+
+  test("-c overrides reach [permissions]: mode=plan applies, mode=bypass is still refused", async () => {
+    const directory = await temporaryDirectory()
+    const path = join(directory, "config.toml")
+    await Bun.write(path, 'schemaVersion = 1\n[permissions]\nmode = "accept-edits"\n')
+
+    const overridden = await loadConfig(path, ["permissions.mode=plan"])
+    expect(overridden.permissions.mode).toBe("plan")
+
+    // Overrides also apply when no config file exists at all.
+    const fresh = await loadConfig(join(directory, "missing.toml"), [
+      "permissions.mode=plan",
+      'permissions.allow=["bash(git status *)"]',
+    ])
+    expect(fresh.permissions.mode).toBe("plan")
+    expect(fresh.permissions.allow).toEqual(["bash(git status *)"])
+
+    // The bypass refusal cannot be sidestepped via -c: overrides run through validation too.
+    expect(loadConfig(path, ["permissions.mode=bypass"])).rejects.toThrow(
+      "bypass requires the --bypass-approvals flag per session",
+    )
+  })
+
+  test("permission mode guards and the rule grammar", () => {
+    expect(isPermissionMode("bypass")).toBe(true)
+    expect(isPermissionMode("plan")).toBe(true)
+    expect(isConfigPermissionMode("bypass")).toBe(false)
+    expect(isConfigPermissionMode("accept-edits")).toBe(true)
+    expect(isPermissionMode("yolo")).toBe(false)
+
+    expect(isValidPermissionRule("bash")).toBe(true)
+    expect(isValidPermissionRule("bash(git status *)")).toBe(true)
+    expect(isValidPermissionRule("read_file(**/*.secret)")).toBe(true)
+    expect(isValidPermissionRule("web-fetch2(host)")).toBe(true)
+    expect(isValidPermissionRule("bash()")).toBe(false)
+    expect(isValidPermissionRule("Bash(x)")).toBe(false)
+    expect(isValidPermissionRule("1bash")).toBe(false)
+    expect(isValidPermissionRule("")).toBe(false)
+    expect(isValidPermissionRule("bash(x) extra")).toBe(false)
   })
 
   test("parses [codesplash].fallbackModel and full [providers.*] tables with defaults applied", async () => {

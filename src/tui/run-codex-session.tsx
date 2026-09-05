@@ -2,9 +2,12 @@ import { createCliRenderer, type KittyKeyboardOptions, type ThemeMode } from "@o
 import { createRoot } from "@opentui/react"
 import type {
   AgentConfig,
+  AppOptions,
   AppViewState,
   EngineDriver,
   OpenSessionOptions,
+  PermissionMode,
+  PermissionRuleOverrides,
   ProjectPreflight,
   SessionHandle,
   SessionMeta,
@@ -14,8 +17,12 @@ import type {
 } from "../core/index.ts"
 import {
   createAgentEvent,
+  dataDirectory,
+  defaultConfig,
   defaultSessionPolicy,
   initialAppViewState,
+  isPermissionMode,
+  permissionGrantsPathFor,
   projectIdFor,
   readSessionEvents,
   reduceAgentEvent,
@@ -25,11 +32,23 @@ import {
   SessionStore,
   transcriptPathFor,
 } from "../core/index.ts"
-import { CodesplashDriver } from "../engines/codesplash/index.ts"
+import type { PermissionRuntime } from "../engines/codesplash/contracts.ts"
+import {
+  CodesplashDriver,
+  createPermissionRuntime,
+  describePermissionRules,
+  removePermissionGrant,
+} from "../engines/codesplash/index.ts"
 import { CodexDriver } from "../engines/codex/index.ts"
 import { brandThemes } from "./brand.ts"
-import { type CodexSessionAction, CodexSessionApp } from "./codex-session.tsx"
-import { renderFullAccessConfirmation } from "./full-access-confirmation.tsx"
+import {
+  type CodexSessionAction,
+  CodexSessionApp,
+  type PermissionRuleView,
+  type SessionPermissionsUi,
+} from "./codex-session.tsx"
+import { renderBypassConfirmation, renderFullAccessConfirmation } from "./full-access-confirmation.tsx"
+import { renderTrustGate, resolveWorkspaceTrust } from "./trust-gate.tsx"
 
 /** Engines that run inside the harness session screen (Claude hands off to its own CLI). */
 export type HarnessEngineId = "codex" | "codesplash"
@@ -52,6 +71,55 @@ export function sessionTranscriptPath(sessionDirectory: string): string {
   return transcriptPathFor({ directory: sessionDirectory })
 }
 
+/** Permission-layer launch context for a codesplash session, resolved from CLI flags. */
+export type SessionPermissionLaunchOptions = {
+  /** --bypass-approvals: gates the bypass cycle entry, behind a typed confirmation per open. */
+  bypassApprovals: boolean
+  /** True when the launch set a mode explicitly, so it wins over a resumed recorded mode. */
+  modeExplicit: boolean
+  /** CLI-tier rule overrides (--allow/--ask/--deny). */
+  overrides?: PermissionRuleOverrides
+}
+
+/** CLI-tier rule overrides from app options; undefined when no rule flags were passed. */
+export function permissionOverridesFrom(options: AppOptions): PermissionRuleOverrides | undefined {
+  if (options.allowRules.length === 0 && options.askRules.length === 0 && options.denyRules.length === 0) {
+    return undefined
+  }
+  return { allow: options.allowRules, ask: options.askRules, deny: options.denyRules }
+}
+
+/** Permission launch context for a codesplash TUI session, from the resolved app options. */
+export function permissionLaunchOptionsFrom(options: AppOptions): SessionPermissionLaunchOptions {
+  return {
+    bypassApprovals: options.bypassApprovals,
+    modeExplicit: options.bypassApprovals || options.permissionModeOverride !== undefined,
+    overrides: permissionOverridesFrom(options),
+  }
+}
+
+/**
+ * Recorded permission mode from a resumed session's meta, when reusable. "bypass" never
+ * survives a resume — the --bypass-approvals flag is required per session — and unknown
+ * strings (loose meta validation) are ignored.
+ */
+export function resumedPermissionMode(meta: SessionMeta): PermissionMode | undefined {
+  const recorded = meta.permissionMode
+  if (recorded === undefined || !isPermissionMode(recorded) || recorded === "bypass") return undefined
+  return recorded
+}
+
+/**
+ * Latest permission mode from a resumed session's replayed event log, when reusable. The meta
+ * records the mode the session launched with; the event log additionally knows mid-session
+ * Shift+Tab changes, so it wins when present. The same bypass/unknown gating applies.
+ */
+export function replayedPermissionMode(state: AppViewState): PermissionMode | undefined {
+  const mode = state.permissionMode
+  if (mode === undefined || !isPermissionMode(mode) || mode === "bypass") return undefined
+  return mode
+}
+
 export type CodexSessionRunOptions = {
   /** Engine to run through the shared controller/recorder/session-screen flow. */
   engine?: HarnessEngineId
@@ -64,6 +132,23 @@ export type CodexSessionRunOptions = {
   resume?: SessionMeta
   /** Session store override for tests. */
   store?: SessionStore
+  /** Permission-layer launch context; only meaningful for codesplash sessions. */
+  permissions?: SessionPermissionLaunchOptions
+}
+
+/** The codesplash first-party permission layer, absent for engines without one (codex). */
+type PermissionLayer = {
+  createPermissionRuntime: typeof createPermissionRuntime
+  describePermissionRules: (runtime: PermissionRuntime) => PermissionRuleView[]
+  removePermissionGrant: typeof removePermissionGrant
+  permissionGrantsPathFor: typeof permissionGrantsPathFor
+}
+
+const codesplashPermissionLayer: PermissionLayer = {
+  createPermissionRuntime,
+  describePermissionRules,
+  removePermissionGrant,
+  permissionGrantsPathFor,
 }
 
 /** How the session screen ended: "new" and "resume-picker" ask the caller to reopen. */
@@ -82,7 +167,8 @@ export async function runCodexSession(
   options: CodexSessionRunOptions = {},
 ): Promise<CodexRunOutcome> {
   const engine = options.engine ?? "codex"
-  const policy = options.policy ?? defaultSessionPolicy
+  const isCodesplash = engine === "codesplash"
+  let policy = options.policy ?? defaultSessionPolicy
   const historyEnabled = options.historyEnabled ?? true
 
   // Full access is never sticky: every session open re-confirms, resume included.
@@ -91,9 +177,39 @@ export async function runCodexSession(
     if (!confirmed) return "home"
   }
 
+  // Bypass is confirmed the same way on every open (never persisted); declining falls back to
+  // mode "default" instead of aborting, so the session still opens with approvals on.
+  let bypassAllowed = false
+  if (isCodesplash && options.permissions?.bypassApprovals) {
+    if (await renderBypassConfirmation(themePreference)) bypassAllowed = true
+    else policy = { ...policy, permissionMode: "default" }
+  }
+
+  // Workspace trust: a stored decision (either way) skips the gate; the gate itself persists
+  // only a "trust" choice — "not now" opens untrusted and asks again next time.
+  let workspaceTrusted = true
+  if (isCodesplash) {
+    const trusted = await resolveWorkspaceTrust(project.cwd, () =>
+      renderTrustGate(project.cwd, themePreference),
+    )
+    if (trusted === undefined) return "home"
+    workspaceTrusted = trusted
+  }
+
+  // Resume reopens in the session's recorded permission mode unless the launch set one
+  // explicitly (--permission-mode / --bypass-approvals win, matching sandbox reuse).
+  if (isCodesplash && options.resume && !options.permissions?.modeExplicit) {
+    const recorded = resumedPermissionMode(options.resume)
+    if (recorded) policy = { ...policy, permissionMode: recorded }
+  }
+
   const localSessionId = options.resume?.localSessionId ?? crypto.randomUUID()
   const projectId = projectIdFor(project.cwd)
   let nativeSessionId = options.resume?.nativeSessionId
+
+  // Remembered grants live per project in the data directory, independent of session history.
+  const permissionLayer = isCodesplash ? codesplashPermissionLayer : undefined
+  const permissionGrantsPath = permissionLayer?.permissionGrantsPathFor(dataDirectory(), projectId)
 
   let recorder: SessionRecorder | undefined
   let historyLocation: string | undefined
@@ -112,6 +228,13 @@ export async function runCodexSession(
       for (const event of events) initialState = reduceAgentEvent(initialState, event)
       initialState = clearTransientState(initialState)
       firstSequence = Math.max(handle.meta.lastSequence, recorder.lastSequence) + 1
+
+      // The replayed event log knows the last mid-session mode change; the meta only records
+      // the launch mode. Refine the resume mode with it, under the same explicit-flag gating.
+      if (isCodesplash && !options.permissions?.modeExplicit) {
+        const replayed = replayedPermissionMode(initialState)
+        if (replayed) policy = { ...policy, permissionMode: replayed }
+      }
 
       // A codesplash session whose transcript never made it to disk (recorded before transcripts
       // existed, or every append failed) replays the visible conversation while the model starts
@@ -139,7 +262,9 @@ export async function runCodexSession(
       }
     } else {
       const now = new Date().toISOString()
-      handle = await store.create({
+      // The widened type carries the recorded permission mode until session-wiring lands the
+      // loose SessionMeta.permissionMode field; a resume reopens in this mode.
+      const meta: SessionMeta = {
         schemaVersion: 1,
         engine,
         localSessionId,
@@ -151,7 +276,9 @@ export async function runCodexSession(
         lastSequence: -1,
         sandbox: policy.sandbox,
         approvalPolicy: policy.approvalPolicy,
-      })
+      }
+      if (isCodesplash) meta.permissionMode = policy.permissionMode ?? "default"
+      handle = await store.create(meta)
       recorder = new SessionRecorder(handle)
     }
     historyLocation = handle.directory
@@ -180,7 +307,11 @@ export async function runCodexSession(
           nativeTranscriptPath,
           // Resume/reconnect: the engine continues the replayed cumulative usage so the /usage
           // overlay and recorded events never drop back toward zero after the next turn.
-          initialUsage: engine === "codesplash" ? usageSnapshotOf(initialState) : undefined,
+          initialUsage: isCodesplash ? usageSnapshotOf(initialState) : undefined,
+          // Permission layer (codesplash only): resolved trust, CLI rule tier, grants file.
+          workspaceTrusted: isCodesplash ? workspaceTrusted : undefined,
+          permissionOverrides: isCodesplash ? options.permissions?.overrides : undefined,
+          permissionGrantsPath,
         }
         return driver.openSession(openOptions)
       }
@@ -213,6 +344,35 @@ export async function runCodexSession(
         recorder?.recordNativeSessionId(session.nativeSessionId)
       }
 
+      // The permission-layer surface the session screen renders: mode switching goes to the
+      // live session; overlay rules are rebuilt from the same inputs the session was opened
+      // with (config rules + CLI overrides + grants path), so what it shows is what applies.
+      const liveSession = session
+      const permissionsUi: SessionPermissionsUi | undefined = permissionLayer
+        ? {
+            bypassAllowed,
+            workspaceTrusted,
+            setMode: (mode) =>
+              liveSession.setPermissionMode
+                ? liveSession.setPermissionMode(mode)
+                : Promise.reject(new Error("This engine cannot switch permission modes")),
+            loadRules: async () => {
+              const runtime = await permissionLayer.createPermissionRuntime({
+                cwd: project.cwd,
+                mode: policy.permissionMode ?? "default",
+                workspaceTrusted,
+                configRules: (options.config ?? defaultConfig).permissions,
+                overrides: options.permissions?.overrides,
+                grantsPath: permissionGrantsPath,
+              })
+              return permissionLayer.describePermissionRules(runtime)
+            },
+            removeGrant: permissionGrantsPath
+              ? (rule) => permissionLayer.removePermissionGrant(permissionGrantsPath, rule)
+              : undefined,
+          }
+        : undefined
+
       const controller = new SessionController(session, {
         initialState,
         onEvent: recorder?.record,
@@ -232,6 +392,7 @@ export async function runCodexSession(
           policy,
           historyLocation,
           engine,
+          permissionsUi,
         )
         if (action !== "reconnect") return action
       } finally {
@@ -308,6 +469,7 @@ async function renderCodexSession(
   policy: SessionPolicy,
   historyLocation: string | undefined,
   engine: HarnessEngineId,
+  permissions: SessionPermissionsUi | undefined,
 ): Promise<CodexSessionAction> {
   const renderer = await createCliRenderer({
     exitOnCtrlC: false,
@@ -336,6 +498,7 @@ async function renderCodexSession(
         policy={policy}
         historyLocation={historyLocation}
         engine={engine}
+        permissions={permissions}
         onAction={finish}
       />,
     )

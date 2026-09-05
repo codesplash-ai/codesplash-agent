@@ -23,7 +23,9 @@ import {
   type EngineProbe,
   type EngineSession,
   type OpenSessionOptions,
+  readTrustDecision,
   type UserInput,
+  writeTrustDecision,
 } from "../../src/core/index.ts"
 
 const TIMESTAMP = "2026-01-01T00:00:00.000Z"
@@ -227,16 +229,23 @@ function uncommittedGit(): GitRunner & { calls: string[][] } {
 
 type Fixture = {
   projectDir: string
+  dataDir: string
   env: NodeJS.ProcessEnv
   stdout: Sink
   stderr: Sink
 }
 
-async function makeFixture(): Promise<Fixture> {
+/** Fixtures are trusted by default so tests that assert exact stderr stay quiet. */
+async function makeFixture(options: { trusted?: boolean } = {}): Promise<Fixture> {
+  const projectDir = await makeTempDir("codesplash-review-project-")
+  const dataDir = await makeTempDir("codesplash-review-data-")
+  if (options.trusted !== false) await writeTrustDecision(projectDir, true, dataDir)
   return {
-    projectDir: await makeTempDir("codesplash-review-project-"),
+    projectDir,
+    dataDir,
     env: {
       CODESPLASH_AGENT_CONFIG_DIR: await makeTempDir("codesplash-review-config-"),
+      CODESPLASH_AGENT_DATA_DIR: dataDir,
       ANTHROPIC_API_KEY: "test-not-a-real-key",
     },
     stdout: new Sink(),
@@ -246,6 +255,15 @@ async function makeFixture(): Promise<Fixture> {
 
 /* ------------------------------------------ parsing ------------------------------------------ */
 
+/** Fields every parsed ReviewCommand carries when no permission flag is passed. */
+const permissionDefaults = {
+  permissionMode: undefined,
+  allowRules: [],
+  askRules: [],
+  denyRules: [],
+  trust: false,
+}
+
 describe("parseReviewArguments", () => {
   test("defaults to uncommitted text review", () => {
     expect(parseReviewArguments([])).toEqual({
@@ -254,6 +272,7 @@ describe("parseReviewArguments", () => {
       model: undefined,
       outputFormat: "text",
       auto: false,
+      ...permissionDefaults,
     })
   })
 
@@ -269,7 +288,38 @@ describe("parseReviewArguments", () => {
       model: "m:high",
       outputFormat: "json",
       auto: true,
+      ...permissionDefaults,
     })
+  })
+
+  test("parses --permission-mode, permission rules, and --trust", () => {
+    const parsed = parseReviewArguments([
+      "--permission-mode=plan",
+      "--allow",
+      "bash(git log *)",
+      "--ask=web_fetch(example.com)",
+      "--deny",
+      "read_file(**/*.pem)",
+      "--trust",
+    ])
+    expect(parsed.permissionMode).toBe("plan")
+    expect(parsed.allowRules).toEqual(["bash(git log *)"])
+    expect(parsed.askRules).toEqual(["web_fetch(example.com)"])
+    expect(parsed.denyRules).toEqual(["read_file(**/*.pem)"])
+    expect(parsed.trust).toBe(true)
+  })
+
+  test("permission flag misuse is a usage error with a pointer at what would work", () => {
+    expect(() => parseReviewArguments(["--permission-mode", "bypass"])).toThrow("--bypass-approvals")
+    expect(() => parseReviewArguments(["--permission-mode", "yolo"])).toThrow(
+      "--permission-mode expects plan, default, or accept-edits, got yolo",
+    )
+    expect(() => parseReviewArguments(["--allow", "Bash(x)"])).toThrow('invalid rule "Bash(x)"')
+    expect(() => parseReviewArguments(["--deny"])).toThrow("--deny expects a permission rule")
+    expect(() => parseReviewArguments(["--bypass-approvals"])).toThrow(UsageError)
+    expect(() => parseReviewArguments(["--bypass-approvals"])).toThrow(
+      "review approves with --auto; dangerous commands are always declined headlessly",
+    )
   })
 
   test("the three modes are mutually exclusive", () => {
@@ -382,7 +432,12 @@ describe("runReviewCommand (fake git, fake driver)", () => {
     expect(exitCode).toBe(0)
     expect(fixture.stdout.text).toBe("No findings.\n")
     expect(driver.openOptions?.cwd).toBe(fixture.projectDir)
-    expect(driver.openOptions?.policy).toEqual({ sandbox: "read-only", approvalPolicy: "on-request" })
+    expect(driver.openOptions?.policy).toEqual({
+      sandbox: "read-only",
+      approvalPolicy: "on-request",
+      permissionMode: "default",
+    })
+    expect(driver.openOptions?.workspaceTrusted).toBe(true)
     const prompt = driver.session?.inputs[0]?.text ?? ""
     expect(prompt).toContain(TRACKED_DIFF)
     expect(prompt).toContain(UNTRACKED_DIFF)
@@ -546,5 +601,65 @@ describe("runReviewCommand (fake git, fake driver)", () => {
 
     expect(exitCode).toBe(1)
     expect(fixture.stderr.text).toContain("error: provider exploded")
+  })
+
+  test("permission mode and rules pass through to the runner; the sandbox stays read-only", async () => {
+    const fixture = await makeFixture()
+    const driver = new ScriptedDriver(findingsScript)
+
+    const exitCode = await runReviewCommand(
+      [
+        fixture.projectDir,
+        "--permission-mode",
+        "plan",
+        "--allow",
+        "bash(git log *)",
+        "--deny=read_file(**/*.pem)",
+      ],
+      { driver, git: uncommittedGit(), env: fixture.env, stdout: fixture.stdout, stderr: fixture.stderr },
+    )
+
+    expect(exitCode).toBe(0)
+    expect(driver.openOptions?.policy).toEqual({
+      sandbox: "read-only",
+      approvalPolicy: "on-request",
+      permissionMode: "plan",
+    })
+    expect(driver.openOptions?.permissionOverrides).toEqual({
+      allow: ["bash(git log *)"],
+      ask: [],
+      deny: ["read_file(**/*.pem)"],
+    })
+  })
+
+  test("an untrusted workspace reviews with a notice; --trust persists the decision", async () => {
+    const untrusted = await makeFixture({ trusted: false })
+    const untrustedDriver = new ScriptedDriver(findingsScript)
+    expect(
+      await runReviewCommand([untrusted.projectDir], {
+        driver: untrustedDriver,
+        git: uncommittedGit(),
+        env: untrusted.env,
+        stdout: untrusted.stdout,
+        stderr: untrusted.stderr,
+      }),
+    ).toBe(0)
+    expect(untrustedDriver.openOptions?.workspaceTrusted).toBe(false)
+    expect(untrusted.stderr.text).toContain("Workspace not trusted:")
+
+    const trusted = await makeFixture({ trusted: false })
+    const trustedDriver = new ScriptedDriver(findingsScript)
+    expect(
+      await runReviewCommand([trusted.projectDir, "--trust"], {
+        driver: trustedDriver,
+        git: uncommittedGit(),
+        env: trusted.env,
+        stdout: trusted.stdout,
+        stderr: trusted.stderr,
+      }),
+    ).toBe(0)
+    expect(trustedDriver.openOptions?.workspaceTrusted).toBe(true)
+    expect(trusted.stderr.text).not.toContain("Workspace not trusted")
+    expect(await readTrustDecision(trusted.projectDir, trusted.dataDir)).toMatchObject({ trusted: true })
   })
 })

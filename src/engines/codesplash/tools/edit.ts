@@ -9,6 +9,7 @@ import { readFile, stat, writeFile } from "node:fs/promises"
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
 import {
   type HarnessTool,
+  type PermissionTargets,
   type ToolContext,
   ToolInputError,
   type ToolOutcome,
@@ -338,6 +339,9 @@ export const editFileTool: HarnessTool = {
     additionalProperties: false,
   },
   isReadOnly: () => false,
+  permissionTargets: (input, context): PermissionTargets => ({
+    paths: [resolve(context.cwd, parseInput(input).path)],
+  }),
   permission: mutationPermission,
   run: async (input, context) => runEdit(parseInput(input), context),
 }

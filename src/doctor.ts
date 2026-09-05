@@ -1,5 +1,6 @@
 /** Non-interactive diagnostics: the release smoke and the first thing support asks for. */
 import {
+  type AgentConfig,
   type CustomProviderConfig,
   configFilePath,
   dataDirectory,
@@ -9,6 +10,7 @@ import {
   listProjectSessions,
   loadConfig,
   projectIdFor,
+  readTrustDecision,
   sessionDirectory,
   sessionsRootDirectory,
   transcriptPathFor,
@@ -31,6 +33,8 @@ export type DoctorReport = {
   codesplash: EngineProbe
   /** One line per configured custom [providers.*] entry — key env var names only, never values. */
   customProviders?: string[]
+  /** Permission mode, rule counts per action, and cwd trust — never rule contents or paths. */
+  permissions?: string
   /** Native-transcript state for the newest codesplash session of this project (best effort). */
   transcript?: string
 }
@@ -58,8 +62,28 @@ export async function collectDoctorReport(cwd = process.cwd()): Promise<DoctorRe
     claude,
     codesplash,
     customProviders: config.providers.map((provider) => describeCustomProvider(provider)),
+    permissions: await describePermissionsState(config, project?.cwd ?? cwd),
     transcript: project ? await describeNewestTranscript(project.cwd) : undefined,
   }
+}
+
+/**
+ * One summary line for the permission layer: the configured mode, rule counts per action, and
+ * whether this workspace is trusted. Never rule contents, never paths beyond the cwd itself.
+ */
+async function describePermissionsState(config: AgentConfig, cwd: string): Promise<string> {
+  const counts = (["allow", "ask", "deny"] as const)
+    .map((action) => ({ action, count: config.permissions[action].length }))
+    .filter(({ count }) => count > 0)
+    .map(({ action, count }) => `${count} ${action}`)
+  const trusted = await readTrustDecision(cwd)
+    .then((decision) => decision?.trusted === true)
+    .catch(() => false)
+  return [
+    `mode ${config.permissions.mode}`,
+    counts.length > 0 ? counts.join(" / ") : "no rules",
+    `workspace ${trusted ? "trusted" : "not trusted"}`,
+  ].join(" · ")
 }
 
 /** Names the key env var and whether it is set — the key value itself is never read here. */
@@ -98,11 +122,13 @@ export function formatDoctorReport(report: DoctorReport): string {
     ["claude", formatProbe(report.claude)],
     ["codesplash", formatProbe(report.codesplash)],
     ...(report.customProviders ?? []).map((line): [string, string] => ["provider", line]),
+    ...(report.permissions !== undefined ? [["permissions", report.permissions] as [string, string]] : []),
     ...(report.transcript !== undefined ? [["transcript", report.transcript] as [string, string]] : []),
   ]
+  // padEnd(12): one space after the longest label, "permissions".
   const lines = [
     `CodeSplash Agent ${report.version}`,
-    ...rows.map(([label, value]) => `${label.padEnd(11)}${value}`),
+    ...rows.map(([label, value]) => `${label.padEnd(12)}${value}`),
   ]
   return `${lines.join("\n")}\n`
 }

@@ -548,3 +548,33 @@ describe("mutating-tool permission policy", () => {
     })
   }
 })
+
+describe("file-tool permissionTargets", () => {
+  const cases: Array<[HarnessTool, (path: string) => Record<string, unknown>]> = [
+    [readFileTool, (path) => ({ path })],
+    [writeFileTool, (path) => ({ path, content: "x" })],
+    [editFileTool, (path) => ({ path, old_string: "a", new_string: "b" })],
+  ]
+
+  test("resolves the input path against the cwd, absolute paths pass through", async () => {
+    const cwd = await temporaryDirectory()
+    const context = makeContext(cwd)
+    for (const [tool, inputFor] of cases) {
+      expect(tool.permissionTargets?.(inputFor("src/a.ts"), context)).toEqual({
+        paths: [resolve(cwd, "src/a.ts")],
+      })
+      expect(tool.permissionTargets?.(inputFor("/outside/dir/b.ts"), context)).toEqual({
+        paths: ["/outside/dir/b.ts"],
+      })
+    }
+  })
+
+  test("malformed input throws ToolInputError (the loop then falls to the default path)", async () => {
+    const cwd = await temporaryDirectory()
+    const context = makeContext(cwd)
+    for (const [tool] of cases) {
+      expect(() => tool.permissionTargets?.({}, context)).toThrow(ToolInputError)
+      expect(() => tool.permissionTargets?.(null, context)).toThrow(ToolInputError)
+    }
+  })
+})

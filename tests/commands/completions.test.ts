@@ -22,6 +22,7 @@ const SANDBOX_VALUES = ["read-only", "workspace-write"]
 const OUTPUT_FORMATS = ["text", "json", "stream-json"]
 const EFFORTS = ["low", "medium", "high"]
 const PROVIDERS = ["anthropic", "openai"]
+const PERMISSION_MODES = ["plan", "default", "accept-edits"]
 const RUN_FLAGS = [
   "--prompt",
   "--model",
@@ -31,6 +32,11 @@ const RUN_FLAGS = [
   "--resume",
   "--continue",
   "--effort",
+  "--permission-mode",
+  "--allow",
+  "--ask",
+  "--deny",
+  "--trust",
 ]
 const REVIEW_FLAGS = ["--uncommitted", "--base", "--commit"]
 
@@ -75,6 +81,7 @@ describe("completion scripts", () => {
       ...OUTPUT_FORMATS,
       ...EFFORTS,
       ...PROVIDERS,
+      ...PERMISSION_MODES,
       ...RUN_FLAGS,
       ...REVIEW_FLAGS,
       "--days",
@@ -82,6 +89,7 @@ describe("completion scripts", () => {
       "--sandbox",
       "--no-history",
       "--full-access",
+      "--bypass-approvals",
       "--doctor",
       "--version",
       "prompt",

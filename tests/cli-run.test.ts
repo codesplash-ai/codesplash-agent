@@ -15,14 +15,17 @@ import {
   type EngineSession,
   listProjectSessions,
   type OpenSessionOptions,
+  permissionGrantsPathFor,
   projectIdFor,
   readSessionEvents,
+  readTrustDecision,
   type SessionMeta,
   SessionStore,
   serializeEvent,
   sessionDirectory,
   transcriptPathFor,
   type UserInput,
+  writeTrustDecision,
 } from "../src/core/index.ts"
 
 const TIMESTAMP = "2026-01-01T00:00:00.000Z"
@@ -186,20 +189,28 @@ async function makeTempDir(prefix: string): Promise<string> {
 type Fixture = {
   projectDir: string
   sessionsRoot: string
+  dataDir: string
   store: SessionStore
   env: NodeJS.ProcessEnv
   stdout: Sink
   stderr: Sink
 }
 
-async function makeFixture(): Promise<Fixture> {
+/** Fixtures are trusted by default so tests that assert exact stderr stay quiet. */
+async function makeFixture(options: { trusted?: boolean } = {}): Promise<Fixture> {
   const projectDir = await makeTempDir("codesplash-cli-run-project-")
-  const sessionsRoot = join(await makeTempDir("codesplash-cli-run-data-"), "sessions")
+  const dataDir = await makeTempDir("codesplash-cli-run-data-")
+  const sessionsRoot = join(dataDir, "sessions")
+  if (options.trusted !== false) await writeTrustDecision(projectDir, true, dataDir)
   return {
     projectDir,
     sessionsRoot,
+    dataDir,
     store: new SessionStore(sessionsRoot),
-    env: { CODESPLASH_AGENT_CONFIG_DIR: await makeTempDir("codesplash-cli-run-config-") },
+    env: {
+      CODESPLASH_AGENT_CONFIG_DIR: await makeTempDir("codesplash-cli-run-config-"),
+      CODESPLASH_AGENT_DATA_DIR: dataDir,
+    },
     stdout: new Sink(),
     stderr: new Sink(),
   }
@@ -230,7 +241,11 @@ describe("codesplash run e2e (fake driver)", () => {
     expect(fixture.stderr.text).toBe("")
     expect(driver.session?.inputs).toEqual([{ text: "say hi" }])
     expect(driver.openOptions?.cwd).toBe(fixture.projectDir)
-    expect(driver.openOptions?.policy).toEqual({ sandbox: "workspace-write", approvalPolicy: "on-request" })
+    expect(driver.openOptions?.policy).toEqual({
+      sandbox: "workspace-write",
+      approvalPolicy: "on-request",
+      permissionMode: "default",
+    })
 
     const projectId = projectIdFor(fixture.projectDir)
     const sessions = await listProjectSessions(projectId, fixture.sessionsRoot)
@@ -441,7 +456,11 @@ describe("codesplash run e2e (fake driver)", () => {
     )
 
     expect(exitCode).toBe(0)
-    expect(driver.openOptions?.policy).toEqual({ sandbox: "read-only", approvalPolicy: "on-request" })
+    expect(driver.openOptions?.policy).toEqual({
+      sandbox: "read-only",
+      approvalPolicy: "on-request",
+      permissionMode: "default",
+    })
   })
 
   test("a recorded run passes the session's transcript path to the engine", async () => {
@@ -490,7 +509,11 @@ describe("codesplash run e2e (fake driver)", () => {
     )
 
     expect(exitCode).toBe(0)
-    expect(driver.openOptions?.policy).toEqual({ sandbox: "read-only", approvalPolicy: "on-request" })
+    expect(driver.openOptions?.policy).toEqual({
+      sandbox: "read-only",
+      approvalPolicy: "on-request",
+      permissionMode: "default",
+    })
   })
 
   test("custom-provider models from config.toml pass --model validation", async () => {
@@ -537,6 +560,121 @@ describe("codesplash run e2e (fake driver)", () => {
 
     expect(exitCode).toBe(0)
     expect(sawTurns).toBe(1)
+  })
+})
+
+/* ------------------------------------- permissions ------------------------------------- */
+
+describe("codesplash run permissions", () => {
+  test("--permission-mode reaches the engine policy and is recorded in the session meta", async () => {
+    const fixture = await makeFixture()
+    const driver = new ScriptedDriver(simpleScript)
+
+    const exitCode = await runRunCommand(
+      [fixture.projectDir, "-p", "go", "--permission-mode", "plan"],
+      overridesFor(fixture, driver),
+    )
+
+    expect(exitCode).toBe(0)
+    expect(driver.openOptions?.policy?.permissionMode).toBe("plan")
+    const sessions = await listProjectSessions(projectIdFor(fixture.projectDir), fixture.sessionsRoot)
+    expect(sessions[0]?.permissionMode).toBe("plan")
+  })
+
+  test("--allow/--ask/--deny rules reach openSession as the CLI override tier", async () => {
+    const fixture = await makeFixture()
+    const driver = new ScriptedDriver(simpleScript)
+
+    const exitCode = await runRunCommand(
+      [
+        fixture.projectDir,
+        "-p",
+        "go",
+        "--allow",
+        "bash(git status *)",
+        "--ask",
+        "web_fetch(example.com)",
+        "--deny",
+        "read_file(**/*.pem)",
+      ],
+      overridesFor(fixture, driver),
+    )
+
+    expect(exitCode).toBe(0)
+    expect(driver.openOptions?.permissionOverrides).toEqual({
+      allow: ["bash(git status *)"],
+      ask: ["web_fetch(example.com)"],
+      deny: ["read_file(**/*.pem)"],
+    })
+  })
+
+  test("without rule flags no override tier is passed, and the grants path always is", async () => {
+    const fixture = await makeFixture()
+    const driver = new ScriptedDriver(simpleScript)
+
+    const exitCode = await runRunCommand([fixture.projectDir, "-p", "go"], overridesFor(fixture, driver))
+
+    expect(exitCode).toBe(0)
+    expect(driver.openOptions?.permissionOverrides).toBeUndefined()
+    expect(driver.openOptions?.permissionGrantsPath).toBe(
+      permissionGrantsPathFor(fixture.dataDir, projectIdFor(fixture.projectDir)),
+    )
+  })
+
+  test("a bad rule is a usage error naming the rule, before any engine work", async () => {
+    const fixture = await makeFixture()
+    await expect(
+      runRunCommand(
+        [fixture.projectDir, "-p", "go", "--deny", "Read(x)"],
+        overridesFor(fixture, new ScriptedDriver(simpleScript)),
+      ),
+    ).rejects.toThrow('--deny: invalid rule "Read(x)"')
+  })
+
+  test("--bypass-approvals is rejected with the headless explanation", async () => {
+    const fixture = await makeFixture()
+    await expect(
+      runRunCommand(
+        [fixture.projectDir, "-p", "go", "--bypass-approvals"],
+        overridesFor(fixture, new ScriptedDriver(simpleScript)),
+      ),
+    ).rejects.toThrow("run mode approves with --auto; dangerous commands are always declined headlessly")
+  })
+
+  test("an untrusted workspace proceeds with one stderr notice and workspaceTrusted false", async () => {
+    const fixture = await makeFixture({ trusted: false })
+    const driver = new ScriptedDriver(simpleScript)
+
+    const exitCode = await runRunCommand([fixture.projectDir, "-p", "go"], overridesFor(fixture, driver))
+
+    expect(exitCode).toBe(0)
+    expect(driver.openOptions?.workspaceTrusted).toBe(false)
+    expect(fixture.stderr.text).toContain("Workspace not trusted:")
+    expect(fixture.stderr.text).toContain("pass --trust to trust this folder")
+  })
+
+  test("--trust persists the decision and the run proceeds trusted with no notice", async () => {
+    const fixture = await makeFixture({ trusted: false })
+    const driver = new ScriptedDriver(simpleScript)
+
+    const exitCode = await runRunCommand(
+      [fixture.projectDir, "-p", "go", "--trust"],
+      overridesFor(fixture, driver),
+    )
+
+    expect(exitCode).toBe(0)
+    expect(driver.openOptions?.workspaceTrusted).toBe(true)
+    expect(fixture.stderr.text).not.toContain("Workspace not trusted")
+    expect(await readTrustDecision(fixture.projectDir, fixture.dataDir)).toMatchObject({ trusted: true })
+  })
+
+  test("a trusted fixture passes workspaceTrusted true without --trust", async () => {
+    const fixture = await makeFixture()
+    const driver = new ScriptedDriver(simpleScript)
+
+    await runRunCommand([fixture.projectDir, "-p", "go"], overridesFor(fixture, driver))
+
+    expect(driver.openOptions?.workspaceTrusted).toBe(true)
   })
 })
 
@@ -588,7 +726,11 @@ describe("codesplash run --resume / --continue (fake driver)", () => {
     expect(exitCode).toBe(0)
     expect(driver.openOptions?.localSessionId).toBe("resume-1")
     expect(driver.openOptions?.firstSequence).toBe(5)
-    expect(driver.openOptions?.policy).toEqual({ sandbox: "read-only", approvalPolicy: "untrusted" })
+    expect(driver.openOptions?.policy).toEqual({
+      sandbox: "read-only",
+      approvalPolicy: "untrusted",
+      permissionMode: "default",
+    })
     const directory = sessionDirectory(fixture.sessionsRoot, projectIdFor(fixture.projectDir), "resume-1")
     expect(driver.openOptions?.nativeTranscriptPath).toBe(transcriptPathFor({ directory }))
 
@@ -663,6 +805,7 @@ describe("codesplash run --resume / --continue (fake driver)", () => {
     expect(driver.openOptions?.policy).toEqual({
       sandbox: "workspace-write",
       approvalPolicy: "untrusted",
+      permissionMode: "default",
     })
   })
 
@@ -680,6 +823,7 @@ describe("codesplash run --resume / --continue (fake driver)", () => {
     expect(driver.openOptions?.policy).toEqual({
       sandbox: "workspace-write",
       approvalPolicy: "untrusted",
+      permissionMode: "default",
     })
     expect(fixture.stderr.text).toContain("needs interactive confirmation; using workspace-write")
   })
@@ -729,6 +873,50 @@ describe("codesplash run --resume / --continue (fake driver)", () => {
         overridesFor(foreign, new ScriptedDriver(simpleScript)),
       ),
     ).rejects.toThrow("belongs to the codex engine")
+  })
+
+  test("a recorded permission mode is reused on resume; an explicit flag wins", async () => {
+    const fixture = await makeFixture()
+    await seedSession(fixture, { localSessionId: "resume-mode", permissionMode: "accept-edits" })
+    const driver = new ScriptedDriver(simpleScript)
+
+    expect(
+      await runRunCommand(
+        [fixture.projectDir, "-p", "go", "--resume", "resume-mode"],
+        overridesFor(fixture, driver),
+      ),
+    ).toBe(0)
+    expect(driver.openOptions?.policy?.permissionMode).toBe("accept-edits")
+
+    const overridden = await makeFixture()
+    await seedSession(overridden, { localSessionId: "resume-mode-2", permissionMode: "accept-edits" })
+    const overriddenDriver = new ScriptedDriver(simpleScript)
+    expect(
+      await runRunCommand(
+        [overridden.projectDir, "-p", "go", "--resume", "resume-mode-2", "--permission-mode", "plan"],
+        overridesFor(overridden, overriddenDriver),
+      ),
+    ).toBe(0)
+    expect(overriddenDriver.openOptions?.policy?.permissionMode).toBe("plan")
+    // The settled mode is re-recorded into the session meta for the next resume.
+    const sessions = await listProjectSessions(projectIdFor(overridden.projectDir), overridden.sessionsRoot)
+    expect(sessions[0]?.permissionMode).toBe("plan")
+  })
+
+  test("a recorded bypass mode degrades to default with a stderr notice", async () => {
+    const fixture = await makeFixture()
+    await seedSession(fixture, { localSessionId: "resume-bypass", permissionMode: "bypass" })
+    const driver = new ScriptedDriver(simpleScript)
+
+    expect(
+      await runRunCommand(
+        [fixture.projectDir, "-p", "go", "--resume", "resume-bypass"],
+        overridesFor(fixture, driver),
+      ),
+    ).toBe(0)
+    expect(driver.openOptions?.policy?.permissionMode).toBe("default")
+    expect(fixture.stderr.text).toContain("bypass mode")
+    expect(fixture.stderr.text).toContain("--bypass-approvals")
   })
 
   test("resuming with history disabled via -c is a usage error", async () => {

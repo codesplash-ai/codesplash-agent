@@ -200,7 +200,7 @@ describe("ask_user", () => {
 })
 
 describe("tool registry", () => {
-  test("builtinTools returns the eleven built-ins in order, apply_patch right after edit_file, web tools right after grep", () => {
+  test("builtinTools returns the thirteen built-ins in order, plan-mode tools right after ask_user", () => {
     expect(builtinTools().map((tool) => tool.name)).toEqual([
       "read_file",
       "write_file",
@@ -213,7 +213,21 @@ describe("tool registry", () => {
       "bash",
       "todo_write",
       "ask_user",
+      "enter_plan_mode",
+      "exit_plan_mode",
     ])
+  })
+
+  test("plan-mode tools are spec-only: intrinsic, approval-free, and run() must never execute", async () => {
+    const registry = createToolRegistry(builtinTools())
+    for (const name of ["enter_plan_mode", "exit_plan_mode"]) {
+      const tool = registry.get(name)
+      expect(tool).toBeDefined()
+      if (!tool) continue
+      expect(tool.isReadOnly({})).toBe(true)
+      expect(tool.permission({}, context())).toEqual({ kind: "none" })
+      await expect(tool.run({}, context())).rejects.toThrow("intrinsic")
+    }
   })
 
   test("specs() reflects each tool's name, description, and schema", () => {

@@ -8,6 +8,7 @@ import { bashTool } from "./bash.ts"
 import { editFileTool } from "./edit.ts"
 import { globTool } from "./glob.ts"
 import { grepTool } from "./grep.ts"
+import { enterPlanModeTool, exitPlanModeTool } from "./plan-mode.ts"
 import { askUserTool } from "./question.ts"
 import { readFileTool } from "./read.ts"
 import { todoWriteTool } from "./todo.ts"
@@ -33,6 +34,8 @@ export function builtinTools(): HarnessTool[] {
     bashTool,
     todoWriteTool,
     askUserTool,
+    enterPlanModeTool,
+    exitPlanModeTool,
   ]
 }
 

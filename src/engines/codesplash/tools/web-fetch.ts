@@ -16,6 +16,7 @@
 import { lookup } from "node:dns/promises"
 import {
   type HarnessTool,
+  type PermissionTargets,
   type ToolContext,
   ToolInputError,
   type ToolOutcome,
@@ -37,6 +38,11 @@ export const UNTRUSTED_CONTENT_NOTICE =
 /** Wraps externally controlled page content in the untrusted-content envelope. */
 function labelUntrustedContent(source: string, content: string): string {
   return `[${source}] ${UNTRUSTED_CONTENT_NOTICE}\n\n${content}`
+}
+
+/** Hostname as permission rules see it: lowercase (URL parsing already is) minus FQDN trailing dots. */
+function normalizeRuleHost(hostname: string): string {
+  return hostname.replace(/\.+$/, "")
 }
 
 /** Address resolution used by the SSRF guard; injectable so tests never touch real DNS. */
@@ -453,6 +459,28 @@ export function createWebFetchTool(options: WebFetchToolOptions = {}): HarnessTo
             label,
           }
         }
+        // Re-check permission rules per hop: an allowed URL must not reach a denied (or
+        // approval-requiring) host by bouncing through a redirect. The initial URL was already
+        // decided by the loop before run(); hops are decided here, read-only, no mid-run asks.
+        const hopDecision = context.permissions?.decide(
+          "web_fetch",
+          { urlHost: normalizeRuleHost(next.hostname) },
+          true,
+        )
+        if (hopDecision?.kind === "deny") {
+          return {
+            text: `web_fetch refused a redirect to ${next.href}: ${hopDecision.reason}.`,
+            isError: true,
+            label,
+          }
+        }
+        if (hopDecision?.kind === "ask") {
+          return {
+            text: `web_fetch refused a redirect to ${next.href}: fetching that host requires approval — fetch it directly instead.`,
+            isError: true,
+            label,
+          }
+        }
         current = next
       }
 
@@ -527,6 +555,12 @@ export function createWebFetchTool(options: WebFetchToolOptions = {}): HarnessTo
     },
 
     isReadOnly: () => true,
+
+    permissionTargets(input: unknown): PermissionTargets {
+      // Trailing-dot FQDNs ("evil.com.") are the same host DNS-wise; normalize so host rules
+      // and derived grants cannot be evaded or polluted by the dot.
+      return { urlHost: normalizeRuleHost(parseInput(input).url.hostname) }
+    },
 
     permission(input: unknown, context: ToolContext): ToolPermission {
       const parsed = parseInput(input)

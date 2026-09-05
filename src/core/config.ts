@@ -12,6 +12,26 @@ export type ConfigSandboxMode = Exclude<SandboxMode, "danger-full-access">
 
 export type ApprovalPolicy = "untrusted" | "on-request"
 
+/** First-party permission layer mode. "bypass" is per-session only, never a persisted default. */
+export type PermissionMode = "plan" | "default" | "accept-edits" | "bypass"
+
+/** Modes persistable in config; "bypass" requires the --bypass-approvals flag per session. */
+export type ConfigPermissionMode = Exclude<PermissionMode, "bypass">
+
+/**
+ * Permission rule grammar: `tool` or `tool(pattern)` — a lowercase tool name plus an optional
+ * non-empty parenthesized pattern. Unknown tool NAMES are deliberately not a config error
+ * (forward compatibility); the engine warns about them at session open instead.
+ */
+export const PERMISSION_RULE_PATTERN = /^[a-z][a-z0-9_-]*(\(.+\))?$/
+
+export type PermissionsConfig = {
+  mode: ConfigPermissionMode
+  allow: string[]
+  ask: string[]
+  deny: string[]
+}
+
 /** Wire protocol a custom provider speaks; mirrors the engine's ProviderId union. */
 export type CustomProviderProtocol = "anthropic" | "openai"
 
@@ -48,6 +68,7 @@ export type AgentConfig = {
   theme: ThemePreference
   history: { enabled: boolean }
   codex: { sandbox: ConfigSandboxMode; approvalPolicy: ApprovalPolicy }
+  permissions: PermissionsConfig
   codesplash: { fallbackModel?: string }
   providers: CustomProviderConfig[]
 }
@@ -57,6 +78,7 @@ export const defaultConfig: AgentConfig = {
   theme: "system",
   history: { enabled: true },
   codex: { sandbox: "workspace-write", approvalPolicy: "on-request" },
+  permissions: { mode: "default", allow: [], ask: [], deny: [] },
   codesplash: {},
   providers: [],
 }
@@ -255,6 +277,10 @@ export function validateConfig(parsed: unknown, path: string): AgentConfig {
     }
   }
 
+  if (parsed.permissions !== undefined) {
+    validatePermissions(parsed.permissions, config.permissions, problems)
+  }
+
   if (parsed.codesplash !== undefined) {
     if (!isRecord(parsed.codesplash)) {
       problems.push(`[codesplash]: expected a table`)
@@ -283,6 +309,56 @@ export function validateConfig(parsed: unknown, path: string): AgentConfig {
   }
 
   return config
+}
+
+/**
+ * Validates the [permissions] table into `target`, aggregating problems in the existing style.
+ * "bypass" is refused as a persisted default the same way [codex] refuses danger-full-access.
+ */
+function validatePermissions(value: unknown, target: PermissionsConfig, problems: string[]): void {
+  if (!isRecord(value)) {
+    problems.push(`[permissions]: expected a table`)
+    return
+  }
+
+  if (value.mode !== undefined) {
+    if (value.mode === "bypass") {
+      problems.push(
+        `[permissions].mode: "bypass" cannot be a persisted default; bypass requires the --bypass-approvals flag per session`,
+      )
+    } else if (isConfigPermissionMode(value.mode)) {
+      target.mode = value.mode
+    } else {
+      problems.push(
+        `[permissions].mode: got ${JSON.stringify(value.mode)}, expected "plan", "default", or "accept-edits"`,
+      )
+    }
+  }
+
+  for (const action of ["allow", "ask", "deny"] as const) {
+    const raw = value[action]
+    if (raw === undefined) continue
+    if (!Array.isArray(raw)) {
+      problems.push(`[permissions].${action}: got ${JSON.stringify(raw)}, expected an array of rule strings`)
+      continue
+    }
+    const rules: string[] = []
+    for (const [index, rule] of raw.entries()) {
+      if (typeof rule !== "string") {
+        problems.push(
+          `[permissions].${action}[${index + 1}]: got ${JSON.stringify(rule)}, expected a rule string`,
+        )
+      } else if (!isValidPermissionRule(rule)) {
+        problems.push(
+          `[permissions].${action}[${index + 1}]: invalid rule ${JSON.stringify(rule)} — rules are "tool" or "tool(pattern)" (lowercase tool name, non-empty pattern)`,
+        )
+      } else {
+        // Unknown tool names pass on purpose (forward compat); the engine warns at session open.
+        rules.push(rule)
+      }
+    }
+    target[action] = rules
+  }
 }
 
 function validateProviders(providers: Record<string, unknown>, problems: string[]): CustomProviderConfig[] {
@@ -517,6 +593,8 @@ export async function saveConfig(config: AgentConfig, path = configFilePath()): 
     history: { enabled: config.history.enabled },
     codex: { sandbox: config.codex.sandbox, approvalPolicy: config.codex.approvalPolicy },
   }
+  const permissions = permissionsTable(config.permissions)
+  if (permissions) table.permissions = permissions
   if (config.codesplash.fallbackModel !== undefined) {
     table.codesplash = { fallbackModel: config.codesplash.fallbackModel }
   }
@@ -529,6 +607,19 @@ export async function saveConfig(config: AgentConfig, path = configFilePath()): 
   await Bun.write(temporaryPath, source)
   await chmod(temporaryPath, 0o600)
   await rename(temporaryPath, path)
+}
+
+/**
+ * [permissions] serializes only the fields that differ from the defaults, and the table only
+ * when at least one does — matching the [codesplash]/[providers] style.
+ */
+function permissionsTable(permissions: PermissionsConfig): TomlTable | undefined {
+  const table: TomlTable = {}
+  if (permissions.mode !== "default") table.mode = permissions.mode
+  if (permissions.allow.length > 0) table.allow = [...permissions.allow]
+  if (permissions.ask.length > 0) table.ask = [...permissions.ask]
+  if (permissions.deny.length > 0) table.deny = [...permissions.deny]
+  return Object.keys(table).length > 0 ? table : undefined
 }
 
 function providerTable(provider: CustomProviderConfig): TomlTable {
@@ -576,6 +667,19 @@ function isConfigSandboxMode(value: unknown): value is ConfigSandboxMode {
 
 function isApprovalPolicy(value: unknown): value is ApprovalPolicy {
   return value === "untrusted" || value === "on-request"
+}
+
+export function isPermissionMode(value: unknown): value is PermissionMode {
+  return value === "bypass" || isConfigPermissionMode(value)
+}
+
+export function isConfigPermissionMode(value: unknown): value is ConfigPermissionMode {
+  return value === "plan" || value === "default" || value === "accept-edits"
+}
+
+/** True when `value` parses as a permission rule string (see PERMISSION_RULE_PATTERN). */
+export function isValidPermissionRule(value: string): boolean {
+  return PERMISSION_RULE_PATTERN.test(value)
 }
 
 function readOptionalString(value: unknown): string | undefined {

@@ -13,11 +13,16 @@ import {
   deferSignalExit,
   type EngineDriver,
   type EngineSession,
+  isConfigPermissionMode,
+  type PermissionMode,
+  type PermissionRuleOverrides,
+  readTrustDecision,
   type SessionPolicy,
   type SessionRecorder,
   type SessionUsageSnapshot,
   serializeEvent,
   type TurnStatus,
+  writeTrustDecision,
 } from "../../core/index.ts"
 import { defaultModelFor, defaultProvider, formatModelSelector } from "./catalog.ts"
 import type { ReasoningEffort } from "./contracts.ts"
@@ -59,6 +64,20 @@ export type HeadlessRunOptions = {
   firstSequence?: number
   /** Cumulative usage the resumed session already recorded; passed to openSession. */
   initialUsage?: SessionUsageSnapshot
+  /** Explicit --permission-mode value; wins over a resumed session's recorded mode. */
+  permissionModeOverride?: PermissionMode
+  /** permissionMode recorded in a resumed session's meta; reused unless explicitly overridden. */
+  recordedPermissionMode?: string
+  /** CLI-tier --allow/--ask/--deny rules; passed to openSession. */
+  permissionOverrides?: PermissionRuleOverrides
+  /** Remembered-grants file for the engine's "always allow" persistence; passed to openSession. */
+  permissionGrantsPath?: string
+  /** --trust: persist a trusted=true decision for cwd before resolving workspace trust. */
+  trustWorkspace?: boolean
+  /** Trust-store data directory override (tests, env-derived dirs); default harness data dir. */
+  trustDataDir?: string
+  /** Wired by the CLI to record the run's effective permission mode into the session meta. */
+  recordPermissionMode?: (mode: PermissionMode) => void
   /** Injectable sinks so tests capture output; default process.stdout / process.stderr. */
   stdout?: HeadlessSink
   stderr?: HeadlessSink
@@ -79,22 +98,32 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<number> 
   const localSessionId = options.localSessionId ?? crypto.randomUUID()
   const output = createOutput(options.outputFormat, stdout, stderr, localSessionId)
 
+  // Effective permission mode (explicit override > resumed recorded mode > the policy's resolved
+  // mode) and workspace trust are settled before the session opens; the engine builds its
+  // permission runtime from exactly these.
+  const permissionMode = resolvePermissionMode(options, stderr)
+  const workspaceTrusted = await resolveWorkspaceTrust(options, stderr)
+
   let session: EngineSession
   try {
     session = await driver.openSession({
       cwd: options.cwd,
       localSessionId,
       model: headlessModelSelector(options.model, options.effort),
-      policy: options.policy,
+      policy: { ...options.policy, permissionMode },
       nativeTranscriptPath: options.nativeTranscriptPath,
       firstSequence: options.firstSequence,
       initialUsage: options.initialUsage,
+      workspaceTrusted,
+      permissionOverrides: options.permissionOverrides,
+      permissionGrantsPath: options.permissionGrantsPath,
     })
   } catch (error) {
     stderr.write(`codesplash: ${describeError(error)}\n`)
     return 1
   }
   if (session.nativeSessionId) recorder?.recordNativeSessionId(session.nativeSessionId)
+  options.recordPermissionMode?.(permissionMode)
 
   const resolvedRequests = new Set<string>()
   let interrupted = false
@@ -138,9 +167,16 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<number> 
           // Resolve each request exactly once, immediately: headless runs cannot ask the user.
           if (resolvedRequests.has(event.payload.id)) continue
           resolvedRequests.add(event.payload.id)
-          const choice =
-            event.payload.requestKind === "approval" ? (options.autoApprove ? "accept" : "decline") : "cancel"
-          if (choice === "decline") stderr.write(`declined: ${event.payload.title}\n`)
+          const choice = headlessRequestChoice(event.payload, options.autoApprove)
+          if (choice === "decline") {
+            // Dangerous-floor approvals name the command class and why --auto did not take them.
+            const reason = event.payload.reason === undefined ? "" : ` — ${event.payload.reason}`
+            stderr.write(
+              event.payload.alwaysAsk
+                ? `declined: ${event.payload.title}${reason} (always requires interactive approval; --auto never accepts it)\n`
+                : `declined: ${event.payload.title}${reason}\n`,
+            )
+          }
           if (choice === "cancel") stderr.write(`cancelled: ${event.payload.title}\n`)
           try {
             await session.resolveRequest(event.payload.id, { choice })
@@ -183,6 +219,66 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<number> 
   }
 
   return status === "completed" ? 0 : status === "interrupted" ? 130 : 1
+}
+
+/**
+ * Effective permission mode for the run: an explicit --permission-mode wins, then a resumed
+ * session's recorded mode, then the policy's resolved mode (same precedence as sandbox reuse).
+ * A recorded "bypass" cannot be reused headless — bypass always needs the interactive launch
+ * flag — so it degrades to "default" with a notice, mirroring the full-access sandbox degrade;
+ * an unrecognized recorded value (meta is loosely validated) is ignored.
+ */
+function resolvePermissionMode(options: HeadlessRunOptions, stderr: HeadlessSink): PermissionMode {
+  if (options.permissionModeOverride) return options.permissionModeOverride
+  const recorded = options.recordedPermissionMode
+  if (recorded === "bypass") {
+    stderr.write(
+      "codesplash: the recorded session ran in bypass mode, which needs the --bypass-approvals launch flag; using default (pass --permission-mode to choose)\n",
+    )
+    return "default"
+  }
+  if (recorded !== undefined && isConfigPermissionMode(recorded)) return recorded
+  return options.policy.permissionMode ?? "default"
+}
+
+/**
+ * Resolves workspace trust from the persistent store. `--trust` persists trusted=true first;
+ * anything but a recorded trusted decision proceeds untrusted with one stderr line — run mode
+ * never prompts interactively.
+ */
+async function resolveWorkspaceTrust(options: HeadlessRunOptions, stderr: HeadlessSink): Promise<boolean> {
+  if (options.trustWorkspace) {
+    try {
+      await writeTrustDecision(options.cwd, true, options.trustDataDir)
+    } catch (error) {
+      stderr.write(`warning: could not persist workspace trust: ${describeError(error)}\n`)
+    }
+  }
+  const decision = await readTrustDecision(options.cwd, options.trustDataDir)
+  const trusted = decision?.trusted === true
+  if (!trusted) {
+    stderr.write(
+      "Workspace not trusted: project rule files and .codesplash/permissions.toml are ignored (pass --trust to trust this folder).\n",
+    )
+  }
+  return trusted
+}
+
+/**
+ * Headless answer for a request. User-input is always cancelled; dangerous-floor approvals
+ * (alwaysAsk) are declined even under --auto; plan reviews (an "approve" choice) approve under
+ * --auto and cancel otherwise — the same decline-by-default posture as ordinary approvals,
+ * which accept under --auto and decline otherwise. "acceptAlways" is never answered headless:
+ * persisting a grant is a deliberate interactive decision.
+ */
+function headlessRequestChoice(
+  payload: { requestKind: "approval" | "user-input"; choices: string[]; alwaysAsk?: boolean },
+  autoApprove: boolean,
+): string {
+  if (payload.requestKind !== "approval") return "cancel"
+  if (payload.alwaysAsk) return "decline"
+  if (payload.choices.includes("approve")) return autoApprove ? "approve" : "cancel"
+  return autoApprove ? "accept" : "decline"
 }
 
 /** Combines the model id and effort into the `id[:effort]` selector the engine parses. */

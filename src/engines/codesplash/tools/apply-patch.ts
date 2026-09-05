@@ -12,6 +12,7 @@ import { mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises"
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
 import {
   type HarnessTool,
+  type PermissionTargets,
   type ToolContext,
   ToolInputError,
   type ToolOutcome,
@@ -587,6 +588,11 @@ export const applyPatchTool: HarnessTool = {
     additionalProperties: false,
   },
   isReadOnly: () => false,
+  // Reuses the envelope parser: a malformed patch throws ToolInputError, which sends the loop
+  // down the default path where run() surfaces the same parse error.
+  permissionTargets: (input, context): PermissionTargets => ({
+    paths: touchedPaths(parsePatch(parseInput(input).input), context.cwd),
+  }),
   permission: patchPermission,
   run: async (input, context) => runApplyPatch(parseInput(input), context),
 }
