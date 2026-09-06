@@ -352,11 +352,16 @@ export async function runCodexSession(
         ? {
             bypassAllowed,
             workspaceTrusted,
+            sandboxStatus: liveSession.sandboxStatus
+              ? () => liveSession.sandboxStatus?.() ?? "unavailable"
+              : undefined,
+            editRule: liveSession.editPermissionRule?.bind(liveSession),
             setMode: (mode) =>
               liveSession.setPermissionMode
                 ? liveSession.setPermissionMode(mode)
                 : Promise.reject(new Error("This engine cannot switch permission modes")),
             loadRules: async () => {
+              if (liveSession.permissionRules) return liveSession.permissionRules()
               const runtime = await permissionLayer.createPermissionRuntime({
                 cwd: project.cwd,
                 mode: policy.permissionMode ?? "default",
@@ -368,7 +373,10 @@ export async function runCodexSession(
               return permissionLayer.describePermissionRules(runtime)
             },
             removeGrant: permissionGrantsPath
-              ? (rule) => permissionLayer.removePermissionGrant(permissionGrantsPath, rule)
+              ? (rule) =>
+                  liveSession.editPermissionRule
+                    ? liveSession.editPermissionRule(`delete grants allow ${rule}`)
+                    : permissionLayer.removePermissionGrant(permissionGrantsPath, rule)
               : undefined,
           }
         : undefined

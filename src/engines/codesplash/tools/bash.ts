@@ -9,6 +9,7 @@ import {
   type ToolOutcome,
   type ToolPermission,
 } from "../contracts.ts"
+import { SecretSanitizer } from "../sandbox/env-policy.ts"
 import { DEFAULT_TRUNCATE_MAX_BYTES, DEFAULT_TRUNCATE_MAX_LINES, truncateToolOutput } from "./truncate.ts"
 
 export const DEFAULT_TIMEOUT_MS = 120_000
@@ -99,19 +100,24 @@ const DRAIN_GRACE_MS = 250
 
 type Drain = { done: Promise<void>; cancel: () => void }
 
-function drainStream(stream: ReadableStream<Uint8Array>, collector: OutputCollector): Drain {
+function drainStream(
+  stream: ReadableStream<Uint8Array>,
+  collector: OutputCollector,
+  secrets: readonly string[] = [],
+): Drain {
   const reader = stream.getReader()
   const decoder = new TextDecoder("utf-8")
+  const sanitizer = new SecretSanitizer(secrets)
   const done = (async () => {
     try {
       while (true) {
         const { done: finished, value } = await reader.read()
         if (finished) break
-        if (value !== undefined) collector.push(decoder.decode(value, { stream: true }))
+        if (value !== undefined) collector.push(sanitizer.push(decoder.decode(value, { stream: true })))
       }
     } catch {
     } finally {
-      collector.push(decoder.decode())
+      collector.push(sanitizer.push(decoder.decode(), true))
       reader.releaseLock()
     }
   })()
@@ -161,6 +167,13 @@ export const bashTool: HarnessTool = {
       timeout: {
         type: "number",
         description: `Timeout in milliseconds (default ${DEFAULT_TIMEOUT_MS}, max ${MAX_TIMEOUT_MS}).`,
+      },
+      secrets: {
+        type: "array",
+        items: { type: "string" },
+        maxItems: 16,
+        description:
+          "Named OS-keyring secrets to bind to this command's environment; always requires explicit approval",
       },
     },
     required: ["command"],
@@ -243,8 +256,8 @@ export const bashTool: HarnessTool = {
     }
     context.signal.addEventListener("abort", onAbort, { once: true })
 
-    const stdoutDrain = drainStream(proc.stdout, collector)
-    const stderrDrain = drainStream(proc.stderr, collector)
+    const stdoutDrain = drainStream(proc.stdout, collector, context.secretValues)
+    const stderrDrain = drainStream(proc.stderr, collector, context.secretValues)
     try {
       await proc.exited
       const drains = Promise.all([stdoutDrain.done, stderrDrain.done])

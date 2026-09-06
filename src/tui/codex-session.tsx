@@ -173,6 +173,7 @@ export type PermissionRuleView = {
   action: "allow" | "ask" | "deny"
   source: "cli" | "project" | "user" | "grants" | "builtin"
   raw: string
+  conflict?: string
 }
 
 /** Permission-layer surface a codesplash session hands the screen; absent for other engines. */
@@ -186,6 +187,8 @@ export type SessionPermissionsUi = {
   loadRules(): Promise<PermissionRuleView[]>
   /** Deletes a remembered grant; absent when no grants file is configured for this session. */
   removeGrant?(rule: string): Promise<void>
+  editRule?(command: string): Promise<void>
+  sandboxStatus?(): string
 }
 
 /** Shift+Tab cycle order; "bypass" participates only when the launch flag allowed it. */
@@ -265,7 +268,7 @@ export function buildPermissionRuleSections(
         const selected = isGrant && grantIndex === selectedGrant
         if (isGrant) grantIndex += 1
         return {
-          text: `${rule.raw}  [${permissionSourceTag(rule.source)}]`,
+          text: `${rule.raw}  [${permissionSourceTag(rule.source)}]${rule.conflict ? ` · ${rule.conflict}` : ""}`,
           isGrant,
           selected,
         }
@@ -630,6 +633,15 @@ export function CodexSessionApp({
           onAction("quit")
           return
         case "permissions":
+          if (command.argument) {
+            const argument = command.argument
+            void runCommand(async () => {
+              if (!permissions?.editRule) throw new Error("This engine cannot edit permission rules")
+              await permissions.editRule(argument)
+              openPermissionsOverlay()
+            })
+            return
+          }
           openPermissionsOverlay()
           return
         case "usage":
@@ -644,7 +656,15 @@ export function CodexSessionApp({
           return
       }
     },
-    [controller, historyLocation, onAction, openModelOverlay, openPermissionsOverlay, runCommand],
+    [
+      controller,
+      historyLocation,
+      onAction,
+      openModelOverlay,
+      openPermissionsOverlay,
+      runCommand,
+      permissions,
+    ],
   )
 
   useKeyboard((key) => {
@@ -1056,6 +1076,13 @@ function SessionOverlay({
           <PolicyBadge policy={policy} palette={palette} />
         </box>
         <text fg={palette.foreground}>Approvals: {policy.approvalPolicy}</text>
+        {permissions.sandboxStatus ? <text fg={palette.muted}>{permissions.sandboxStatus()}</text> : null}
+        {permissions.editRule ? (
+          <text fg={palette.muted}>
+            Edit: /permissions add|delete|replace user|project|grants allow|ask|deny rule (replace: old =&gt;
+            new)
+          </text>
+        ) : null}
         <text fg={permissions.workspaceTrusted ? palette.foreground : palette.destructive}>
           Workspace trust: {permissionTrustLabel(permissions.workspaceTrusted)}
         </text>

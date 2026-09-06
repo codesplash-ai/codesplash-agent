@@ -69,7 +69,8 @@ async function runRead(input: ReadInput, context: ToolContext): Promise<ToolOutc
     )
   }
 
-  const content = await readFile(resolved, { encoding: "utf8", signal: context.signal })
+  const raw = await readFile(resolved, { encoding: "utf8", signal: context.signal })
+  const content = context.sanitizeOutput?.(raw) ?? raw
   if (content === "") return { text: `${display} is an empty file`, label: display }
 
   const lines = content.split("\n")

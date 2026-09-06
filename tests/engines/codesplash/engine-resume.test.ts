@@ -311,6 +311,8 @@ describe("transcript write failures", () => {
     const locked = join(cwd, "locked")
     const { mkdir, chmod } = await import("node:fs/promises")
     await mkdir(locked)
+    const { createProfile, pinProfile } = await import("../../../src/engines/codesplash/sandbox/profile.ts")
+    await pinProfile(createProfile(cwd, "workspace-write"), join(locked, "sandbox-profile.json"))
     await chmod(locked, 0o500)
     const brokenPath = join(locked, "transcript.jsonl")
     const provider = fakeProvider([textTurn("one"), textTurn("two")])

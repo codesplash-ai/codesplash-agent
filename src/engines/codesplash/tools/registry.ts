@@ -11,6 +11,7 @@ import { grepTool } from "./grep.ts"
 import { enterPlanModeTool, exitPlanModeTool } from "./plan-mode.ts"
 import { askUserTool } from "./question.ts"
 import { readFileTool } from "./read.ts"
+import { requestPermissionsTool } from "./request-permissions.ts"
 import { todoWriteTool } from "./todo.ts"
 import { createWebFetchTool } from "./web-fetch.ts"
 import { createWebSearchTool } from "./web-search.ts"
@@ -36,6 +37,7 @@ export function builtinTools(): HarnessTool[] {
     askUserTool,
     enterPlanModeTool,
     exitPlanModeTool,
+    requestPermissionsTool,
   ]
 }
 

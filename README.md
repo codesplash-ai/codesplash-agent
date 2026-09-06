@@ -121,8 +121,9 @@ codesplash run --continue -p "now add tests for that"    # newest codesplash ses
 codesplash run --resume <session-id> -p "keep going"     # a specific session by id
 ```
 
-Resumed runs reuse the session's recorded sandbox and approval policy unless overridden on the
-command line, and append to the same history (`--no-history` with resume is a usage error).
+Resumed runs reuse the session's recorded policy and append to the same history
+(`--no-history` with resume is a usage error). Native execution profiles are pinned:
+conflicting sandbox overrides require a new session.
 
 #### Custom providers (BYOK)
 
@@ -241,12 +242,60 @@ never rememberable, shell-interpreter prefixes (`bash(bash *)`) are never derive
 file-tool grant is refused when its parent directory would blanket `/`, a top-level directory,
 or the home directory.
 
-**Honest layering note**: this is a policy layer, not an OS sandbox. `bash` enforcement is
-analysis + approvals — a command the analyzer cannot parse always asks instead of matching
-rules — and
-the write-path floors apply to the file tools, not to what an approved shell command does. The
-OS-level sandbox for shell commands ships in a later milestone; until then, treat `allow` rules
-for bash as trust statements about the commands they match.
+**Native execution sandbox**: macOS Seatbelt and Linux bubblewrap/seccomp enforce filesystem
+and network restrictions for shell commands, descendants, and file-tool workers. Approval
+rules permit an attempt within that boundary. Bypass approvals does not disable it. Missing
+dependencies or an incompatible enclosing sandbox refuse execution without an unrestricted
+retry. Native Windows isolation is not available yet.
+
+macOS needs `sandbox-exec` and ripgrep. Linux needs `bubblewrap`, `socat`, ripgrep, and a host
+policy permitting unprivileged user namespaces; the release includes a verified seccomp
+helper. Homebrew installs the platform dependencies. `codesplash --doctor` probes execution;
+`/permissions` shows the active profile and the last observed enforcement state.
+
+```sh
+codesplash sandbox --no-history -- /bin/sh -c 'printf ok > sandbox-check.txt'
+codesplash sandbox --read-only -- /bin/ls
+codesplash sandbox --allow-host example.com:443 -- curl https://example.com
+```
+
+The wrapper preserves arguments after `--` literally. `--read-root PATH` and
+`--write-root PATH` add absolute roots for that invocation. Native sessions can configure
+`readRoots`, `writeRoots`, `allowedHosts` (exact `hostname:port`), and `environment` (non-secret
+variable names) under `[sandbox]`. The base profile is pinned when a session opens; conflicting
+configuration on resume requires restoring it or starting a new session. Legacy sessions get
+an explicit migration notice. Temporary grants are never restored on resume.
+
+Tool network access requires exact host grants. The `request_permissions` tool asks for an
+explicit read, write, or network capability lasting one turn or the live session. Headless
+`--auto` and guardian reviews cannot grant it. A grant never automatically retries a command.
+Direct network bypasses, private-address destinations, and unsupported protocols remain
+blocked. The exact `.codesplash/plan.md` file is the only workspace write exception in plan mode.
+Sensitive-file kernel exclusions still apply when a permission rule allows a read.
+
+Named secrets use the OS keyring: `codesplash secrets set DEPLOY_TOKEN` reads hidden input
+(or stdin); `codesplash secrets list` lists names, and `codesplash secrets delete DEPLOY_TOKEN`
+removes one. Each tool binding requires approval showing the name and complete command.
+Values are filtered from tool output before truncation and persistence. There is no plaintext
+fallback if the keyring is unavailable. Redaction does not prevent a deliberately encoded
+secret from being disclosed by an approved command.
+
+`[guardian] enabled = true` enables optional bounded model review of eligible default prompts.
+It is off by default; explicit ask/deny rules, dangerous-command prompts, and secret/access
+approvals retain their normal behavior. Timeout, cancellation, and malformed reviews do not
+approve execution. `/permissions add|delete|replace user|project|grants allow|ask|deny RULE`
+edits writable rules; replacement uses `OLD => NEW`. The overlay labels rule sources and
+reports definite conflicts.
+
+For development on this repository, use `bun run dev`: it runs a private copy of the harness
+so tools can edit this checkout while the running supervisor stays protected. Workspaces
+with hardlinks reaching outside their admitted roots are refused; use a separate copy or
+install dependencies with `bun install --backend=copyfile` if needed. The boundary covers
+tool execution; the trusted harness and concurrent unconfined host programs remain outside it.
+
+Bun 1.3.14's script launcher can report `CouldntReadCurrentDirectory` when ancestor directories
+are unreadable. `npm run build` is verified inside this sandbox; invoking a script directly
+with `bun path/to/script.ts` also avoids that launcher behavior. See the [Bun issue](https://github.com/oven-sh/bun/issues/28220).
 
 ## Security posture
 

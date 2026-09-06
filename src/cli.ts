@@ -31,6 +31,9 @@ Usage:
   codesplash review [path] [review options]
   codesplash stats [--days <n>] [--json]
   codesplash completions <bash|zsh|fish|powershell>
+  codesplash sandbox [--read-only] [--read-root PATH] [--write-root PATH]
+                     [--allow-host HOST:PORT] [--no-history] -- CMD [ARGS...]
+  codesplash secrets set NAME | list | delete NAME
   codesplash debug prompt [path] [--model <id[:effort]>] [--sandbox <mode>] [-c <key=value>]
   codesplash --doctor
   codesplash --version
@@ -845,6 +848,30 @@ async function main(): Promise<void> {
   installSignalHandlers()
 
   const args = process.argv.slice(2)
+
+  if (args[0] === "--internal-sandbox-supervisor") {
+    await (await import("./engines/codesplash/sandbox/supervisor.ts")).supervisorMain()
+    return
+  }
+  if (args[0] === "--internal-sandbox-worker") {
+    await (await import("./engines/codesplash/sandbox/worker.ts")).workerMain()
+    return
+  }
+  // Dispatch before global help/version flags: arguments after sandbox's -- are literal child argv.
+  if (args[0] === "sandbox") {
+    process.exitCode = await (await import("./commands/sandbox.ts")).runSandboxCommand(args.slice(1))
+    return
+  }
+  if (args[0] === "secrets") {
+    process.exitCode = await (await import("./commands/secrets.ts")).runSecretsCommand(
+      args.slice(1),
+      async () =>
+        process.stdin.isTTY
+          ? readSecretFromTty("Secret value (hidden): ", process.stderr)
+          : (await Bun.stdin.text()).replace(/\r?\n$/, ""),
+    )
+    return
+  }
 
   if (args.includes("--help") || args.includes("-h")) {
     printHelp()

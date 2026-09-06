@@ -1,6 +1,8 @@
 import { chmod, mkdir, readFile, rename } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
+import type { NativeSandboxConfig } from "../engines/codesplash/sandbox/contracts.ts"
+import { validateEnvironmentName } from "../engines/codesplash/sandbox/env-policy.ts"
 import { redactSensitiveText } from "./redaction.ts"
 import { stringifyToml, type TomlTable } from "./toml.ts"
 
@@ -71,6 +73,15 @@ export type AgentConfig = {
   permissions: PermissionsConfig
   codesplash: { fallbackModel?: string }
   providers: CustomProviderConfig[]
+  sandbox?: NativeSandboxConfig
+  guardian?: {
+    enabled: boolean
+    model?: string
+    timeoutMs?: number
+    maxReviews?: number
+    maxTokens?: number
+    maxCostUsd?: number
+  }
 }
 
 export const defaultConfig: AgentConfig = {
@@ -301,6 +312,58 @@ export function validateConfig(parsed: unknown, path: string): AgentConfig {
       problems.push(`[providers]: expected one [providers.<id>] table per custom provider`)
     } else {
       config.providers = validateProviders(parsed.providers, problems)
+    }
+  }
+
+  if (parsed.sandbox !== undefined) {
+    if (!isRecord(parsed.sandbox)) problems.push("[sandbox]: expected a table")
+    else {
+      config.sandbox = {}
+      for (const [key, value] of Object.entries(parsed.sandbox)) {
+        if (!["readRoots", "writeRoots", "allowedHosts", "environment"].includes(key)) {
+          problems.push(`[sandbox].${key}: unknown setting`)
+          continue
+        }
+        if (!Array.isArray(value) || value.some((s) => typeof s !== "string" || !s)) {
+          problems.push(`[sandbox].${key}: expected an array of nonempty strings`)
+          continue
+        }
+        if (key === "environment")
+          for (const name of value as string[]) {
+            try {
+              validateEnvironmentName(name)
+            } catch {
+              problems.push("[sandbox].environment: unsafe environment name")
+            }
+          }
+        config.sandbox[key as keyof NativeSandboxConfig] = value as string[]
+      }
+    }
+  }
+  if (parsed.guardian !== undefined) {
+    if (!isRecord(parsed.guardian)) problems.push("[guardian]: expected a table")
+    else {
+      config.guardian = { enabled: false }
+      for (const [key, value] of Object.entries(parsed.guardian)) {
+        if (key === "enabled" && typeof value === "boolean") config.guardian.enabled = value
+        else if (key === "model" && typeof value === "string" && value) config.guardian.model = value
+        else if (
+          ["timeoutMs", "maxReviews", "maxTokens", "maxCostUsd"].includes(key) &&
+          typeof value === "number" &&
+          Number.isFinite(value) &&
+          value > 0 &&
+          (key === "maxCostUsd" || Number.isInteger(value))
+        ) {
+          Object.assign(config.guardian, { [key]: value })
+        } else problems.push(`[guardian].${key}: invalid setting`)
+      }
+      if (
+        (config.guardian.timeoutMs ?? 10_000) > 60_000 ||
+        (config.guardian.maxReviews ?? 3) > 10 ||
+        (config.guardian.maxTokens ?? 256) > 1024 ||
+        (config.guardian.maxCostUsd ?? 0.1) > 1
+      )
+        problems.push("[guardian]: limits exceed maximums (60s, 10 reviews, 1024 tokens, $1 per turn)")
     }
   }
 
@@ -595,6 +658,8 @@ export async function saveConfig(config: AgentConfig, path = configFilePath()): 
   }
   const permissions = permissionsTable(config.permissions)
   if (permissions) table.permissions = permissions
+  if (config.sandbox) table.sandbox = { ...config.sandbox }
+  if (config.guardian) table.guardian = { ...config.guardian }
   if (config.codesplash.fallbackModel !== undefined) {
     table.codesplash = { fallbackModel: config.codesplash.fallbackModel }
   }

@@ -12,7 +12,17 @@ export const COMPLETION_SHELLS: readonly CompletionShell[] = ["bash", "zsh", "fi
 
 /* ------------------------------- shared command surface ------------------------------- */
 
-const SUBCOMMANDS = ["login", "logout", "run", "review", "stats", "completions", "debug"] as const
+const SUBCOMMANDS = [
+  "login",
+  "logout",
+  "run",
+  "review",
+  "stats",
+  "completions",
+  "debug",
+  "sandbox",
+  "secrets",
+] as const
 
 const ROOT_FLAGS = [
   "--help",
@@ -69,6 +79,15 @@ const REVIEW_FLAGS = [
 
 const STATS_FLAGS = ["--days", "--json"] as const
 const DEBUG_FLAGS = ["--model", "--sandbox", "--config"] as const
+const SANDBOX_FLAGS = [
+  "--read-only",
+  "--read-root",
+  "--write-root",
+  "--allow-host",
+  "--no-history",
+  "--",
+] as const
+const SECRET_ACTIONS = ["set", "list", "delete"] as const
 
 const SANDBOX_VALUES = ["read-only", "workspace-write"] as const
 const PERMISSION_MODE_VALUES = ["plan", "default", "accept-edits"] as const
@@ -158,6 +177,8 @@ _codesplash_completions() {
     review) COMPREPLY=($(compgen -W "${words(REVIEW_FLAGS)}" -- "$cur")) ;;
     stats) COMPREPLY=($(compgen -W "${words(STATS_FLAGS)}" -- "$cur")) ;;
     debug) COMPREPLY=($(compgen -W "${words(DEBUG_FLAGS)}" -- "$cur")) ;;
+    sandbox) COMPREPLY=($(compgen -W "${words(SANDBOX_FLAGS)}" -- "$cur")) ;;
+    secrets) COMPREPLY=($(compgen -W "${words(SECRET_ACTIONS)}" -- "$cur")) ;;
     login) COMPREPLY=($(compgen -W "--api-key" -- "$cur")) ;;
     *) COMPREPLY=($(compgen -W "${words(ROOT_FLAGS)}" -- "$cur")) ;;
   esac
@@ -195,6 +216,8 @@ _codesplash() {
     review) compadd -- ${words(REVIEW_FLAGS)} ;;
     stats) compadd -- ${words(STATS_FLAGS)} ;;
     debug) compadd -- ${words(DEBUG_FLAGS)} ;;
+    sandbox) compadd -- ${words(SANDBOX_FLAGS)} ;;
+    secrets) compadd ${words(SECRET_ACTIONS)} ;;
     login) compadd -- --api-key ;;
     *) compadd -- ${words(ROOT_FLAGS)} ;;
   esac
@@ -213,6 +236,12 @@ function fishScript(): string {
     `complete -c codesplash -n "__fish_seen_subcommand_from login" -l api-key -x`,
     `complete -c codesplash -n "__fish_seen_subcommand_from completions" -a "${words(COMPLETION_SHELLS)}"`,
     `complete -c codesplash -n "__fish_seen_subcommand_from debug" -a "${words(DEBUG_TOPICS)}"`,
+    `complete -c codesplash -n "__fish_seen_subcommand_from secrets" -a "${words(SECRET_ACTIONS)}"`,
+    `complete -c codesplash -n "__fish_seen_subcommand_from sandbox" -l read-only`,
+    `complete -c codesplash -n "__fish_seen_subcommand_from sandbox" -l read-root -r`,
+    `complete -c codesplash -n "__fish_seen_subcommand_from sandbox" -l write-root -r`,
+    `complete -c codesplash -n "__fish_seen_subcommand_from sandbox" -l allow-host -x`,
+    `complete -c codesplash -n "__fish_seen_subcommand_from sandbox" -l no-history`,
     `complete -c codesplash -l sandbox -x -a "${words(SANDBOX_VALUES)}"`,
     `complete -c codesplash -l permission-mode -x -a "${words(PERMISSION_MODE_VALUES)}"`,
     `complete -c codesplash -l allow -x`,
@@ -273,6 +302,8 @@ Register-ArgumentCompleter -Native -CommandName codesplash -ScriptBlock {
                 'review' { @(${quotedList(REVIEW_FLAGS)}) }
                 'stats' { @(${quotedList(STATS_FLAGS)}) }
                 'debug' { @(${quotedList(DEBUG_FLAGS)}) }
+                'sandbox' { @(${quotedList(SANDBOX_FLAGS)}) }
+                'secrets' { @(${quotedList(SECRET_ACTIONS)}) }
                 'login' { @('--api-key') }
                 default { @(${quotedList(SUBCOMMANDS)}, ${quotedList(ROOT_FLAGS)}) }
             }

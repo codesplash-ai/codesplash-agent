@@ -5,6 +5,7 @@
  */
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
+import { safeGitArguments, safeGitEnvironment } from "../../core/git-process.ts"
 import {
   type AgentEvent,
   type AgentEventInput,
@@ -39,8 +40,11 @@ import {
   ToolInputError,
   type ToolResultBlock,
 } from "./contracts.ts"
+import { Guardian, type GuardianConfig } from "./guardian.ts"
 import { derivePersistableRule } from "./permissions.ts"
+import type { SandboxRuntime } from "./sandbox/contracts.ts"
 import type { ToolRegistry } from "./tools/registry.ts"
+import { parsePermissionRequest, REQUEST_PERMISSIONS_TOOL_NAME } from "./tools/request-permissions.ts"
 import { truncateToolOutput } from "./tools/truncate.ts"
 
 /** Tool rounds per turn before the harness forces the turn to end. */
@@ -132,6 +136,8 @@ export type CodesplashLoopOptions = {
    * plan-mode tools report themselves unavailable.
    */
   permissions?: PermissionRuntime
+  sandbox?: SandboxRuntime
+  guardian?: GuardianConfig
   maxToolRounds?: number
   collectDiff?: DiffCollector
   /** `[codesplash].fallbackModel`: retried on a zero-event provider failure at turn start. */
@@ -195,6 +201,10 @@ export class CodesplashLoop {
   readonly #fallbackModel: string | undefined
   readonly #resolveModel: ((id: string) => ResolvedModel | undefined) | undefined
   readonly #permissions: PermissionRuntime | undefined
+  readonly #sandbox: SandboxRuntime | undefined
+  #escalations = 0
+  readonly #guardian: Guardian | undefined
+  #guardianRequest: TurnRequest | undefined
   /** Mode to restore when a plan is approved; recorded by enter_plan_mode, "default" otherwise. */
   #modeBeforePlan: PermissionMode = "default"
   /** Session-cumulative usage committed from finished provider requests. */
@@ -222,10 +232,12 @@ export class CodesplashLoop {
     this.#events = options.events
     this.#emit = options.emit
     this.#maxToolRounds = options.maxToolRounds ?? MAX_TOOL_ROUNDS
-    this.#collectDiff = options.collectDiff ?? collectGitDiff
+    this.#collectDiff = options.collectDiff ?? ((cwd, paths) => collectGitDiff(cwd, paths, options.sandbox))
     this.#fallbackModel = options.fallbackModel
     this.#resolveModel = options.resolveModel
     this.#permissions = options.permissions
+    this.#sandbox = options.sandbox
+    this.#guardian = options.guardian?.enabled ? new Guardian(options.guardian) : undefined
     if (options.initialUsage) {
       this.#usageTotals.inputTokens = options.initialUsage.inputTokens ?? 0
       this.#usageTotals.cachedInputTokens = options.initialUsage.cachedInputTokens ?? 0
@@ -241,6 +253,10 @@ export class CodesplashLoop {
 
   get isTurnActive(): boolean {
     return this.#abort !== undefined
+  }
+  clearApprovalCache(): void {
+    if (this.isTurnActive) throw new Error("Cannot change approvals during a turn")
+    this.#sessionApprovals.clear()
   }
 
   /** Replaces the loop's history (e.g. from a persisted transcript); only legal between turns. */
@@ -278,6 +294,8 @@ export class CodesplashLoop {
     const abort = new AbortController()
     this.#abort = abort
     this.#turnId = crypto.randomUUID()
+    this.#escalations = 0
+    this.#guardianRequest = request
     this.#turnStartIndex = this.#history.length
     this.#lastTurnMessages = []
     const turnMutatedPaths = new Set<string>()
@@ -419,6 +437,9 @@ export class CodesplashLoop {
       this.#event("loop/error", {}, { kind: "error", payload: { message, recoverable: false } })
       this.#completeTurn("failed")
     } finally {
+      this.#sandbox?.endTurn()
+      this.#guardian?.endTurn()
+      this.#guardianRequest = undefined
       this.#lastTurnMessages = this.#history.slice(this.#turnStartIndex)
       this.#abort = undefined
       this.#turnId = undefined
@@ -866,6 +887,49 @@ export class CodesplashLoop {
     }
 
     try {
+      if (tool.name === REQUEST_PERMISSIONS_TOOL_NAME) {
+        if (!this.#sandbox || !this.#permissions)
+          return this.#failCall(
+            itemId,
+            call,
+            provisionalLabel,
+            "Scoped permissions are unavailable in this session",
+          )
+        if (++this.#escalations > 3)
+          return this.#failCall(
+            itemId,
+            call,
+            provisionalLabel,
+            "Permission request limit reached for this turn; change your approach",
+          )
+        const requested = parsePermissionRequest(call.input)
+        const grant = this.#sandbox.validateGrant(requested, this.#permissions.mode)
+        const name =
+          grant.resource === "network" ? "web_fetch" : grant.resource === "write" ? "write_file" : "read_file"
+        const targets =
+          grant.resource === "network" ? { urlHost: grant.target.split(":")[0] } : { paths: [grant.target] }
+        if (
+          this.#permissions.decide(tool.name, undefined, false).kind === "deny" ||
+          this.#permissions.decide(name, targets, grant.resource !== "write").kind === "deny"
+        )
+          return this.#failCall(itemId, call, provisionalLabel, "Explicit permission rules deny this request")
+        const choice = await this.#awaitDecision(
+          "approval",
+          "Grant sandbox access?",
+          `${grant.resource}: ${grant.target}\nScope: ${grant.scope}\n${requested.reason}\nA failed command is not retried automatically.`,
+          ["accept", "decline", "cancel"],
+          itemId,
+          signal,
+          true,
+          "sandbox escalation requires explicit approval",
+        )
+        if (choice !== "accept" || signal.aborted)
+          return this.#failCall(itemId, call, provisionalLabel, "Sandbox access was not granted")
+        this.#sandbox.grant(this.#sandbox.validateGrant(grant, this.#permissions.mode))
+        const text = `Granted ${grant.resource} access to ${grant.target} for this ${grant.scope}. Retry only after considering any prior side effects.`
+        this.#emitToolItem(itemId, provisionalLabel, text, "completed")
+        return { type: "tool_result", toolCallId: call.id, text }
+      }
       if (
         tool.name === ASK_USER_TOOL_NAME ||
         tool.name === ENTER_PLAN_MODE_TOOL_NAME ||
@@ -894,7 +958,65 @@ export class CodesplashLoop {
       if (decision.kind === "deny") {
         return this.#failCall(itemId, call, provisionalLabel, `Denied by permission rule: ${decision.reason}`)
       }
-      if (decision.kind === "ask") {
+      let guardianAllowed = false
+      // Explicit ask rules and deterministic floors are human decisions. Guardian may
+      // reduce only the tool's default prompts, never a policy-authored ask.
+      if (
+        this.#guardian &&
+        this.#guardianRequest &&
+        decision.kind === "default" &&
+        tool.permission(call.input, this.#toolContext(signal)).kind === "approval"
+      ) {
+        const request = this.#guardianRequest
+        const selected = this.#guardian.config.model
+          ? this.#resolveModel?.(this.#guardian.config.model)
+          : { provider: request.provider, model: request.model }
+        const text = JSON.stringify({
+          userRequest: request.userText,
+          tool: tool.name,
+          input: call.input,
+          policy: this.#policy,
+          profileHash: this.#sandbox?.profile.hash,
+        })
+        const verdict = selected
+          ? await this.#guardian.review(
+              selected.provider,
+              selected.model,
+              this.#sandbox?.sanitize?.(text) ?? text,
+              signal,
+            )
+          : { action: "review", reason: "Guardian model unavailable", usage: {} }
+        if (selected) {
+          this.#emitUsage(verdict.usage, selected.model)
+          this.#commitRequestUsage(verdict.usage, selected.model)
+        }
+        if (signal.aborted)
+          return this.#failCall(itemId, call, provisionalLabel, "Interrupted during guardian review")
+        if (verdict.action === "deny")
+          return this.#failCall(
+            itemId,
+            call,
+            provisionalLabel,
+            `Guardian denied this action: ${verdict.reason}`,
+          )
+        guardianAllowed = verdict.action === "allow"
+        if (!guardianAllowed) {
+          const choice = await this.#awaitDecision(
+            "approval",
+            "Guardian requires human review",
+            verdict.reason,
+            ["accept", "decline", "cancel"],
+            itemId,
+            signal,
+            true,
+            "guardian review requires explicit approval",
+          )
+          if (choice !== "accept" || signal.aborted)
+            return this.#failCall(itemId, call, provisionalLabel, `Action not approved: ${verdict.reason}`)
+          guardianAllowed = true
+        }
+      }
+      if (!guardianAllowed && decision.kind === "ask") {
         const refusal = await this.#askApproval(
           tool,
           call,
@@ -905,12 +1027,48 @@ export class CodesplashLoop {
           signal,
         )
         if (refusal !== undefined) return refusal
-      } else if (decision.kind === "default") {
+      } else if (!guardianAllowed && decision.kind === "default") {
         const refusal = await this.#defaultApproval(tool, call, itemId, provisionalLabel, targets, signal)
         if (refusal !== undefined) return refusal
       }
 
-      const outcome = await tool.run(call.input, this.#toolContext(signal))
+      if (
+        tool.name === "bash" &&
+        call.input &&
+        typeof call.input === "object" &&
+        "secrets" in call.input &&
+        Array.isArray(call.input.secrets) &&
+        call.input.secrets.length
+      ) {
+        const detail = `Secrets: ${call.input.secrets.join(", ")}\nCommand: ${targets?.command ?? provisionalLabel}\nBinding applies only to this execution.`
+        const choice = await this.#awaitDecision(
+          "approval",
+          "Use named secrets for this command?",
+          detail,
+          ["accept", "decline", "cancel"],
+          itemId,
+          signal,
+          true,
+          "named secrets require explicit per-command approval",
+        )
+        if (choice !== "accept" || signal.aborted)
+          return this.#failCall(itemId, call, provisionalLabel, "Named-secret use was not approved")
+        if (!this.#sandbox)
+          return this.#failCall(
+            itemId,
+            call,
+            provisionalLabel,
+            "Named secrets require the native sandbox runtime",
+          )
+      }
+      const outcome = this.#sandbox
+        ? await this.#sandbox.runTool(tool, call.input, this.#toolContext(signal))
+        : await tool.run(call.input, this.#toolContext(signal))
+      if (this.#sandbox?.sanitize) {
+        outcome.text = this.#sandbox.sanitize(outcome.text)
+        outcome.label = this.#sandbox.sanitize(outcome.label)
+        for (const step of outcome.planSteps ?? []) step.text = this.#sandbox.sanitize(step.text)
+      }
       if (outcome.planSteps) {
         this.#event("tool/plan", { itemId }, { kind: "plan.updated", payload: { steps: outcome.planSteps } })
       }
@@ -1240,6 +1398,8 @@ export class CodesplashLoop {
   }
 
   #failCall(itemId: string, call: ToolCallBlock, label: string, message: string): ToolResultBlock {
+    label = this.#sandbox?.sanitize?.(label) ?? label
+    message = this.#sandbox?.sanitize?.(message) ?? message
     this.#emitToolItem(itemId, label, message, "failed")
     return { type: "tool_result", toolCallId: call.id, text: message, isError: true }
   }
@@ -1355,19 +1515,33 @@ function callLabel(name: string, input: unknown): string {
  * Default diff collector: `git diff` for tracked paths, `git diff --no-index /dev/null <path>`
  * for untracked files. Failures (no git, not a repo) return an empty diff rather than throwing.
  */
-export async function collectGitDiff(cwd: string, paths: string[]): Promise<string> {
+export async function collectGitDiff(
+  cwd: string,
+  paths: string[],
+  sandbox?: SandboxRuntime,
+): Promise<string> {
+  const git = sandbox
+    ? async (args: string[], _cwd: string) => {
+        const result = await sandbox.execute(
+          ["/usr/bin/git", ...safeGitArguments(args)],
+          AbortSignal.timeout(GIT_DIFF_TIMEOUT_MS),
+          "plan",
+        )
+        return result.exitCode <= 1 ? result.stdout : undefined
+      }
+    : runGit
   const chunks: string[] = []
   for (const path of paths) {
-    const tracked = await runGit(["diff", "--", path], cwd)
+    const tracked = await git(["diff", "--", path], cwd)
     if (tracked === undefined) continue
     if (tracked.trim() !== "") {
       chunks.push(tracked)
       continue
     }
-    const inIndex = await runGit(["ls-files", "--", path], cwd)
+    const inIndex = await git(["ls-files", "--", path], cwd)
     if (inIndex === undefined || inIndex.trim() !== "") continue
     if (!(await Bun.file(path).exists())) continue
-    const untracked = await runGit(["diff", "--no-index", "--", "/dev/null", path], cwd)
+    const untracked = await git(["diff", "--no-index", "--", "/dev/null", path], cwd)
     if (untracked !== undefined && untracked.trim() !== "") chunks.push(untracked)
   }
   return truncateToolOutput(chunks.join(""))
@@ -1375,7 +1549,13 @@ export async function collectGitDiff(cwd: string, paths: string[]): Promise<stri
 
 async function runGit(args: string[], cwd: string): Promise<string | undefined> {
   try {
-    const child = Bun.spawn(["git", ...args], { cwd, stdin: "ignore", stdout: "pipe", stderr: "ignore" })
+    const child = Bun.spawn(["git", ...safeGitArguments(args)], {
+      cwd,
+      env: safeGitEnvironment(),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+    })
     // A dying harness (crash, second Ctrl+C, process.exit) must not orphan the git child.
     const unregisterChild = registerChildProcess(child)
     const timer = setTimeout(() => child.kill(), GIT_DIFF_TIMEOUT_MS)

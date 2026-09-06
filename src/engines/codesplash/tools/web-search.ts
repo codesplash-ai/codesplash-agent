@@ -180,10 +180,16 @@ export function createWebSearchTool(options: WebSearchToolOptions = {}): Harness
 
     let response: Response
     try {
-      response = await fetchImpl(`${endpoint}?q=${encodeURIComponent(input.query)}`, {
-        signal: AbortSignal.any([context.signal, AbortSignal.timeout(SEARCH_TIMEOUT_MS)]),
-        headers: { "user-agent": DESKTOP_USER_AGENT, accept: "text/html" },
-      })
+      context.checkNetwork?.(endpoint)
+      response = await (context.fetchNetwork ?? fetchImpl)(
+        `${endpoint}?q=${encodeURIComponent(input.query)}`,
+        {
+          // A search service redirect is not an approved network destination.
+          redirect: "error",
+          signal: AbortSignal.any([context.signal, AbortSignal.timeout(SEARCH_TIMEOUT_MS)]),
+          headers: { "user-agent": DESKTOP_USER_AGENT, accept: "text/html" },
+        },
+      )
     } catch {
       if (context.signal.aborted) return { text: "Search was interrupted.", isError: true, label }
       return unavailable

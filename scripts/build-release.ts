@@ -6,9 +6,10 @@
  */
 
 import { createHash } from "node:crypto"
-import { chmod, mkdir, rm } from "node:fs/promises"
+import { chmod, copyFile, mkdir, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
+import { verifiedSeccompHelper } from "../src/engines/codesplash/sandbox/supervisor.ts"
 import { APP_VERSION } from "../src/version.ts"
 
 const projectRoot = fileURLToPath(new URL("..", import.meta.url))
@@ -90,9 +91,26 @@ async function main(): Promise<void> {
   await mkdir(outDirectory, { recursive: true })
 
   const binaryPath = join(outDirectory, binaryName)
-  await run(["bun", "build", "src/cli.ts", "--compile", "--outfile", binaryPath])
+  // Keep Bun's temporary compile files inside the ignored build directory.
+  await run(
+    ["bun", "build", join(projectRoot, "src", "cli.ts"), "--compile", "--outfile", binaryPath],
+    outDirectory,
+  )
   if (!isWindows) await chmod(binaryPath, 0o755)
-  if (process.platform === "darwin") await signAndNotarizeMacBinary(binaryPath)
+  if (process.platform === "darwin" && !process.argv.includes("--unsigned"))
+    await signAndNotarizeMacBinary(binaryPath)
+
+  const runtimeAssets = join(outDirectory, "sandbox-runtime")
+  await mkdir(runtimeAssets)
+  const upstream = fileURLToPath(
+    new URL("../node_modules/@anthropic-ai/sandbox-runtime/LICENSE", import.meta.url),
+  )
+  await copyFile(upstream, join(runtimeAssets, "LICENSE"))
+  if (process.platform === "linux") {
+    const helper = join(runtimeAssets, "apply-seccomp")
+    await copyFile(await verifiedSeccompHelper(), helper)
+    await chmod(helper, 0o755)
+  }
 
   // Launch smoke: the compiled artifact must report the expected version before packaging.
   const smoke = Bun.spawn([binaryPath, "--version"], { stdout: "pipe", stderr: "pipe" })
@@ -102,6 +120,7 @@ async function main(): Promise<void> {
       `Compiled binary smoke failed: exit ${smokeExit}, version "${smokeOutput.trim()}" (expected ${APP_VERSION})`,
     )
   }
+  if (!isWindows) await run([process.execPath, "scripts/sandbox-smoke.ts", binaryPath])
 
   await Bun.write(join(outDirectory, "LICENSE"), Bun.file(join(projectRoot, "LICENSE")))
   await Bun.write(join(outDirectory, "README.md"), Bun.file(join(projectRoot, "README.md")))
@@ -112,12 +131,15 @@ async function main(): Promise<void> {
       [
         "powershell",
         "-Command",
-        `Compress-Archive -Path ${binaryName},LICENSE,README.md -DestinationPath ${archiveName}`,
+        `Compress-Archive -Path ${binaryName},LICENSE,README.md,sandbox-runtime -DestinationPath ${archiveName}`,
       ],
       outDirectory,
     )
   } else {
-    await run(["tar", "-czf", archiveName, binaryName, "LICENSE", "README.md"], outDirectory)
+    await run(
+      ["tar", "-czf", archiveName, binaryName, "LICENSE", "README.md", "sandbox-runtime"],
+      outDirectory,
+    )
   }
 
   const digest = createHash("sha256")

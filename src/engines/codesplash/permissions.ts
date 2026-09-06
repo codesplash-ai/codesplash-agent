@@ -85,6 +85,7 @@ const PATTERN_TOOL_NAMES = new Set([...FILE_TOOL_NAMES, "bash", "web_fetch"])
 
 /** Every tool name rules may reference; anything else warns once and the rule is ignored. */
 const KNOWN_TOOL_NAMES = new Set([
+  "request_permissions",
   ...PATTERN_TOOL_NAMES,
   "glob",
   "grep",
@@ -684,6 +685,12 @@ export async function createPermissionRuntime(
   }
 
   const runtime: CodesplashPermissionRuntime = {
+    async reload(): Promise<void> {
+      const next = await createPermissionRuntime({ ...options, mode })
+      const loaded = describePermissionRules(next).filter((r) => r.source !== "builtin")
+      for (const action of ["allow", "ask", "deny"] as const)
+        rules[action].splice(0, rules[action].length, ...loaded.filter((r) => r.action === action))
+    },
     get mode(): PermissionMode {
       return mode
     },

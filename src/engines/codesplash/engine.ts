@@ -2,7 +2,7 @@
  * The first-party CodeSplash engine behind the EngineDriver/EngineSession contract. Sessions run
  * entirely in-process: provider adapters stream model responses and the loop executes tools.
  */
-import { extname } from "node:path"
+import { dirname, extname, join } from "node:path"
 import {
   type AgentConfig,
   type AgentEvent,
@@ -44,8 +44,16 @@ import type {
   ReasoningEffort,
 } from "./contracts.ts"
 import { CodesplashEventFactory, CodesplashLoop } from "./loop.ts"
-import { createPermissionRuntime, type PermissionRuntimeOptions } from "./permissions.ts"
+import { editPermissionRule, parsePermissionEdit, ruleConflict } from "./permission-editor.ts"
+import {
+  createPermissionRuntime,
+  describePermissionRules,
+  type PermissionRuntimeOptions,
+} from "./permissions.ts"
 import { buildSystemPrompt } from "./prompt.ts"
+import type { SandboxRuntime } from "./sandbox/contracts.ts"
+import { createProfile, pinProfile } from "./sandbox/profile.ts"
+import { NativeSandbox } from "./sandbox/runtime.ts"
 import { builtinTools, createToolRegistry, type ToolRegistry } from "./tools/registry.ts"
 import { appendTranscriptMessages, loadTranscript } from "./transcript.ts"
 
@@ -67,6 +75,8 @@ export type CodesplashDriverOptions = {
   config?: AgentConfig
   /** Permission-runtime factory override, e.g. scripted runtimes in tests; defaults to createPermissionRuntime. */
   permissions?: PermissionRuntimeFactory
+  /** Test/embedding injection; production always uses the native OS executor. */
+  sandbox?: (options: OpenSessionOptions, config: AgentConfig) => Promise<SandboxRuntime>
 }
 
 /** Factory shape for a session's permission runtime; injectable so tests script the runtime. */
@@ -166,7 +176,39 @@ export class CodesplashDriver implements EngineDriver {
       onWarning: (message) => bridge.warning(message),
       onModeChange: (mode) => bridge.modeChanged(mode),
     })
-    return new CodesplashSession(options, config, registry, providers, seededHistory, permissions, bridge)
+    const directory = options.nativeTranscriptPath ? dirname(options.nativeTranscriptPath) : undefined
+    if (
+      directory &&
+      seededHistory.length &&
+      !(await Bun.file(join(directory, "sandbox-profile.json")).exists())
+    ) {
+      bridge.warning(
+        "This older session has no pinned execution profile. Pinning the current execution policy before tools can run; previous temporary access grants are not restored.",
+      )
+    }
+    const sandbox = this.options.sandbox
+      ? await this.options.sandbox(options, config)
+      : new NativeSandbox(
+          await pinProfile(
+            createProfile(
+              options.cwd,
+              options.policy?.sandbox ?? defaultSessionPolicy.sandbox,
+              config.sandbox,
+            ),
+            directory ? join(directory, "sandbox-profile.json") : undefined,
+          ),
+          directory ? join(directory, "sandbox-events.jsonl") : undefined,
+        )
+    return new CodesplashSession(
+      options,
+      config,
+      registry,
+      providers,
+      seededHistory,
+      permissions,
+      bridge,
+      sandbox,
+    )
   }
 }
 
@@ -210,6 +252,7 @@ class CodesplashSession implements EngineSession {
   readonly #policy: SessionPolicy
   readonly #cwd: string
   readonly #permissions: PermissionRuntime
+  readonly #sandbox: SandboxRuntime
   /** Bypass can only be re-entered mid-session when the session was OPENED in bypass mode. */
   readonly #bypassAllowed: boolean
   #model: ModelInfo
@@ -232,6 +275,7 @@ class CodesplashSession implements EngineSession {
     seededHistory: ChatMessage[],
     permissions: PermissionRuntime,
     bridge: PermissionEventBridge,
+    sandbox: SandboxRuntime,
   ) {
     this.events = this.#queue
     this.#config = config
@@ -240,6 +284,7 @@ class CodesplashSession implements EngineSession {
     this.#policy = options.policy ?? defaultSessionPolicy
     this.#cwd = options.cwd
     this.#permissions = permissions
+    this.#sandbox = sandbox
     this.#bypassAllowed = options.policy?.permissionMode === "bypass"
     this.#factory = new CodesplashEventFactory(options.localSessionId, options.firstSequence ?? 0)
     this.#registry = createToolRegistry(builtinTools())
@@ -251,6 +296,8 @@ class CodesplashSession implements EngineSession {
       emit: (event) => this.#push(event),
       fallbackModel: config.codesplash.fallbackModel,
       permissions,
+      sandbox,
+      guardian: config.guardian,
       // Resume: continue the recorded cumulative usage instead of restarting the counts at zero.
       initialUsage: options.initialUsage,
       // Registry-backed: only models on available providers resolve, and test overrides in the
@@ -375,11 +422,40 @@ class CodesplashSession implements EngineSession {
     this.#loop.interrupt()
   }
 
+  async editPermissionRule(command: string): Promise<void> {
+    this.#requireOpen()
+    if (this.#turnReserved || this.#loop.isTurnActive)
+      throw new Error("Wait for the current turn before editing permission rules")
+    // Reserve admission across disk I/O so send()/mode changes cannot race a policy edit.
+    this.#turnReserved = true
+    try {
+      const updated = await editPermissionRule(parsePermissionEdit(command), {
+        cwd: this.#cwd,
+        trusted: this.options.workspaceTrusted ?? true,
+        grantsPath: this.options.permissionGrantsPath,
+      })
+      if (updated) Object.assign(this.#config.permissions, updated)
+      await this.#permissions.reload?.()
+      this.#loop.clearApprovalCache()
+      this.#systemPrompt = undefined
+    } finally {
+      this.#turnReserved = false
+    }
+  }
+  permissionRules() {
+    const rules = describePermissionRules(this.#permissions)
+    return rules.map((rule) => ({ ...rule, conflict: ruleConflict(rule, rules) }))
+  }
+  sandboxStatus(): string {
+    return this.#sandbox.status?.() ?? "Execution backend status unavailable"
+  }
+
   async close(): Promise<void> {
     if (this.#closed) return
     this.#closed = true
     this.#loop.interrupt()
     await this.#turnPromise
+    await this.#sandbox.close()
     this.#ended = true
     this.#queue.end()
   }
@@ -514,7 +590,7 @@ class CodesplashSession implements EngineSession {
     const workspaceTrusted = this.options.workspaceTrusted ?? true
     // Plan mode injects its own prompt section and untrusted folders skip project rules, so the
     // cache key covers mode and trust alongside the model (mode can flip between turns).
-    const key = `${this.#model.id} ${permissionMode} ${workspaceTrusted}`
+    const key = `${this.#model.id}\0${permissionMode}\0${workspaceTrusted}`
     if (this.#systemPrompt?.key === key) return this.#systemPrompt.text
     const text = await buildSystemPrompt({
       cwd: this.#cwd,

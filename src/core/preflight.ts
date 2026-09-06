@@ -40,11 +40,16 @@ async function inspectGit(cwd: string): Promise<GitPreflight> {
   }
 
   try {
-    const child = Bun.spawn([binary, "-C", cwd, "status", "--porcelain=v1", "--branch"], {
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-    })
+    const { safeGitArguments, safeGitEnvironment } = await import("./git-process.ts")
+    const child = Bun.spawn(
+      [binary, ...safeGitArguments(["-C", cwd, "status", "--porcelain=v1", "--branch"])],
+      {
+        env: safeGitEnvironment(),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    )
     const [stdout, stderr, exitCode] = await Promise.all([
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),

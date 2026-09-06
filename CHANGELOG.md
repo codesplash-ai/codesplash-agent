@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Native sandbox, scoped access, and secrets
+
+- Enforce shell commands, descendants, and file tools with macOS Seatbelt or Linux
+  bubblewrap/seccomp. Refuse unavailable backends without an unrestricted retry. Protect
+  Git/harness metadata, block hardlink escapes and direct network access, and preserve the
+  exact plan-file write exception. Terminate detached descendants on exit and cancellation.
+- Pin native execution profiles across resume; add `codesplash sandbox -- CMD`, execution
+  diagnostics, bounded sandbox event logs, and explicit turn/session resource grants through
+  `request_permissions`. `--no-history` disables sandbox logs too.
+- Add keyring-backed `codesplash secrets set|list|delete`, explicit per-command secret
+  bindings, and streaming/file-output redaction before truncation and persistence.
+- Add optional bounded guardian review (off by default), permission rule editing and conflict
+  explanations. Explicit asks, denies, dangerous commands, and resource/secret approvals
+  cannot be waived by guardian review or headless auto-answering.
+- Package the verified Linux seccomp helper and its license; test real sandbox execution in
+  macOS/Linux CI and compiled artifacts. Development runs use a private harness snapshot so
+  this checkout remains editable. Windows native and whole-process isolation remain deferred.
+
 ### Permissions (CodeSplash native engine)
 
 - Permission modes: `default`, `accept-edits` (workspace file edits run without asking), `plan`
@@ -43,9 +61,6 @@
   `[permissions].mode` in config.toml; recorded per session and reused on `--resume`/`--continue`
   (a recorded bypass degrades to default headless). `codesplash --doctor` gains a one-line
   permissions summary (mode, rule counts, workspace trust). Shell completions cover the flags.
-- Honest layering note (also in the README): until the OS sandbox lands, bash enforcement is
-  policy-level (command analysis + approvals), not kernel-level; write floors apply to the file
-  tools, not to what an approved shell command does.
 
 ### CodeSplash native engine
 
@@ -58,7 +73,7 @@
   an estimated cost in `usage`.
 - `codesplash run --resume <id>` / `--continue`: recorded run sessions keep an engine-owned
   transcript (`transcript.jsonl` next to the event log) and can be picked back up headlessly —
-  recorded sandbox/approval policy is reused unless overridden, history is appended in place, and
+  recorded policy is reused, native execution profiles reject conflicting overrides, history is appended in place, and
   `--no-history` with resume is a usage error. TUI codesplash sessions are resumable from the
   session picker (and Ctrl+R) the same way.
 - Custom providers (BYOK): `[providers.<id>]` tables in config.toml serve extra models through

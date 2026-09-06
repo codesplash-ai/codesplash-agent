@@ -185,6 +185,7 @@ export interface PermissionRuntime {
   /** Read-path denial for grep content access; reason string when denied. */
   isReadDenied(resolvedPath: string, toolName: string): string | undefined
   persistGrant(rule: string): Promise<void>
+  reload?(): Promise<void>
 }
 
 /* ------------------------------------ tools ------------------------------------ */
@@ -195,6 +196,14 @@ export type ToolContext = {
   signal: AbortSignal
   /** Permission engine for this session; absent when no runtime was injected (e.g. tests). */
   permissions?: PermissionRuntime
+  /** Native execution policy for trusted HTTP tool implementations, checked on every hop. */
+  checkNetwork?: (url: string) => void
+  /** Trusted transport connecting through the same DNS-pinning grant broker as shell commands. */
+  fetchNetwork?: (url: string, init: RequestInit) => Promise<Response>
+  /** Worker-only values for source sanitization before shell output truncation. */
+  secretValues?: readonly string[]
+  /** Trusted worker sanitizer; apply to complete content before slicing or truncation. */
+  sanitizeOutput?: (text: string) => string
 }
 
 export type ToolPermission =

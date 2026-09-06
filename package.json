@@ -29,7 +29,7 @@
     "build": "tsc --project tsconfig.build.json",
     "release:build": "bun scripts/build-release.ts",
     "check": "bun run format:check && bun run typecheck && bun test",
-    "dev": "bun src/cli.ts",
+    "dev": "bun scripts/dev.ts",
     "format": "biome check --write .",
     "format:check": "biome check .",
     "preversion": "bun run check",
@@ -43,9 +43,11 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.75",
     "@opentui/core": "0.5.3",
     "@opentui/react": "0.5.3",
-    "react": "19.2.0"
+    "react": "19.2.0",
+    "shell-quote": "1.10.0"
   },
   "devDependencies": {
     "@biomejs/biome": "2.2.0",

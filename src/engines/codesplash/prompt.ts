@@ -119,8 +119,10 @@ async function resolveDirectory(cwd: string): Promise<string> {
 
 async function gitTopLevel(cwd: string): Promise<string | undefined> {
   try {
-    const child = Bun.spawn(["git", "rev-parse", "--show-toplevel"], {
+    const { safeGitArguments, safeGitEnvironment } = await import("../../core/git-process.ts")
+    const child = Bun.spawn(["git", ...safeGitArguments(["rev-parse", "--show-toplevel"])], {
       cwd,
+      env: safeGitEnvironment(),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "ignore",

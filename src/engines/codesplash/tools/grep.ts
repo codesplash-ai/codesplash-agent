@@ -186,7 +186,8 @@ export const grepTool: HarnessTool = {
       }
       if (buffer.subarray(0, BINARY_SNIFF_BYTES).includes(0)) continue
 
-      const fileLines = buffer.toString("utf8").split(/\r?\n/)
+      const raw = buffer.toString("utf8")
+      const fileLines = (context.sanitizeOutput?.(raw) ?? raw).split(/\r?\n/)
       if (fileLines[fileLines.length - 1] === "") fileLines.pop()
 
       const matchLines: number[] = []

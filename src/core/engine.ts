@@ -119,6 +119,17 @@ export interface EngineSession {
   setModel?(model: string): Promise<void>
   /** Switches the permission mode; absent when the engine has no first-party permission layer. */
   setPermissionMode?(mode: PermissionMode): Promise<void>
+  /** User-invoked rule edits only; engines reject these while tools/turns are active. */
+  editPermissionRule?(command: string): Promise<void>
+  sandboxStatus?(): string
+  permissionRules?(): Array<{
+    tool: string
+    pattern?: string
+    action: "allow" | "ask" | "deny"
+    source: "cli" | "project" | "user" | "grants" | "builtin"
+    raw: string
+    conflict?: string
+  }>
 }
 
 export interface EngineDriver {

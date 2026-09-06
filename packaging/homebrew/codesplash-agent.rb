@@ -5,6 +5,7 @@ class CodesplashAgent < Formula
   homepage "https://github.com/codesplash-ai/codesplash-agent"
   version "{{VERSION}}"
   license "BUSL-1.1"
+  depends_on "ripgrep"
 
   on_macos do
     if Hardware::CPU.arm?
@@ -17,6 +18,8 @@ class CodesplashAgent < Formula
   end
 
   on_linux do
+    depends_on "bubblewrap"
+    depends_on "socat"
     if Hardware::CPU.arm?
       url "https://github.com/codesplash-ai/codesplash-agent/releases/download/v#{version}/codesplash-agent-#{version}-linux-arm64.tar.gz"
       sha256 "{{SHA256_LINUX_ARM64}}"
@@ -27,7 +30,8 @@ class CodesplashAgent < Formula
   end
 
   def install
-    bin.install "codesplash"
+    libexec.install "codesplash", "sandbox-runtime"
+    bin.write_exec_script libexec/"codesplash"
   end
 
   def caveats

@@ -215,6 +215,7 @@ describe("tool registry", () => {
       "ask_user",
       "enter_plan_mode",
       "exit_plan_mode",
+      "request_permissions",
     ])
   })
 

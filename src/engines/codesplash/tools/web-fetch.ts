@@ -107,6 +107,8 @@ function blockedIpv4Class(address: string): string | undefined {
   if (a === 172 && b >= 16 && b <= 31) return "a private-range address"
   if (a === 192 && b === 168) return "a private-range address"
   if (a === 169 && b === 254) return "a link-local address"
+  if (a === 100 && b >= 64 && b <= 127) return "a shared-address range"
+  if (a >= 224) return "a multicast or reserved address"
   if (a === 0) return "an unspecified address"
   return undefined
 }
@@ -155,6 +157,7 @@ function blockedIpv6Class(address: string): string | undefined {
   const first = groups[0] ?? 0
   if ((first & 0xffc0) === 0xfe80) return "a link-local address"
   if ((first & 0xfe00) === 0xfc00) return "a unique-local address"
+  if ((first & 0xff00) === 0xff00) return "a multicast address"
   return undefined
 }
 
@@ -398,25 +401,30 @@ export function createWebFetchTool(options: WebFetchToolOptions = {}): HarnessTo
 
   async function runFetch(input: WebFetchInput, context: ToolContext): Promise<ToolOutcome> {
     const label = input.url.href
-    const cached = cachedText(label)
-    if (cached !== undefined) return { text: cached, label }
 
     const signal = AbortSignal.any([context.signal, AbortSignal.timeout(input.timeoutSeconds * 1000)])
     let current = input.url
     let hops = 0
     let response: Response
     try {
+      context.checkNetwork?.(current.href)
+      const cached = cachedText(label)
+      if (cached !== undefined) return { text: cached, label }
       while (true) {
+        context.checkNetwork?.(current.href)
         const verdict = await guardUrl(current, resolveAddresses)
         if (!verdict.ok) {
           return { text: `web_fetch refused ${current.href}: ${verdict.reason}.`, isError: true, label }
         }
         const target = pinnedRequestTarget(current, verdict)
-        response = await fetchImpl(target.url, {
-          redirect: "manual",
-          signal,
-          headers: target.headers,
-        })
+        response = await (context.fetchNetwork ?? fetchImpl)(
+          context.fetchNetwork ? current.href : target.url,
+          {
+            redirect: "manual",
+            signal,
+            headers: target.headers,
+          },
+        )
         if (!REDIRECT_STATUSES.has(response.status)) break
         await response.body?.cancel().catch(() => {})
         const location = response.headers.get("location")

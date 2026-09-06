@@ -17,6 +17,7 @@ import {
 } from "./core/index.ts"
 import { ClaudeDriver } from "./engines/claude/index.ts"
 import { CodesplashDriver } from "./engines/codesplash/index.ts"
+import { probeSandbox } from "./engines/codesplash/sandbox/probe.ts"
 import { CodexDriver } from "./engines/codex/index.ts"
 import { APP_VERSION } from "./version.ts"
 
@@ -35,6 +36,7 @@ export type DoctorReport = {
   customProviders?: string[]
   /** Permission mode, rule counts per action, and cwd trust — never rule contents or paths. */
   permissions?: string
+  sandbox?: string
   /** Native-transcript state for the newest codesplash session of this project (best effort). */
   transcript?: string
 }
@@ -56,6 +58,7 @@ export async function collectDoctorReport(cwd = process.cwd()): Promise<DoctorRe
     platform: `${process.platform} ${process.arch}`,
     configPath,
     configPresent: await Bun.file(configPath).exists(),
+    sandbox: await probeSandbox(cwd),
     dataDirectory: dataDirectory(),
     git: project?.git.available ? "available" : "not available",
     codex,
@@ -121,6 +124,7 @@ export function formatDoctorReport(report: DoctorReport): string {
     ["codex", formatProbe(report.codex)],
     ["claude", formatProbe(report.claude)],
     ["codesplash", formatProbe(report.codesplash)],
+    ...(report.sandbox ? [["sandbox", report.sandbox] as [string, string]] : []),
     ...(report.customProviders ?? []).map((line): [string, string] => ["provider", line]),
     ...(report.permissions !== undefined ? [["permissions", report.permissions] as [string, string]] : []),
     ...(report.transcript !== undefined ? [["transcript", report.transcript] as [string, string]] : []),

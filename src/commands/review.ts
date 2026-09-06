@@ -169,7 +169,14 @@ export type GitRunner = (args: string[], cwd: string) => Promise<GitResult>
 
 async function defaultGitRunner(args: string[], cwd: string): Promise<GitResult> {
   try {
-    const child = Bun.spawn(["git", ...args], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+    const { safeGitArguments, safeGitEnvironment } = await import("../core/git-process.ts")
+    const child = Bun.spawn(["git", ...safeGitArguments(args)], {
+      cwd,
+      env: safeGitEnvironment(),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    })
     // A dying harness must not orphan the git child; a hung git call is killed, not awaited forever.
     const unregisterChild = registerChildProcess(child)
     const timer = setTimeout(() => child.kill(), GIT_TIMEOUT_MS)
