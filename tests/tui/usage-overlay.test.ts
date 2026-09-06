@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { type AppViewState, initialAppViewState } from "../../src/core/index.ts"
 import {
+  buildContextOverlayLines,
   buildUsageOverlayLines,
   contextRemainingPercent,
   costIsPartial,
@@ -17,6 +18,30 @@ function stateWith(usage: AppViewState["usage"], model?: string): AppViewState {
 }
 
 describe("/usage slash command", () => {
+  test("context commands preserve summary instructions and label local estimates", () => {
+    expect(parseSlashCommand("/compact keep the unresolved tests")).toEqual({
+      name: "compact",
+      argument: "keep the unresolved tests",
+    })
+    expect(parseSlashCommand("/context")).toEqual({ name: "context", argument: undefined })
+    const lines = buildContextOverlayLines({
+      model: "fixture",
+      contextWindow: 1000,
+      systemTokens: 100,
+      toolTokens: 100,
+      messageTokens: 200,
+      totalTokens: 500,
+      inputBudget: 700,
+      outputReserve: 200,
+      messageCount: 4,
+      epoch: 2,
+      prefixChanges: ["model"],
+      estimated: true,
+    })
+    expect(lines).toContainEqual({ label: "Input (calibrated)", value: "500" })
+    expect(lines).toContainEqual({ label: "Last measured input", value: "Unavailable" })
+    expect(lines).toContainEqual({ label: "Prefix changes", value: "model" })
+  })
   test("parses like the other overlay commands and ignores arguments", () => {
     expect(parseSlashCommand("/usage")).toEqual({ name: "usage", argument: undefined })
     expect(parseSlashCommand("  /USAGE  ")).toEqual({ name: "usage", argument: undefined })

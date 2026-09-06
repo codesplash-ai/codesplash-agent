@@ -200,7 +200,7 @@ describe("ask_user", () => {
 })
 
 describe("tool registry", () => {
-  test("builtinTools returns the thirteen built-ins in order, plan-mode tools right after ask_user", () => {
+  test("builtinTools includes plan-mode and retained-output intrinsics", () => {
     expect(builtinTools().map((tool) => tool.name)).toEqual([
       "read_file",
       "write_file",
@@ -216,6 +216,7 @@ describe("tool registry", () => {
       "enter_plan_mode",
       "exit_plan_mode",
       "request_permissions",
+      "read_tool_output",
     ])
   })
 
@@ -235,12 +236,13 @@ describe("tool registry", () => {
     const registry = createToolRegistry([todoWriteTool, askUserTool])
     const specs = registry.specs()
     expect(specs).toHaveLength(2)
-    expect(specs[0]).toEqual({
+    expect(specs[1]).toEqual({
       name: todoWriteTool.name,
       description: todoWriteTool.description,
       inputSchema: todoWriteTool.inputSchema,
     })
-    expect(specs[1]?.name).toBe(ASK_USER_TOOL_NAME)
+    expect(specs[0]?.name).toBe(ASK_USER_TOOL_NAME)
+    expect(createToolRegistry([askUserTool, todoWriteTool]).specs()).toEqual(specs)
   })
 
   test("get() finds tools by name and returns undefined otherwise", () => {

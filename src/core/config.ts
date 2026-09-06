@@ -71,7 +71,7 @@ export type AgentConfig = {
   history: { enabled: boolean }
   codex: { sandbox: ConfigSandboxMode; approvalPolicy: ApprovalPolicy }
   permissions: PermissionsConfig
-  codesplash: { fallbackModel?: string }
+  codesplash: { fallbackModel?: string; autoCompact?: boolean; compactionStrategy?: "summary" | "prune" }
   providers: CustomProviderConfig[]
   sandbox?: NativeSandboxConfig
   guardian?: {
@@ -304,6 +304,19 @@ export function validateConfig(parsed: unknown, path: string): AgentConfig {
           `[codesplash].fallbackModel: got ${JSON.stringify(parsed.codesplash.fallbackModel)}, expected a model id string`,
         )
       }
+    }
+  }
+
+  if (isRecord(parsed.codesplash)) {
+    const { autoCompact, compactionStrategy } = parsed.codesplash
+    if (autoCompact !== undefined) {
+      if (typeof autoCompact === "boolean") config.codesplash.autoCompact = autoCompact
+      else problems.push("[codesplash].autoCompact: expected true or false")
+    }
+    if (compactionStrategy !== undefined) {
+      if (compactionStrategy === "summary" || compactionStrategy === "prune")
+        config.codesplash.compactionStrategy = compactionStrategy
+      else problems.push('[codesplash].compactionStrategy: expected "summary" or "prune"')
     }
   }
 
@@ -660,8 +673,10 @@ export async function saveConfig(config: AgentConfig, path = configFilePath()): 
   if (permissions) table.permissions = permissions
   if (config.sandbox) table.sandbox = { ...config.sandbox }
   if (config.guardian) table.guardian = { ...config.guardian }
-  if (config.codesplash.fallbackModel !== undefined) {
-    table.codesplash = { fallbackModel: config.codesplash.fallbackModel }
+  if (Object.keys(config.codesplash).length > 0) {
+    table.codesplash = Object.fromEntries(
+      Object.entries(config.codesplash).filter(([, value]) => value !== undefined),
+    )
   }
   if (config.providers.length > 0) {
     table.providers = Object.fromEntries(

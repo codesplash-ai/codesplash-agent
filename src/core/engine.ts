@@ -104,6 +104,22 @@ export type EngineModel = {
   isDefault: boolean
 }
 
+export type ContextInspection = {
+  model: string
+  contextWindow: number
+  systemTokens: number
+  toolTokens: number
+  messageTokens: number
+  totalTokens: number
+  outputReserve: number
+  inputBudget: number
+  messageCount: number
+  epoch: number
+  observedInputTokens?: number
+  prefixChanges: string[]
+  estimated: true
+}
+
 export interface EngineSession {
   readonly localSessionId: string
   readonly nativeSessionId?: string
@@ -117,6 +133,8 @@ export interface EngineSession {
   listModels?(): Promise<EngineModel[]>
   /** Switches the model for subsequent turns; absent when the engine cannot switch. */
   setModel?(model: string): Promise<void>
+  inspectContext?(): Promise<ContextInspection>
+  compact?(instructions?: string): Promise<void>
   /** Switches the permission mode; absent when the engine has no first-party permission layer. */
   setPermissionMode?(mode: PermissionMode): Promise<void>
   /** User-invoked rule edits only; engines reject these while tools/turns are active. */

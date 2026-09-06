@@ -1,4 +1,4 @@
-import type { EngineDecision, EngineModel, EngineSession, UserInput } from "./engine.ts"
+import type { ContextInspection, EngineDecision, EngineModel, EngineSession, UserInput } from "./engine.ts"
 import type { AgentEvent } from "./events.ts"
 import type { AppViewState } from "./reducer.ts"
 import { initialAppViewState, reduceAgentEvent } from "./reducer.ts"
@@ -86,6 +86,20 @@ export class SessionController {
     this.#closed = true
     await this.#session.close()
     await this.#consumePromise
+  }
+
+  async inspectContext(): Promise<ContextInspection> {
+    if (this.#closed) throw new Error("Session is closed")
+    if (!this.#session.inspectContext) throw new Error("This engine does not support context inspection")
+    return this.#session.inspectContext()
+  }
+
+  async compact(instructions?: string): Promise<void> {
+    if (this.#closed) throw new Error("Session is closed")
+    if (this.#state.pendingRequest || this.#state.turnStatus === "running")
+      throw new Error("Wait for the current turn before compacting")
+    if (!this.#session.compact) throw new Error("This engine does not support context compaction")
+    await this.#session.compact(instructions)
   }
 
   async #consume(): Promise<void> {

@@ -7,11 +7,29 @@
  * skipped on load, a torn final line (crash mid-append) is dropped, and the next append repairs
  * the torn tail first so the file stays valid JSONL.
  */
-import { mkdir, open, readFile, stat, truncate } from "node:fs/promises"
+import { mkdir, open, readFile, rename, stat, truncate, unlink } from "node:fs/promises"
 import { dirname } from "node:path"
 import type { ChatMessage } from "./contracts.ts"
 
 const TRANSCRIPT_VERSION = 1
+
+/** Replace model-visible context atomically; event history remains untouched. */
+export async function writeTranscriptSnapshot(path: string, messages: readonly ChatMessage[]): Promise<void> {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 })
+  const temporary = `${path}.${crypto.randomUUID()}.tmp`
+  const handle = await open(temporary, "wx", 0o600)
+  try {
+    await handle.writeFile(
+      messages.map((message) => `${JSON.stringify({ v: TRANSCRIPT_VERSION, message })}\n`).join(""),
+    )
+    await handle.sync()
+    await handle.close()
+    await rename(temporary, path)
+  } finally {
+    await handle.close()
+    await unlink(temporary).catch(() => {})
+  }
+}
 
 /**
  * Loads every intact message from a transcript file. A missing file is an empty transcript;

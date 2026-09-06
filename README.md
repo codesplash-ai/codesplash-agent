@@ -125,6 +125,38 @@ Resumed runs reuse the session's recorded policy and append to the same history
 (`--no-history` with resume is a usage error). Native execution profiles are pinned:
 conflicting sandbox overrides require a new session.
 
+### Long sessions and context
+
+The native CodeSplash engine automatically shortens old tool results and summarizes older
+conversation context when a request approaches the model's input budget. `/compact [instructions]`
+does this manually; `/context` shows estimates for system instructions, tools and messages,
+the output reserve, last measured input, and changes to the prompt prefix. Estimates, especially
+for images, are approximate; recognized provider context-overflow errors get one bounded retry.
+
+```toml
+[codesplash]
+autoCompact = true                 # false requires manual compaction
+compactionStrategy = "summary"      # "prune" only shortens older tool results; no summary call
+```
+
+Summaries use your selected provider and count toward session usage and estimated cost. Each
+operation allows at most four summary requests, 2048 output tokens per request and 60 seconds
+total; automatic work allows at most two such operations per turn. Summaries cannot run tools.
+Esc interrupts manual compaction. If context still cannot fit, the engine explains how to
+continue with a smaller prompt, larger-context model or new session.
+
+Compaction replaces older **model-visible native history** with a summary and recent messages.
+The visible conversation event history remains intact. Atomic saves make the compacted context
+resumable; pre-compaction native messages are not separately archived. Summaries can omit detail,
+so inspect the visible history or original files when exact evidence matters.
+
+Tool results above 8 KiB receive an opaque reference for `read_tool_output`. The session retains
+up to 16 MiB/256 results, evicting oldest entries as needed. These are sanitized results within
+the tools' existing execution caps, not unlimited raw output. With history enabled they live
+beside the native transcript; with `--no-history` they remain in memory and expire with the
+session. Context epochs and prefix diagnostics describe the current live session. These native
+features leave Codex and Claude's own context management with their respective engines.
+
 #### Custom providers (BYOK)
 
 Any OpenAI- or Anthropic-protocol endpoint can serve models through `[providers.*]` tables in

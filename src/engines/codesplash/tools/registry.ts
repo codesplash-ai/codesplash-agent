@@ -3,6 +3,7 @@
  * one tools/ module allowed to import its siblings.
  */
 import type { HarnessTool, ToolSpec } from "../contracts.ts"
+import { readToolOutputTool } from "../tool-output-store.ts"
 import { applyPatchTool } from "./apply-patch.ts"
 import { bashTool } from "./bash.ts"
 import { editFileTool } from "./edit.ts"
@@ -38,6 +39,7 @@ export function builtinTools(): HarnessTool[] {
     enterPlanModeTool,
     exitPlanModeTool,
     requestPermissionsTool,
+    readToolOutputTool,
   ]
 }
 
@@ -49,11 +51,13 @@ export function createToolRegistry(tools: HarnessTool[]): ToolRegistry {
   }
   return {
     specs: () =>
-      [...byName.values()].map((tool) => ({
-        name: tool.name,
-        description: tool.description,
-        inputSchema: tool.inputSchema,
-      })),
+      [...byName.values()]
+        .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+        .map((tool) => ({
+          name: tool.name,
+          description: tool.description,
+          inputSchema: tool.inputSchema,
+        })),
     get: (name) => byName.get(name),
   }
 }

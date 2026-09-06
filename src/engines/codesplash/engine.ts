@@ -54,8 +54,9 @@ import { buildSystemPrompt } from "./prompt.ts"
 import type { SandboxRuntime } from "./sandbox/contracts.ts"
 import { createProfile, pinProfile } from "./sandbox/profile.ts"
 import { NativeSandbox } from "./sandbox/runtime.ts"
+import { ToolOutputStore } from "./tool-output-store.ts"
 import { builtinTools, createToolRegistry, type ToolRegistry } from "./tools/registry.ts"
-import { appendTranscriptMessages, loadTranscript } from "./transcript.ts"
+import { appendTranscriptMessages, loadTranscript, writeTranscriptSnapshot } from "./transcript.ts"
 
 export const CODESPLASH_CAPABILITIES: EngineCapabilities = {
   nativeTranscript: true,
@@ -266,6 +267,9 @@ class CodesplashSession implements EngineSession {
   #ended = false
   /** Transcript write failures degrade to a single warning event per session, never a crash. */
   #transcriptWarned = false
+  #persistedRevision = 0
+  #snapshotRequired = false
+  #maintenanceAbort: AbortController | undefined
 
   constructor(
     readonly options: OpenSessionOptions,
@@ -295,6 +299,12 @@ class CodesplashSession implements EngineSession {
       events: this.#factory,
       emit: (event) => this.#push(event),
       fallbackModel: config.codesplash.fallbackModel,
+      context: config.codesplash,
+      outputStore: new ToolOutputStore(
+        options.nativeTranscriptPath
+          ? join(dirname(options.nativeTranscriptPath), "tool-outputs")
+          : undefined,
+      ),
       permissions,
       sandbox,
       guardian: config.guardian,
@@ -419,7 +429,60 @@ class CodesplashSession implements EngineSession {
 
   async interrupt(): Promise<void> {
     if (this.#closed) return
+    this.#maintenanceAbort?.abort()
     this.#loop.interrupt()
+  }
+
+  async inspectContext() {
+    this.#requireOpen()
+    if (this.#turnReserved || this.#loop.isTurnActive)
+      throw new Error("Wait for the current turn before inspecting context")
+    this.#turnReserved = true
+    try {
+      const system = await this.#systemPromptFor()
+      this.#requireOpen()
+      return this.#loop.inspectContext(this.#model, system, this.#reasoningEffort)
+    } finally {
+      this.#turnReserved = false
+    }
+  }
+
+  async compact(instructions = ""): Promise<void> {
+    this.#requireOpen()
+    if (this.#turnReserved || this.#loop.isTurnActive)
+      throw new Error("Wait for the current turn before compacting")
+    if (instructions.length > 4000) throw new Error("Compaction instructions must be at most 4000 characters")
+    this.#turnReserved = true
+    const abort = new AbortController()
+    this.#maintenanceAbort = abort
+    this.#turnPromise = (async () => {
+      try {
+        await this.#loop.compact(async () => {
+          const system = await this.#systemPromptFor()
+          this.#requireOpen()
+          abort.signal.throwIfAborted()
+          const provider = this.#providers[this.#model.provider]
+          if (!provider) throw new Error("No provider available for compaction")
+          return {
+            provider,
+            model: this.#model,
+            system,
+            reasoningEffort: this.#reasoningEffort,
+            userText: "",
+            userContent: [],
+          }
+        }, instructions)
+      } finally {
+        if (this.#loop.historyRevision !== this.#persistedRevision || this.#snapshotRequired)
+          await this.#persistTurnTranscript(true)
+        this.#turnReserved = false
+        this.#maintenanceAbort = undefined
+        this.#turnPromise = undefined
+      }
+    })()
+    // close() may observe the promise too; this handler prevents a maintenance failure from
+    // becoming an unhandled rejection when the UI has already closed.
+    await this.#turnPromise
   }
 
   async editPermissionRule(command: string): Promise<void> {
@@ -453,8 +516,9 @@ class CodesplashSession implements EngineSession {
   async close(): Promise<void> {
     if (this.#closed) return
     this.#closed = true
+    this.#maintenanceAbort?.abort()
     this.#loop.interrupt()
-    await this.#turnPromise
+    await this.#turnPromise?.catch(() => {})
     await this.#sandbox.close()
     this.#ended = true
     this.#queue.end()
@@ -561,14 +625,20 @@ class CodesplashSession implements EngineSession {
    * pre-turn length captured here would drift). Write failures degrade to one warning event per
    * session — a broken disk must never crash a live session.
    */
-  async #persistTurnTranscript(): Promise<void> {
+  async #persistTurnTranscript(forceSnapshot = false): Promise<void> {
     const path = this.options.nativeTranscriptPath
     if (!path) return
     const added = this.#loop.lastTurnMessages
-    if (added.length === 0) return
+    const snapshot =
+      forceSnapshot || this.#snapshotRequired || this.#loop.historyRevision !== this.#persistedRevision
+    if (!snapshot && added.length === 0) return
     try {
-      await appendTranscriptMessages(path, added)
+      if (snapshot) await writeTranscriptSnapshot(path, this.#loop.historySnapshot())
+      else await appendTranscriptMessages(path, added)
+      this.#persistedRevision = this.#loop.historyRevision
+      this.#snapshotRequired = false
     } catch (error) {
+      this.#snapshotRequired = true
       if (this.#transcriptWarned) return
       this.#transcriptWarned = true
       const message = error instanceof Error ? error.message : String(error)

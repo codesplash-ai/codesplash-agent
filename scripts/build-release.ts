@@ -120,7 +120,10 @@ async function main(): Promise<void> {
       `Compiled binary smoke failed: exit ${smokeExit}, version "${smokeOutput.trim()}" (expected ${APP_VERSION})`,
     )
   }
-  if (!isWindows) await run([process.execPath, "scripts/sandbox-smoke.ts", binaryPath])
+  if (!isWindows) {
+    await run([process.execPath, "scripts/sandbox-smoke.ts", binaryPath])
+    await run([process.execPath, "scripts/context-smoke.ts", binaryPath])
+  }
 
   await Bun.write(join(outDirectory, "LICENSE"), Bun.file(join(projectRoot, "LICENSE")))
   await Bun.write(join(outDirectory, "README.md"), Bun.file(join(projectRoot, "README.md")))

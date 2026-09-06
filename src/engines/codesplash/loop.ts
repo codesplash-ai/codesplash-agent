@@ -15,6 +15,16 @@ import {
   registerChildProcess,
   type SessionPolicy,
 } from "../../core/index.ts"
+import { compactMessages } from "./compaction.ts"
+import {
+  type ContextOptions,
+  ContextTracker,
+  estimateMessages,
+  inspectContext,
+  isContextOverflow,
+  pruneToolResults,
+  reminderText,
+} from "./context.ts"
 import {
   ASK_USER_TOOL_NAME,
   type ChatMessage,
@@ -43,6 +53,7 @@ import {
 import { Guardian, type GuardianConfig } from "./guardian.ts"
 import { derivePersistableRule } from "./permissions.ts"
 import type { SandboxRuntime } from "./sandbox/contracts.ts"
+import { READ_TOOL_OUTPUT, ToolOutputStore } from "./tool-output-store.ts"
 import type { ToolRegistry } from "./tools/registry.ts"
 import { parsePermissionRequest, REQUEST_PERMISSIONS_TOOL_NAME } from "./tools/request-permissions.ts"
 import { truncateToolOutput } from "./tools/truncate.ts"
@@ -125,6 +136,8 @@ export type DiffCollector = (cwd: string, paths: string[]) => Promise<string>
 export type ResolvedModel = { model: ModelInfo; provider: ProviderClient }
 
 export type CodesplashLoopOptions = {
+  context?: ContextOptions
+  outputStore?: ToolOutputStore
   cwd: string
   policy: SessionPolicy
   registry: ToolRegistry
@@ -224,8 +237,15 @@ export class CodesplashLoop {
   #turnStartIndex = 0
   /** Messages the most recently finished turn added, as they stand in history at turn end. */
   #lastTurnMessages: ChatMessage[] = []
+  readonly #contextOptions: ContextOptions
+  readonly #contextTracker = new ContextTracker()
+  readonly #outputStore: ToolOutputStore
+  #historyRevision = 0
+  #compactionFailures = 0
 
   constructor(options: CodesplashLoopOptions) {
+    this.#contextOptions = options.context ?? {}
+    this.#outputStore = options.outputStore ?? new ToolOutputStore()
     this.#cwd = options.cwd
     this.#policy = options.policy
     this.#registry = options.registry
@@ -253,6 +273,43 @@ export class CodesplashLoop {
 
   get isTurnActive(): boolean {
     return this.#abort !== undefined
+  }
+  get historyRevision(): number {
+    return this.#historyRevision
+  }
+
+  inspectContext(model: ModelInfo, system: string, reasoningEffort?: ReasoningEffort) {
+    return this.#contextTracker.inspect({
+      model,
+      system,
+      reasoningEffort,
+      tools: this.#registry.specs(),
+      messages: [...this.#history],
+    })
+  }
+
+  async compact(request: TurnRequest | (() => Promise<TurnRequest>), instructions = ""): Promise<void> {
+    if (this.#abort) throw new Error("Wait for the current turn before compacting")
+    if (instructions.length > 4000) throw new Error("Compaction instructions must be at most 4000 characters")
+    const abort = new AbortController()
+    this.#abort = abort
+    this.#turnId = crypto.randomUUID()
+    this.#event("context/started", {}, { kind: "turn.started", payload: {} })
+    try {
+      const resolved = typeof request === "function" ? await request() : request
+      abort.signal.throwIfAborted()
+      if (this.#contextOptions.compactionStrategy === "prune") {
+        if (!this.#pruneHistory())
+          throw new Error("No older tool output can be pruned; choose the summary strategy or a new session")
+      } else await this.#compactHistory(resolved, abort.signal, instructions)
+      this.#completeTurn("completed")
+    } catch (error) {
+      this.#completeTurn(abort.signal.aborted ? "interrupted" : "failed")
+      throw error
+    } finally {
+      this.#abort = undefined
+      this.#turnId = undefined
+    }
   }
   clearApprovalCache(): void {
     if (this.isTurnActive) throw new Error("Cannot change approvals during a turn")
@@ -307,6 +364,8 @@ export class CodesplashLoop {
     let provider = request.provider
     let model = request.model
     let fallbackUsed = false
+    let compactionAttempts = 0
+    let overflowRecovered = false
 
     try {
       this.#event(
@@ -320,8 +379,55 @@ export class CodesplashLoop {
 
       let executedRounds = 0
       while (true) {
+        abort.signal.throwIfAborted()
+        const contextRequest = { ...request, model, provider }
+        let context = this.inspectContext(model, request.system, request.reasoningEffort)
+        if (context.totalTokens > context.inputBudget) {
+          if (this.#contextOptions.autoCompact === false)
+            throw new Error(
+              "Context exceeds this model's budget. Run /compact or use a larger-context model.",
+            )
+          this.#pruneHistory()
+          context = this.inspectContext(model, request.system, request.reasoningEffort)
+          if (context.totalTokens > context.inputBudget) {
+            if (
+              this.#contextOptions.compactionStrategy === "prune" ||
+              compactionAttempts >= 2 ||
+              this.#compactionFailures >= 2
+            ) {
+              throw new Error(
+                "Context recovery stopped at its limit. Try /compact with the summary strategy, a larger-context model, or a new session.",
+              )
+            }
+            compactionAttempts++
+            await this.#compactHistory(contextRequest, abort.signal)
+            context = this.inspectContext(model, request.system, request.reasoningEffort)
+            if (context.totalTokens > context.inputBudget)
+              throw new Error(
+                "The remaining context exceeds the model budget. Shorten the prompt or use a larger-context model.",
+              )
+          }
+        }
         const response = await this.#streamResponse(provider, model, request, abort.signal)
         if (response.kind === "error") {
+          if (!response.sawEvent && isContextOverflow(response.error)) {
+            if (overflowRecovered || this.#contextOptions.autoCompact === false)
+              throw new Error(
+                "The provider rejected the context size. Try /compact, a larger-context model, or a new session.",
+              )
+            overflowRecovered = true
+            if (!this.#pruneHistory()) {
+              if (
+                compactionAttempts >= 2 ||
+                this.#compactionFailures >= 2 ||
+                this.#contextOptions.compactionStrategy === "prune"
+              )
+                throw new Error("Context overflow recovery reached its limit")
+              compactionAttempts++
+              await this.#compactHistory(contextRequest, abort.signal)
+            }
+            continue
+          }
           const fallback = fallbackUsed ? undefined : this.#fallbackTarget(response, model)
           if (fallback) {
             fallbackUsed = true
@@ -416,8 +522,19 @@ export class CodesplashLoop {
         }
         executedRounds += 1
 
+        const modeBefore = this.#permissions?.mode
         const round = await this.#runToolRound(response.toolCalls, abort.signal)
-        this.#history.push({ role: "user", content: round.results })
+        const resultContent: ContentBlock[] = [...round.results]
+        if (this.#permissions && modeBefore !== this.#permissions.mode) {
+          resultContent.push({
+            type: "text",
+            text: reminderText({
+              source: "permission-mode",
+              text: `The current permission mode is ${this.#permissions.mode}. Follow that mode's restrictions.`,
+            }),
+          })
+        }
+        this.#history.push({ role: "user", content: resultContent })
         for (const path of round.mutatedPaths) turnMutatedPaths.add(path)
         if (round.mutatedPaths.length > 0 && !abort.signal.aborted) {
           await this.#emitDiff(turnMutatedPaths)
@@ -433,6 +550,10 @@ export class CodesplashLoop {
         }
       }
     } catch (error) {
+      if (abort.signal.aborted) {
+        this.#completeTurn("interrupted")
+        return
+      }
       const message = error instanceof Error ? error.message : String(error)
       this.#event("loop/error", {}, { kind: "error", payload: { message, recoverable: false } })
       this.#completeTurn("failed")
@@ -483,6 +604,72 @@ export class CodesplashLoop {
 
   /* --------------------------------- provider stream --------------------------------- */
 
+  #replaceHistory(messages: ChatMessage[]): void {
+    this.#history.splice(0, this.#history.length, ...messages)
+    this.#historyRevision++
+    this.#turnStartIndex = 0
+    this.#contextTracker.reset()
+  }
+
+  #pruneHistory(): boolean {
+    const messages = pruneToolResults(this.#history)
+    if (estimateMessages(messages) >= estimateMessages(this.#history)) return false
+    this.#replaceHistory(messages)
+    this.#event(
+      "context/pruned",
+      {},
+      {
+        kind: "warning",
+        payload: { message: "Shortened older tool output in model context; visible history is preserved." },
+      },
+    )
+    return true
+  }
+
+  async #compactHistory(request: TurnRequest, signal: AbortSignal, instructions?: string): Promise<void> {
+    this.#event(
+      "context/compacting",
+      {},
+      { kind: "warning", payload: { message: "Compacting older conversation context…" } },
+    )
+    const before = estimateMessages(this.#history)
+    try {
+      const context = this.inspectContext(request.model, request.system, request.reasoningEffort)
+      const messages = await compactMessages({
+        provider: request.provider,
+        model: request.model,
+        messages: this.#history,
+        keepTokens: Math.max(
+          0,
+          Math.floor((context.inputBudget - context.systemTokens - context.toolTokens) / 4),
+        ),
+        instructions,
+        signal,
+        sanitize: (text) => this.#sandbox?.sanitize?.(text) ?? text,
+        onUsage: (usage) => {
+          this.#emitUsage(usage, request.model)
+          this.#commitRequestUsage(usage, request.model)
+        },
+      })
+      signal.throwIfAborted()
+      this.#replaceHistory(messages)
+      this.#compactionFailures = 0
+      this.#event(
+        "context/compacted",
+        {},
+        {
+          kind: "warning",
+          payload: {
+            message: `Compacted estimated message tokens ${before} → ${estimateMessages(messages)}. Visible conversation history is preserved.`,
+          },
+        },
+      )
+    } catch (error) {
+      if (!signal.aborted) this.#compactionFailures++
+      throw error
+    }
+  }
+
   async #streamResponse(
     provider: ProviderClient,
     model: ModelInfo,
@@ -507,6 +694,12 @@ export class CodesplashLoop {
       tools: this.#registry.specs(),
       reasoningEffort: request.reasoningEffort,
     }
+    const estimatedInput = inspectContext(
+      model,
+      request.system,
+      providerRequest.tools,
+      providerRequest.messages,
+    ).totalTokens
 
     try {
       for await (const event of provider.stream(providerRequest, signal)) {
@@ -549,6 +742,12 @@ export class CodesplashLoop {
     } finally {
       // Adapters emit request-scoped snapshots; the last one folds into the session totals.
       this.#commitRequestUsage(requestUsage, model)
+      if (requestUsage.inputTokens !== undefined || requestUsage.cachedInputTokens !== undefined) {
+        this.#contextTracker.observe(
+          (requestUsage.inputTokens ?? 0) + (requestUsage.cachedInputTokens ?? 0),
+          estimatedInput,
+        )
+      }
     }
 
     this.#finishStreamItems(reasoningId, reasoning, messageId, text)
@@ -695,6 +894,8 @@ export class CodesplashLoop {
     this.#history.length = 0
     this.#history.push(...stripped)
     this.#turnStartIndex -= droppedBeforeTurn
+    this.#historyRevision++
+    this.#contextTracker.reset()
   }
 
   /* ----------------------------------- tool rounds ----------------------------------- */
@@ -1061,9 +1262,12 @@ export class CodesplashLoop {
             "Named secrets require the native sandbox runtime",
           )
       }
-      const outcome = this.#sandbox
-        ? await this.#sandbox.runTool(tool, call.input, this.#toolContext(signal))
-        : await tool.run(call.input, this.#toolContext(signal))
+      const outcome =
+        call.name === READ_TOOL_OUTPUT
+          ? { text: await this.#outputStore.read(call.input), label: "Retained tool output" }
+          : this.#sandbox
+            ? await this.#sandbox.runTool(tool, call.input, this.#toolContext(signal))
+            : await tool.run(call.input, this.#toolContext(signal))
       if (this.#sandbox?.sanitize) {
         outcome.text = this.#sandbox.sanitize(outcome.text)
         outcome.label = this.#sandbox.sanitize(outcome.label)
@@ -1074,7 +1278,11 @@ export class CodesplashLoop {
       }
       for (const path of outcome.mutatedPaths ?? []) mutated.add(path)
       this.#emitToolItem(itemId, outcome.label, outcome.text, outcome.isError ? "failed" : "completed")
-      const result: ToolResultBlock = { type: "tool_result", toolCallId: call.id, text: outcome.text }
+      const result: ToolResultBlock = {
+        type: "tool_result",
+        toolCallId: call.id,
+        text: await this.#outputStore.retain(outcome.text),
+      }
       if (outcome.isError) result.isError = true
       return result
     } catch (error) {

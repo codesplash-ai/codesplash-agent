@@ -14,6 +14,7 @@ import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type {
   AppViewState,
+  ContextInspection,
   EngineId,
   EngineModel,
   PendingRequest,
@@ -37,6 +38,8 @@ export type SlashCommandName =
   | "model"
   | "permissions"
   | "usage"
+  | "context"
+  | "compact"
   | "history"
   | "quit"
 
@@ -52,6 +55,8 @@ const slashCommandNames: readonly SlashCommandName[] = [
   "model",
   "permissions",
   "usage",
+  "context",
+  "compact",
   "history",
   "quit",
 ]
@@ -85,6 +90,8 @@ export const slashCommandHelp: ReadonlyArray<{ command: string; description: str
   { command: "/model [name]", description: "List models, or switch for the next turn" },
   { command: "/permissions", description: "Show permission mode, rules, sandbox, and trust" },
   { command: "/usage", description: "Show token usage, context left, and estimated cost" },
+  { command: "/context", description: "Inspect model context and available input budget (CodeSplash)" },
+  { command: "/compact [instructions]", description: "Compact older model context (CodeSplash)" },
   { command: "/history", description: "Show where this session is stored" },
   { command: "/help", description: "Toggle this overlay (also F1)" },
   { command: "/quit", description: "Quit the app" },
@@ -389,6 +396,7 @@ type OverlayState =
   | { kind: "help" }
   | { kind: "permissions"; rules?: PermissionsOverlayRules }
   | { kind: "usage" }
+  | { kind: "context"; context: ContextInspection }
   | { kind: "history" }
   | { kind: "models"; state: ModelOverlayState }
 
@@ -646,6 +654,15 @@ export function CodexSessionApp({
           return
         case "usage":
           setOverlay({ kind: "usage" })
+          return
+        case "context":
+          void runCommand(async () => {
+            const context = await controller.inspectContext()
+            setOverlay({ kind: "context", context })
+          })
+          return
+        case "compact":
+          void runCommand(() => controller.compact(command.argument))
           return
         case "history":
           setOverlay({ kind: "history" })
@@ -1154,6 +1171,21 @@ function SessionOverlay({
     )
   }
 
+  if (overlay.kind === "context") {
+    return (
+      <box title="Model context · Esc closes" style={frame}>
+        {buildContextOverlayLines(overlay.context).map((line) => (
+          <text key={line.label} fg={palette.foreground}>
+            {line.label.padEnd(20)} {line.value}
+          </text>
+        ))}
+        <text fg={palette.muted}>
+          Local token estimates; images are approximate. /compact reduces older context.
+        </text>
+      </box>
+    )
+  }
+
   if (overlay.kind === "history") {
     return (
       <box title="Session history · Esc closes" style={frame}>
@@ -1515,6 +1547,27 @@ export function costIsPartial(usage: AppViewState["usage"]): boolean {
   if (usage.hasUnpricedUsage !== undefined) return usage.hasUnpricedUsage
   if (usage.estimatedCostUsd !== 0) return false
   return (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0) > 0
+}
+
+export function buildContextOverlayLines(
+  context: ContextInspection,
+): Array<{ label: string; value: string }> {
+  return [
+    { label: "Model", value: context.model },
+    { label: "Context window", value: String(context.contextWindow) },
+    { label: "System (estimated)", value: String(context.systemTokens) },
+    { label: "Tools (estimated)", value: String(context.toolTokens) },
+    { label: "Messages (estimated)", value: `${context.messageTokens} (${context.messageCount} messages)` },
+    { label: "Input (calibrated)", value: String(context.totalTokens) },
+    { label: "Input budget", value: String(context.inputBudget) },
+    { label: "Output reserve", value: String(context.outputReserve) },
+    {
+      label: "Last measured input",
+      value: context.observedInputTokens === undefined ? "Unavailable" : String(context.observedInputTokens),
+    },
+    { label: "Context epoch", value: String(context.epoch) },
+    { label: "Prefix changes", value: context.prefixChanges.join(", ") || "None" },
+  ]
 }
 
 /** Catalog estimates only — always labelled "estimated", plus "partial" for unpriced usage. */

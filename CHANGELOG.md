@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Long-session context (CodeSplash native engine)
+
+- Add automatic compaction, `/compact [instructions]`, bounded context-overflow recovery,
+  and a pruning-only strategy. Summary calls have no tools, bounded requests/output/time,
+  interruption support, and session cost accounting.
+- Add `/context` with component estimates, observed input usage, output reserve, context
+  epoch and prompt-prefix change reasons. Keep tool specifications in stable name order.
+- Preserve compacted context across resume with atomic native transcript snapshots and
+  recover fully after write failures. Visible event history remains intact.
+- Retain large sanitized tool results in a bounded session store and retrieve pages through
+  `read_tool_output`. Under `--no-history`, retention and compaction stay in memory.
+
 ### Native sandbox, scoped access, and secrets
 
 - Enforce shell commands, descendants, and file tools with macOS Seatbelt or Linux
