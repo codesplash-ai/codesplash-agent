@@ -175,7 +175,17 @@ export type CodesplashLoopOptions = {
   }
 }
 
+export type SteeringInput = {
+  id: string
+  userText: string
+  userContent: ContentBlock[]
+  system: string
+  prepare?: TurnRequest["prepare"]
+}
 export type TurnRequest = {
+  userMessageId?: string
+  hasSteering?: () => boolean
+  takeSteering?: () => Promise<SteeringInput | undefined>
   prepare?: (
     run: ContextToolRunner,
     signal: AbortSignal,
@@ -376,12 +386,40 @@ export class CodesplashLoop {
     let fallbackUsed = false
     let compactionAttempts = 0
     let overflowRecovered = false
-
+    const applySteering = async (): Promise<boolean> => {
+      const next = await request.takeSteering?.()
+      if (!next) return false
+      abort.signal.throwIfAborted()
+      this.#event(
+        "loop/steeringMessage",
+        {},
+        { kind: "user.message", payload: { id: next.id, text: next.userText } },
+        true,
+      )
+      this.#history.push({ role: "user", content: next.userContent })
+      let suffix = ""
+      if (next.prepare) {
+        const prepared = await next.prepare(this.#contextRunner(abort.signal, turnMutatedPaths), abort.signal)
+        abort.signal.throwIfAborted()
+        this.#history[this.#history.length - 1] = {
+          role: "user",
+          content: [...next.userContent, ...prepared.content],
+        }
+        suffix = prepared.suffix
+      }
+      request.system = [next.system, suffix].filter(Boolean).join("\n\n")
+      this.#doomSignature = undefined
+      this.#doomCount = 0
+      return true
+    }
     try {
       this.#event(
         "loop/userMessage",
         {},
-        { kind: "user.message", payload: { id: crypto.randomUUID(), text: request.userText } },
+        {
+          kind: "user.message",
+          payload: { id: request.userMessageId ?? crypto.randomUUID(), text: request.userText },
+        },
         true,
       )
       this.#event("loop/turnStarted", {}, { kind: "turn.started", payload: {} })
@@ -402,6 +440,7 @@ export class CodesplashLoop {
       let executedRounds = 0
       while (true) {
         abort.signal.throwIfAborted()
+        if (request.hasSteering?.()) await applySteering()
         const contextRequest = { ...request, model, provider }
         let context = this.inspectContext(model, request.system, request.reasoningEffort)
         if (context.totalTokens > context.inputBudget) {
@@ -492,6 +531,14 @@ export class CodesplashLoop {
         content.push(...response.toolCalls)
         if (content.length > 0) this.#history.push({ role: "assistant", content })
 
+        if (request.hasSteering?.()) {
+          this.#settleUnexecutedToolCalls(
+            response.toolCalls,
+            "Skipped: user steering arrived before tool dispatch.",
+          )
+          await applySteering()
+          continue
+        }
         if (response.stopReason === "max_tokens") {
           this.#settleUnexecutedToolCalls(
             response.toolCalls,
@@ -545,7 +592,7 @@ export class CodesplashLoop {
         executedRounds += 1
 
         const modeBefore = this.#permissions?.mode
-        const round = await this.#runToolRound(response.toolCalls, abort.signal)
+        const round = await this.#runToolRound(response.toolCalls, abort.signal, request.hasSteering)
         const resultContent: ContentBlock[] = [...round.results]
         if (this.#permissions && modeBefore !== this.#permissions.mode) {
           resultContent.push({
@@ -959,6 +1006,7 @@ export class CodesplashLoop {
   async #runToolRound(
     calls: ToolCallBlock[],
     signal: AbortSignal,
+    hasSteering?: () => boolean,
   ): Promise<{ results: ToolResultBlock[]; mutatedPaths: string[]; doomEnded: boolean }> {
     const results: Array<ToolResultBlock | undefined> = new Array(calls.length)
     const mutated = new Set<string>()
@@ -968,6 +1016,15 @@ export class CodesplashLoop {
     const run = async (index: number): Promise<void> => {
       const call = calls[index]
       if (!call) return
+      if (hasSteering?.()) {
+        results[index] = {
+          type: "tool_result",
+          toolCallId: call.id,
+          text: "Skipped: user steering arrived before tool dispatch.",
+          isError: true,
+        }
+        return
+      }
       const tool = this.#registry.get(call.name)
       if (!tool) return
       results[index] = await this.#runToolCall(tool, call, signal, mutated)

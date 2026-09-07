@@ -21,6 +21,7 @@ import type { SupervisorInput } from "./supervisor.ts"
 import type { WorkerInput } from "./worker.ts"
 
 const FILE_TOOLS = new Set([
+  "attachment_access",
   "context_read",
   "context_list",
   "context_files",

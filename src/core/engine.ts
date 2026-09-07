@@ -1,6 +1,8 @@
 /** Provider-independent contracts for live engine sessions. */
 import type { ApprovalPolicy, PermissionMode, SandboxMode } from "./config.ts"
 import type { AgentEvent, EngineId } from "./events.ts"
+import type { SessionStateAccess } from "./session/control.ts"
+import type { InputAcknowledgment, InputIntent, InputQueue } from "./session/input-queue.ts"
 
 export type SessionPolicy = {
   sandbox: SandboxMode
@@ -55,6 +57,11 @@ export type PermissionRuleOverrides = {
 }
 
 export type OpenSessionOptions = {
+  /** Owned canonical state, or an in-memory equivalent; no inferred file authority. */
+  sessionState?: SessionStateAccess
+  promptHistory?: import("./session/prompt-history.ts").PromptHistory
+  /** Single-prompt headless callers hold previously queued work for interactive review. */
+  resumeQueuedInput?: boolean
   cwd: string
   localSessionId: string
   nativeSessionId?: string
@@ -89,6 +96,8 @@ export type OpenSessionOptions = {
 }
 
 export type UserInput = {
+  /** Original typed draft, for recall only; never sent as additional provider context. */
+  sourceText?: string
   text: string
   images?: string[]
   files?: string[]
@@ -129,6 +138,8 @@ export interface EngineSession {
   readonly nativeSessionId?: string
   readonly capabilities: EngineCapabilities
   readonly events: AsyncIterable<AgentEvent>
+  readonly inputQueue?: InputQueue
+  submit?(input: UserInput, intent?: InputIntent, submissionId?: string): Promise<InputAcknowledgment>
   send(input: UserInput): Promise<void>
   resolveRequest(requestId: string, decision: EngineDecision): Promise<void>
   interrupt(): Promise<void>

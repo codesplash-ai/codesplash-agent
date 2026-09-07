@@ -263,6 +263,23 @@ function handleMessage(message: {
     return
   }
 
+  if (message.method === "turn/steer") {
+    const params = message.params as { threadId: string; expectedTurnId: string; clientUserMessageId: string }
+    if (params.expectedTurnId !== `turn-${turnCount}` || !params.clientUserMessageId) {
+      send({
+        id: message.id,
+        error: { code: -32602, message: "Invalid steering precondition or missing client id" },
+      })
+      return
+    }
+    send({ id: message.id, result: { turnId: params.expectedTurnId } })
+    send({
+      method: "turn/completed",
+      params: { threadId: params.threadId, turn: { id: params.expectedTurnId, status: "completed" } },
+    })
+    return
+  }
+
   if (message.method === "turn/interrupt") {
     send({ id: message.id, result: null })
     send({

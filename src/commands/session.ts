@@ -114,6 +114,21 @@ export async function runSessionCommand(
     return 0
   }
 
+  if (["queue", "history", "stash"].includes(action)) {
+    if (!id) throw new UsageError(`session ${action} requires a session id`)
+    const { sessionInputCommand } = await import("./session-input.ts")
+    emit(
+      await sessionInputCommand(
+        repository,
+        await repository.resolve(id, query.project),
+        action as "queue" | "history" | "stash",
+        rest,
+        apply,
+      ),
+    )
+    return 0
+  }
+
   if (!id)
     throw new UsageError(
       "session <show|rename|archive|unarchive|delete|move|section|migrate|compress|recover> requires a session id",

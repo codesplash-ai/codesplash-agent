@@ -2,6 +2,7 @@ import type { ContextInspection, EngineDecision, EngineModel, EngineSession, Use
 import type { AgentEvent } from "./events.ts"
 import type { AppViewState } from "./reducer.ts"
 import { initialAppViewState, reduceAgentEvent } from "./reducer.ts"
+import type { InputAcknowledgment, InputIntent } from "./session/input-queue.ts"
 
 export type SessionStateListener = (state: AppViewState) => void
 
@@ -21,11 +22,19 @@ export class SessionController {
   #consumePromise: Promise<void> | undefined
   #notificationTimer: ReturnType<typeof setTimeout> | undefined
   #closed = false
+  #unsubscribeQueue: (() => void) | undefined
 
   constructor(session: EngineSession, options: SessionControllerOptions = {}) {
     this.#session = session
     this.#onEvent = options.onEvent
     this.#state = options.initialState ?? freshInitialState()
+    if (session.inputQueue) {
+      this.#state = { ...this.#state, inputQueue: session.inputQueue.snapshot() }
+      this.#unsubscribeQueue = session.inputQueue.subscribe(() => {
+        this.#state = { ...this.#state, inputQueue: session.inputQueue?.snapshot() }
+        this.#flushNotify()
+      })
+    }
   }
 
   get state(): AppViewState {
@@ -43,9 +52,21 @@ export class SessionController {
     this.#consumePromise = this.#consume()
   }
 
+  get inputQueue() {
+    return this.#session.inputQueue
+  }
   async send(input: UserInput): Promise<void> {
+    await this.submit(input)
+  }
+  async submit(
+    input: UserInput,
+    intent: InputIntent = "follow-up",
+    submissionId?: string,
+  ): Promise<InputAcknowledgment | undefined> {
     if (this.#closed) throw new Error("Session is closed")
-    if (!input.text.trim() && !input.images?.length) return
+    if (!input.text.trim() && !input.images?.length && !input.files?.length) return
+    if (this.#session.submit) return this.#session.submit(input, intent, submissionId)
+    if (intent !== "follow-up") throw new Error("This engine does not support steering or interjection")
     if (this.#state.pendingRequest) throw new Error("Resolve the pending request before sending a message")
     if (this.#state.turnStatus === "running") throw new Error("Wait for the current turn or interrupt it")
     await this.#session.send(input)
@@ -84,6 +105,7 @@ export class SessionController {
   async close(): Promise<void> {
     if (this.#closed) return
     this.#closed = true
+    this.#unsubscribeQueue?.()
     await this.#session.close()
     await this.#consumePromise
   }

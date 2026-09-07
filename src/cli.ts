@@ -669,6 +669,8 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
   let policy = effectiveSessionPolicy(config, appOptions)
   let localSessionId: string = crypto.randomUUID()
   let recorder: SessionRecorder | undefined
+  let sessionState: import("./core/session/control.ts").SessionStateAccess | undefined
+  let promptHistory: import("./core/session/prompt-history.ts").PromptHistory | undefined
   let nativeTranscriptPath: string | undefined
   let firstSequence: number | undefined
   let initialUsage: SessionUsageSnapshot | undefined
@@ -697,6 +699,8 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
     const { SessionRecorder } = await import("./core/session-recorder.ts")
     const store = overrides.store ?? new SessionStore()
     const projectId = projectIdFor(project.cwd)
+    const { projectPromptHistory } = await import("./core/session/prompt-history.ts")
+    promptHistory = await projectPromptHistory(store.root, projectId, "codesplash")
 
     if (resuming) {
       const targetId = command.resume ?? (await latestCodesplashSessionId(store, projectId))
@@ -724,6 +728,7 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
       }
       firstSequence = highestSequence + 1
       initialUsage = usageSnapshotFromEvents(priorEvents)
+      sessionState = handle.state
       nativeTranscriptPath = transcriptPathFor(handle)
       policy = resumedSessionPolicy(handle.meta, command.sandboxOverride, config, stderr)
       // The runner settles mode precedence (flag > recorded > policy) and reports what it used;
@@ -750,6 +755,7 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
       // New recorded runs persist the engine transcript too, so --resume/--continue work later.
       // The created meta already carries the policy's mode; the runner re-records the settled one
       // through the recorder's write chain (never a bare updateMeta, which would race it).
+      sessionState = handle.state
       nativeTranscriptPath = transcriptPathFor(handle)
       recorder = new SessionRecorder(handle)
       const freshRecorder = recorder
@@ -778,6 +784,8 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
     driver,
     localSessionId,
     nativeTranscriptPath,
+    sessionState,
+    promptHistory,
     firstSequence,
     initialUsage,
     permissionModeOverride: command.permissionMode,

@@ -213,12 +213,16 @@ export async function runCodexSession(
 
   let recorder: SessionRecorder | undefined
   let historyLocation: string | undefined
+  let sessionState: OpenSessionOptions["sessionState"]
+  let promptHistory: OpenSessionOptions["promptHistory"]
   let nativeTranscriptPath: string | undefined
   let initialState = freshState()
   let firstSequence = 0
 
   if (historyEnabled) {
     const store = options.store ?? new SessionStore()
+    const { projectPromptHistory } = await import("../core/session/prompt-history.ts")
+    promptHistory = await projectPromptHistory(store.root, projectId, engine)
     let handle: SessionHandle
     if (options.resume) {
       handle = await store.open(projectId, localSessionId)
@@ -282,6 +286,7 @@ export async function runCodexSession(
       recorder = new SessionRecorder(handle)
     }
     historyLocation = handle.directory
+    sessionState = handle.state
     // The codesplash engine owns a provider-native transcript beside the event log: passing the
     // path makes it reseed the model's history on open (resume and Ctrl+R reconnect alike) and
     // append each finished turn.
@@ -305,6 +310,8 @@ export async function runCodexSession(
           firstSequence,
           knownTurnIds: usesProviderThread ? (recorder?.knownTurnIds ?? []) : [],
           nativeTranscriptPath,
+          sessionState,
+          promptHistory,
           // Resume/reconnect: the engine continues the replayed cumulative usage so the /usage
           // overlay and recorded events never drop back toward zero after the next turn.
           initialUsage: isCodesplash ? usageSnapshotOf(initialState) : undefined,

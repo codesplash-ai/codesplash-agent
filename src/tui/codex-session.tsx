@@ -25,9 +25,11 @@ import type {
   TranscriptItem,
 } from "../core/index.ts"
 import { defaultSessionPolicy, isPermissionMode, suspendToShell } from "../core/index.ts"
+import type { AcceptedPrompt, InputIntent, InputItem } from "../core/session/input-queue.ts"
 import { extractImageAttachments } from "./attachments.ts"
 import type { BrandPalette } from "./brand.ts"
 import { completeMentionDraft, trailingMention } from "./file-mentions.ts"
+import { InputPanel, inputDraftText } from "./input-panel.tsx"
 
 export type CodexSessionAction = "home" | "reconnect" | "new" | "resume-picker" | "quit"
 
@@ -48,6 +50,11 @@ export type SlashCommandName =
   | "remember"
   | "memory"
   | "history"
+  | "queue"
+  | "steer"
+  | "interject"
+  | "prompt-history"
+  | "stash"
   | "quit"
 
 export type ParsedSlashCommand =
@@ -71,6 +78,11 @@ const slashCommandNames: readonly SlashCommandName[] = [
   "remember",
   "memory",
   "history",
+  "queue",
+  "steer",
+  "interject",
+  "prompt-history",
+  "stash",
   "quit",
 ]
 
@@ -84,8 +96,9 @@ export function parseSlashCommand(text: string): ParsedSlashCommand | undefined 
   return {
     name,
     argument:
-      (name === "memory" || name === "remember" ? trimmed.slice(word.length + 1).trim() : rest.join(" ")) ||
-      undefined,
+      (["memory", "remember", "steer", "interject", "queue", "stash"].includes(name)
+        ? trimmed.slice(word.length + 1).trim()
+        : rest.join(" ")) || undefined,
   }
 }
 
@@ -120,6 +133,14 @@ export const slashCommandHelp: ReadonlyArray<{ command: string; description: str
   { command: "/personality neutral|concise|explanatory", description: "Set response style" },
   { command: "/create-skill name [--write]", description: "Preview or create a skill scaffold" },
   { command: "/history", description: "Show where this session is stored" },
+  { command: "/queue", description: "Inspect, edit, reorder and review acknowledged input" },
+  { command: "/steer text", description: "Steer at the next safe provider/tool boundary" },
+  { command: "/interject text", description: "Interrupt, settle cleanup, then admit this prompt" },
+  { command: "/prompt-history", description: "Recall accepted typed prompts; Ctrl+R" },
+  {
+    command: "/stash [list|save NAME TEXT|apply ID|pop ID|drop ID]",
+    description: "Explicit draft stashes; Ctrl+S saves the composer",
+  },
   { command: "/help", description: "Toggle this overlay (also F1)" },
   { command: "/quit", description: "Quit the app" },
 ]
@@ -420,6 +441,7 @@ type PermissionsOverlayRules =
   | { phase: "ready"; rules: PermissionRuleView[]; selectedGrant: number; notice?: string }
 
 type OverlayState =
+  | { kind: "input"; tab: "queue" | "history" | "stash" }
   | { kind: "help" }
   | { kind: "permissions"; rules?: PermissionsOverlayRules }
   | { kind: "usage" }
@@ -475,6 +497,11 @@ export function CodexSessionApp({
   // so recoverable errors keep the composer live instead of offering the Ctrl+R reconnect flow.
   const supportsReconnect = engine !== "codesplash" || historyLocation !== undefined
   const reconnectPending = supportsReconnect && state.error?.recoverable === true
+  const [approvalFocus, setApprovalFocus] = useState(true)
+  const [editingInput, setEditingInput] = useState<{ id: string; revision: string; intent: InputIntent }>()
+  useEffect(() => {
+    if (state.pendingRequest?.id) setApprovalFocus(true)
+  }, [state.pendingRequest?.id])
 
   useEffect(() => {
     renderer.setBackgroundColor(palette.background)
@@ -524,6 +551,45 @@ export function CodexSessionApp({
       return false
     }
   }, [])
+
+  const restoreInput = useCallback(
+    (prompt: AcceptedPrompt, mode: "edit" | "recall" | "pop", revision: string) => {
+      const queue = controller.inputQueue
+      if (!queue) throw new Error("This engine has no input history")
+      if ((textareaRef.current?.plainText ?? "").trim())
+        throw new Error("A draft is already in the composer; Ctrl+S stashes it before restoring another")
+      if (queue.snapshot().revision !== revision)
+        throw new Error("Input state changed; select the entry again")
+      if (mode === "edit" && !["queued", "blocked"].includes((prompt as InputItem).status))
+        throw new Error("Only queued or blocked input can be edited")
+      const input = queue.recall(prompt)
+      let text = inputDraftText(input)
+      if (mode === "edit") {
+        const command = parseSlashCommand(text)
+        if (command?.name === "steer" || command?.name === "interject") text = command.argument ?? ""
+        setEditingInput({ id: prompt.id, revision, intent: (prompt as InputItem).intent })
+      }
+      textareaRef.current?.setText(text)
+      if (mode === "pop") queue.dropStash(prompt.id, revision)
+      setOverlay(undefined)
+    },
+    [controller],
+  )
+  const saveCurrentDraft = useCallback(() => {
+    const queue = controller.inputQueue
+    if (!queue) throw new Error("This engine has no draft stashes")
+    const sourceText = textareaRef.current?.plainText ?? "",
+      captured = draftRevision.current
+    const extracted = extractImageAttachments(sourceText)
+    const stash = queue.saveStash(
+      `draft-${Date.now()}`,
+      { text: extracted.text, sourceText, images: extracted.images },
+      queue.snapshot().revision,
+    )
+    if (draftRevision.current === captured && textareaRef.current?.plainText === sourceText)
+      textareaRef.current?.setText("")
+    setCommandError(`Saved draft ${stash.name}`)
+  }, [controller])
 
   const resolveRequest = useCallback(
     (choice: string) => {
@@ -738,6 +804,49 @@ export function CodexSessionApp({
         case "compact":
           void runCommand(() => controller.compact(command.argument))
           return
+        case "queue":
+        case "prompt-history":
+          if (!controller.inputQueue) {
+            setCommandError("This engine does not expose an input queue")
+            return
+          }
+          setOverlay({ kind: "input", tab: command.name === "queue" ? "queue" : "history" })
+          return
+        case "stash":
+          void runCommand(async () => {
+            const queue = controller.inputQueue
+            if (!queue) throw new Error("This engine has no draft stashes")
+            const [action = "list", id, ...rest] = (command.argument ?? "").split(/\s+/)
+            if (action === "list" || action === "") {
+              setOverlay({ kind: "input", tab: "stash" })
+              return
+            }
+            if (action === "save" && id && rest.length) {
+              queue.saveStash(id, { text: rest.join(" ") }, queue.snapshot().revision)
+              setOverlay({ kind: "input", tab: "stash" })
+              return
+            }
+            if (id && (action === "apply" || action === "pop")) {
+              restoreInput(queue.stash(id), action === "pop" ? "pop" : "recall", queue.snapshot().revision)
+              return
+            }
+            if (action === "drop" && id) {
+              queue.dropStash(id, queue.snapshot().revision)
+              return
+            }
+            throw new Error("Usage: /stash list|save NAME TEXT|apply ID|pop ID|drop ID")
+          })
+          return
+        case "steer":
+        case "interject":
+          void runCommand(async () => {
+            if (!command.argument) throw new Error(`/${command.name} requires a prompt`)
+            await controller.submit(
+              { text: command.argument },
+              command.name === "steer" ? "steering" : "interject",
+            )
+          })
+          return
         case "history":
           setOverlay({ kind: "history" })
           return
@@ -755,6 +864,7 @@ export function CodexSessionApp({
       openModelOverlay,
       openPermissionsOverlay,
       runCommand,
+      restoreInput,
       permissions,
     ],
   )
@@ -766,6 +876,27 @@ export function CodexSessionApp({
       return
     }
 
+    if (key.ctrl && key.name === "s" && controller.inputQueue) {
+      key.preventDefault()
+      void runCommand(async () => saveCurrentDraft())
+      return
+    }
+    if (key.ctrl && key.name === "r" && !reconnectPending && controller.inputQueue) {
+      key.preventDefault()
+      setOverlay({ kind: "input", tab: "history" })
+      return
+    }
+    if (key.name === "tab" && !key.shift && state.pendingRequest && controller.inputQueue && !overlay) {
+      key.preventDefault()
+      setApprovalFocus((value) => !value)
+      return
+    }
+    if (key.name === "escape" && editingInput && !overlay) {
+      key.preventDefault()
+      setEditingInput(undefined)
+      setCommandError("Queue edit cancelled; draft retained")
+      return
+    }
     if (key.ctrl && key.name === "z") {
       key.preventDefault()
       suspendToShell(renderer)
@@ -892,7 +1023,7 @@ export function CodexSessionApp({
       return
     }
 
-    if (state.pendingRequest) {
+    if (state.pendingRequest && approvalFocus) {
       const choice = approvalChoiceForKey(key.name, state.pendingRequest)
       if (choice) {
         key.preventDefault()
@@ -1030,7 +1161,7 @@ export function CodexSessionApp({
         </text>
         <textarea
           ref={textareaRef}
-          focused={!overlay && !state.pendingRequest && !reconnectPending}
+          focused={!overlay && (!state.pendingRequest || !approvalFocus) && !reconnectPending}
           placeholder={styledComposerPlaceholder}
           textColor={palette.foreground}
           placeholderColor={palette.muted}
@@ -1049,25 +1180,53 @@ export function CodexSessionApp({
             resetCursorBlinkRef.current()
           }}
           onSubmit={() => {
-            const text = textareaRef.current?.plainText.trim() ?? ""
-            if (!text) return
-            const command = parseSlashCommand(text)
-            if (command) {
+            const sourceText = textareaRef.current?.plainText ?? "",
+              captured = draftRevision.current
+            if (!sourceText.trim()) return
+            const command = parseSlashCommand(sourceText)
+            const intent: InputIntent =
+              command?.name === "steer"
+                ? "steering"
+                : command?.name === "interject"
+                  ? "interject"
+                  : "follow-up"
+            if (
+              !editingInput &&
+              command &&
+              intent === "follow-up" &&
+              !(command.name === "unknown" && engine === "codesplash")
+            ) {
               setCommandError(undefined)
               textareaRef.current?.setText("")
               runSlashCommand(command)
               return
             }
-            const extracted = extractImageAttachments(text)
-            void runCommand(() =>
-              controller.send({
+            const extracted = extractImageAttachments(
+              intent !== "follow-up" && command && command.name !== "unknown"
+                ? (command.argument ?? "")
+                : sourceText,
+            )
+            void runCommand(async () => {
+              const input = {
                 text: extracted.text,
-                images: extracted.images.length > 0 ? extracted.images : undefined,
-              }),
-            ).then((sent) => {
-              if (sent) {
-                textareaRef.current?.setText("")
-                if (extracted.warnings.length > 0) setCommandError(extracted.warnings.join(" · "))
+                sourceText,
+                images: extracted.images.length ? extracted.images : undefined,
+              }
+              if (editingInput) {
+                const queue = controller.inputQueue
+                if (!queue) throw new Error("Input queue unavailable")
+                queue.edit(editingInput.id, input, editingInput.revision, editingInput.intent)
+              } else await controller.submit(input, intent)
+            }).then((sent) => {
+              if (
+                sent &&
+                draftRevision.current === captured &&
+                textareaRef.current?.plainText === sourceText
+              ) {
+                textareaRef.current.setText("")
+                setEditingInput(undefined)
+                if (controller.state.pendingRequest) setApprovalFocus(true)
+                if (extracted.warnings.length) setCommandError(extracted.warnings.join(" · "))
               }
             })
           }}
@@ -1105,7 +1264,25 @@ export function CodexSessionApp({
         state={state}
         permissions={permissions}
       />
-      <Approval request={overlay ? undefined : state.pendingRequest} palette={palette} />
+      {editingInput ? (
+        <text fg={palette.accent}>Editing queued input · Enter saves · Esc keeps this draft</text>
+      ) : null}
+      {overlay?.kind === "input" && controller.inputQueue && state.inputQueue ? (
+        <InputPanel
+          queue={controller.inputQueue}
+          snapshot={state.inputQueue}
+          tab={overlay.tab}
+          palette={palette}
+          onRestore={restoreInput}
+          onClose={() => setOverlay(undefined)}
+        />
+      ) : null}
+      <Approval
+        request={overlay ? undefined : state.pendingRequest}
+        palette={palette}
+        active={approvalFocus}
+        queueing={Boolean(controller.inputQueue)}
+      />
     </box>
   )
 }
@@ -1125,7 +1302,7 @@ function SessionOverlay({
   state: AppViewState
   permissions?: SessionPermissionsUi
 }) {
-  if (!overlay) return null
+  if (!overlay || overlay.kind === "input") return null
 
   const frame = {
     position: "absolute" as const,
@@ -1543,7 +1720,17 @@ export function PolicyBadge({ policy, palette }: { policy: SessionPolicy; palett
   return <text fg={palette.accent}>{policy.sandbox}</text>
 }
 
-function Approval({ request, palette }: { request?: PendingRequest; palette: BrandPalette }) {
+function Approval({
+  request,
+  palette,
+  active = true,
+  queueing = false,
+}: {
+  request?: PendingRequest
+  palette: BrandPalette
+  active?: boolean
+  queueing?: boolean
+}) {
   if (!request) return null
   const tag = approvalTagLine(request)
 
@@ -1553,9 +1740,9 @@ function Approval({ request, palette }: { request?: PendingRequest; palette: Bra
       style={{
         position: "absolute",
         width: "76%",
-        minHeight: 9,
+        minHeight: active ? 9 : 3,
         left: "12%",
-        top: "32%",
+        top: active ? "32%" : 2,
         zIndex: 20,
         border: true,
         borderStyle: "double",
@@ -1570,7 +1757,11 @@ function Approval({ request, palette }: { request?: PendingRequest; palette: Bra
         </text>
       ) : null}
       {request.detail ? <text fg={palette.foreground}>{request.detail}</text> : null}
-      {request.requestKind === "user-input" ? (
+      {!active ? (
+        <text fg={palette.action}>
+          Approval waiting · Tab returns to choices. Composer input queues a follow-up.
+        </text>
+      ) : request.requestKind === "user-input" ? (
         <>
           {request.choices.map((choice, index) => (
             <text key={`${index}:${choice}`} fg={palette.foreground}>
@@ -1580,7 +1771,10 @@ function Approval({ request, palette }: { request?: PendingRequest; palette: Bra
           <text fg={palette.action}>1-{request.choices.length} answer · Esc dismiss</text>
         </>
       ) : (
-        <text fg={palette.action}>{approvalKeyHint(request)}</text>
+        <text fg={palette.action}>
+          {approvalKeyHint(request)}
+          {queueing ? " · Tab writes a follow-up" : ""}
+        </text>
       )}
     </box>
   )
@@ -1632,7 +1826,11 @@ export function approvalChoiceForKey(name: string, request: PendingRequest): str
 
 function statusHelp(state: AppViewState, supportsReconnect: boolean): string {
   if (state.error?.recoverable && supportsReconnect) return "Ctrl+R reconnect · Ctrl+Q home"
-  if (state.turnStatus === "running") return "Esc interrupt · Ctrl+Q home"
+  if (state.inputQueue?.paused) return "Input queue paused · /queue to review and resume · Ctrl+Q home"
+  if (state.turnStatus === "running")
+    return state.inputQueue
+      ? "Enter queues follow-up · /queue · /steer · /interject · Esc interrupts"
+      : "Esc interrupt · Ctrl+Q home"
   return "Enter send · /help commands · F1 keys"
 }
 

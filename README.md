@@ -125,6 +125,34 @@ Resumed runs reuse the session's recorded policy and append to the same history
 (`--no-history` with resume is a usage error). Native execution profiles are pinned:
 conflicting sandbox overrides require a new session.
 
+### Queue input and recall drafts
+
+In native CodeSplash and Codex sessions, Enter while busy queues a follow-up. `/steer <text>` adds
+direction at a safe turn boundary; `/interject <text>` interrupts and waits for cleanup first.
+`/queue` opens status, pause/resume, edit, reorder, remove and retry controls. While an approval is
+pending, Tab switches between its choices and the composer; typing a follow-up never answers it.
+Unsupported Codex steering is reported on the queued item.
+
+Ctrl+R or `/prompt-history` searches accepted prompts for the current project and engine. Ctrl+S
+explicitly stashes the composer; `/stash` lists named drafts. Stash apply/pop refuse to replace a
+nonempty draft. No-history recall and stashes remain in memory. Changed or missing attachments
+require review, and inline image bytes are unavailable after restart.
+
+```sh
+codesplash session queue <id>
+codesplash session queue <id> edit <input-id> "revised prompt" --apply
+codesplash session queue <id> resume --apply
+codesplash session history <id> search "parser"
+codesplash session history <id> clear --apply
+codesplash session stash <id> save draft "unfinished idea" --apply
+codesplash session stash <id> apply draft
+```
+
+CLI mutations require an inactive session and preview unless `--apply` is provided. Recovered
+pending inputs wait for review; possibly executing inputs require an explicit retry acknowledgment.
+Single-prompt headless runs hold previous queued work. History clearing affects recall; independent
+conversation records and older recovery revisions remain until session deletion.
+
 ### Find and organize sessions
 
 ```sh

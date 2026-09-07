@@ -180,4 +180,32 @@ export const contextFilesTool: HarnessTool = {
     }
   },
 }
-export const internalContextTools = () => [contextReadTool(), contextListTool, contextFilesTool]
+export const attachmentAccessTool: HarnessTool = {
+  name: "attachment_access",
+  permissionName: "read_file",
+  hidden: true,
+  description: "Authorize an explicitly attached image",
+  inputSchema: { type: "object" },
+  isReadOnly: () => true,
+  permission: () => ({ kind: "none" }),
+  permissionTargets(input) {
+    if (
+      !input ||
+      typeof input !== "object" ||
+      !("path" in input) ||
+      typeof input.path !== "string" ||
+      !isAbsolute(input.path)
+    )
+      throw new Error("Invalid image path")
+    return { paths: [physicalPath(input.path)] }
+  },
+  async run() {
+    return { text: "Authorized image path", label: "Image attachment" }
+  },
+}
+export const internalContextTools = () => [
+  contextReadTool(),
+  contextListTool,
+  contextFilesTool,
+  attachmentAccessTool,
+]

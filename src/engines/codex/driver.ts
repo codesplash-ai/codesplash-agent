@@ -13,6 +13,7 @@ import {
   type OpenSessionOptions,
   redactSensitiveText,
 } from "../../core/index.ts"
+import { type InputIntent, InputQueue } from "../../core/session/input-queue.ts"
 import {
   CodexAppServerClient,
   codexVersionCompatibility,
@@ -29,9 +30,12 @@ import type { ThreadStartResponse } from "./generated/v2/ThreadStartResponse.ts"
 import type { TurnInterruptParams } from "./generated/v2/TurnInterruptParams.ts"
 import type { TurnStartParams } from "./generated/v2/TurnStartParams.ts"
 import type { TurnStartResponse } from "./generated/v2/TurnStartResponse.ts"
+import type { TurnSteerParams } from "./generated/v2/TurnSteerParams.ts"
+import type { TurnSteerResponse } from "./generated/v2/TurnSteerResponse.ts"
 import type { UserInput } from "./generated/v2/UserInput.ts"
 import type { JsonRpcRequest } from "./json-rpc.ts"
 import { CodexEventNormalizer, normalizeItem } from "./normalize.ts"
+import { CodexQueuedTurns } from "./queued-turns.ts"
 
 const CODEX_CAPABILITIES: EngineCapabilities = {
   nativeTranscript: true,
@@ -125,6 +129,8 @@ class CodexSession implements EngineSession {
   readonly capabilities = CODEX_CAPABILITIES
   readonly events: AsyncIterable<AgentEvent>
   readonly #eventQueue = new AsyncQueue<AgentEvent>()
+  readonly inputQueue: InputQueue
+  readonly #turns: CodexQueuedTurns
   readonly #normalizer: CodexEventNormalizer
   readonly #pendingRequests = new Map<string, PendingServerRequest>()
   readonly #unsubscribeNotification: () => void
@@ -140,13 +146,68 @@ class CodexSession implements EngineSession {
   ) {
     this.events = this.#eventQueue
     this.#normalizer = new CodexEventNormalizer(options.localSessionId, options.firstSequence ?? 0)
+    this.inputQueue = new InputQueue({
+      state: options.sessionState,
+      cwd: options.cwd,
+      ...options.promptHistory,
+    })
+    this.#turns = new CodexQueuedTurns(this.inputQueue, {
+      start: (input, id) => this.#start(input, id),
+      steer: async (input, id, expectedTurnId) => {
+        const params: TurnSteerParams = {
+          threadId: this.#requireThread(),
+          clientUserMessageId: id,
+          input: toCodexInput(input),
+          expectedTurnId,
+        }
+        this.#userMessage(input, id)
+        const response = await client.process.connection.request<TurnSteerResponse>("turn/steer", params)
+        return response.turnId
+      },
+      interrupt: async (turnId) => {
+        const params: TurnInterruptParams = { threadId: this.#requireThread(), turnId }
+        await client.process.connection.request("turn/interrupt", params)
+      },
+      error: (error) =>
+        this.#eventQueue.push(
+          this.#normalizer.event(
+            "queue/error",
+            undefined,
+            { threadId: this.#threadId },
+            { kind: "error", payload: { message: error.message, recoverable: true } },
+          ),
+        ),
+    })
     this.#unsubscribeNotification = client.process.connection.onNotification((notification) => {
       const notificationThreadId = getStringField(notification.params, "threadId")
       if (this.#threadId && notificationThreadId && notificationThreadId !== this.#threadId) return
 
       for (const event of this.#normalizer.normalize(notification)) {
-        if (event.kind === "turn.started") this.#turnId = event.native?.turnId
-        if (event.kind === "turn.completed") this.#turnId = undefined
+        if (event.kind === "turn.started" && event.native?.turnId) {
+          this.#turnId = event.native.turnId
+          this.#turns.started(event.native.turnId)
+        }
+        if (event.kind === "turn.completed" && event.native?.turnId) {
+          this.#turns.completed(
+            event.native.turnId,
+            event.payload.status === "interrupted" ? "cancelled" : event.payload.status,
+          )
+          if (this.#turnId === event.native.turnId) {
+            this.#turnId = undefined
+            for (const [id, pending] of this.#pendingRequests) {
+              pending.resolve({ decision: "cancel" })
+              this.#eventQueue.push(
+                this.#normalizer.event(
+                  "turn/requestCancelled",
+                  undefined,
+                  { threadId: this.#threadId, requestId: id },
+                  { kind: "request.resolved", payload: { id, decision: "cancel" } },
+                ),
+              )
+            }
+            this.#pendingRequests.clear()
+          }
+        }
         this.#eventQueue.push(event)
       }
     })
@@ -164,6 +225,7 @@ class CodexSession implements EngineSession {
       ),
     )
 
+    void client.process.connection.waitForClose().then(() => this.#turns.disconnected())
     void Promise.all([client.process.connection.waitForClose(), client.process.exited]).then(
       ([, exitCode]) => {
         if (!this.#closed) {
@@ -264,6 +326,8 @@ class CodexSession implements EngineSession {
     )
 
     if (resumedThread) this.#reconcileResumedTurns(resumedThread)
+    if (this.options.resumeQueuedInput === false) this.inputQueue.pause()
+    this.#turns.runner.wake()
   }
 
   /** Synthesizes events for provider turns missing from local history so both sides converge. */
@@ -318,7 +382,7 @@ class CodexSession implements EngineSession {
   /** Applies to the next `turn/start`, which Codex carries forward to subsequent turns. */
   async setModel(model: string): Promise<void> {
     this.#requireThread()
-    if (this.#turnId) throw new Error("Wait for the current turn before switching models")
+    if (this.#turns.busy) throw new Error("Wait for the current turn before switching models")
 
     this.#modelOverride = model
     this.#model = model
@@ -332,32 +396,41 @@ class CodexSession implements EngineSession {
     )
   }
 
-  async send(input: CoreUserInput): Promise<void> {
-    const threadId = this.#requireThread()
-    if (this.#turnId) throw new Error("A Codex turn is already running")
+  async submit(input: CoreUserInput, intent: InputIntent = "follow-up", id?: string) {
+    this.#requireThread()
+    return this.#turns.submit(input, intent, id)
+  }
 
+  async send(input: CoreUserInput): Promise<void> {
+    this.#requireThread()
+    await this.#turns.send(input)
+  }
+
+  #userMessage(input: CoreUserInput, id: string): void {
     this.#eventQueue.push(
       this.#normalizer.event(
         "client/userMessage",
         input,
-        { threadId },
-        {
-          kind: "user.message",
-          payload: { id: crypto.randomUUID(), text: input.text },
-        },
+        { threadId: this.#threadId },
+        { kind: "user.message", payload: { id, text: input.text } },
         true,
       ),
     )
+  }
 
+  async #start(input: CoreUserInput, id: string): Promise<string> {
+    const threadId = this.#requireThread()
+    this.#userMessage(input, id)
     const params: TurnStartParams = {
       threadId,
+      clientUserMessageId: id,
       input: toCodexInput(input),
       summary: "auto",
       model: this.#modelOverride,
     }
     const response = await this.client.process.connection.request<TurnStartResponse>("turn/start", params)
-    this.#turnId = response.turn.id
     this.#modelOverride = undefined
+    return response.turn.id
   }
 
   async resolveRequest(requestId: string, decision: EngineDecision): Promise<void> {
@@ -381,11 +454,8 @@ class CodexSession implements EngineSession {
   }
 
   async interrupt(): Promise<void> {
-    const threadId = this.#requireThread()
-    if (!this.#turnId) return
-
-    const params: TurnInterruptParams = { threadId, turnId: this.#turnId }
-    await this.client.process.connection.request("turn/interrupt", params)
+    this.#requireThread()
+    await this.#turns.interrupt()
   }
 
   async close(): Promise<void> {
@@ -400,6 +470,7 @@ class CodexSession implements EngineSession {
     this.#pendingRequests.clear()
 
     await this.client.close()
+    await this.#turns.close()
   }
 
   #handleServerRequest(request: JsonRpcRequest): Promise<unknown> {

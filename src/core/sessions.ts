@@ -8,7 +8,7 @@ import { dataDirectory } from "./config.ts"
 import type { AgentEvent, EngineId, SessionStatus } from "./events.ts"
 import { invalidateSession } from "./session/changes.ts"
 import { logBytes, materialize } from "./session/compression.ts"
-import { control } from "./session/control.ts"
+import { control, type SessionStateAccess, updateControl } from "./session/control.ts"
 import { atomic, canonicalRoot, component, digest, hostPath, json, lease } from "./session/files.ts"
 
 export type SessionMeta = {
@@ -233,6 +233,14 @@ export class SessionHandle {
   #healed = false
   #release: (() => void) | undefined
   #writes: Promise<void> = Promise.resolve()
+  readonly state: SessionStateAccess = {
+    durable: true,
+    read: () => control(this.directory),
+    update: (expected, operation, change) => {
+      if (!this.#release) throw new Error("Session state requires its writer lease")
+      return updateControl(this.directory, expected, operation, change)
+    },
+  }
   acquire(): void {
     if (this.#release) return
     this.#release = lease(this.directory)

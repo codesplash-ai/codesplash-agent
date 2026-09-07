@@ -96,3 +96,36 @@ native provider/tool/parallel batch/approval/compaction/learning boundaries; int
 Codex steer/reservation/terminal notification/unsupported-method fixtures; attachment changes/denials;
 history/stash collision and no-history tests; actual queue-pane keyboard test. Both platform suites
 and compiled queue smoke, retaining every existing smoke. Update private evidence before C.
+
+## Integration decisions and review
+
+Accepted history is a read-only projection of at most 1,000 newest canonical sessions in the same
+path-derived project and engine, retaining the latest 100 unique prompt ids. A canonical
+history-clear timestamp excludes older captures across that projection. No-history neither loads
+nor writes this projection. Stashes remain named within their owning session and are addressable
+from the inactive CLI. Historical immutable control revisions remain recovery evidence; logical
+clear excludes captures from recall, while session deletion removes that session's canonical files.
+This does not promise secure erasure of earlier revision bytes or filesystem backups.
+
+An explicit inactive `queue resume --apply` records a one-use review marker. Opening consumes it;
+any admitted/running state still forces a pause and uncertainty. A normal close clears the marker.
+Single-prompt headless runs always hold older queued work, even after inactive review. The live
+native and Codex engines wake reviewed queues after initialization. Actual fresh-turn/within-turn
+admission is recorded per item and visible in the queue pane.
+
+An accepted native input whose transcript or final durable control update cannot be saved stops
+further dispatch and remains uncertain. Legacy callers supplying only a transcript path, without
+owned durable state, retain the prior warning-only transcript adapter behavior. Foreground abort
+waits for compaction cleanup without making cancellation itself fail the interrupt operation.
+
+Compiled queue smoke covers real CLI state, edits, stashes, killed-writer uncertainty, no automatic
+replay and no-history. Live steering/interjection and UI keystrokes are covered by source suites;
+the smoke does not claim authenticated vendor or compiled interactive-terminal acceptance.
+
+File references at enqueue use metadata fingerprints, not unauthorized content reads. Filesystems
+can coalesce timestamps for same-tick, same-size writes, so this preliminary check cannot prove
+byte identity. After the permission gate, native admission hashes the exact bounded bytes and
+rechecks metadata around the read. The hash identifies the admitted bytes, not an unobserved
+historical copy at enqueue. Linux acceptance explicitly tests observable metadata drift rather
+than assuming every write changes timestamps. Restoring exact historical attachment bytes is C's
+retained-context responsibility; B does not claim a content snapshot at enqueue.

@@ -94,7 +94,13 @@ export function updateControl(
     return record
   })
 }
-export class MemorySessionState {
+export interface SessionStateAccess {
+  readonly durable: boolean
+  read(): ControlRecord
+  update(expected: string, operation: string, change: (state: ControlState) => void): ControlRecord
+}
+export class MemorySessionState implements SessionStateAccess {
+  readonly durable = false
   #record: ControlRecord = {
     version: 1,
     revision: "",

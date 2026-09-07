@@ -362,6 +362,125 @@ describe("CodesplashDriver sessions", () => {
     await done
   })
 
+  test("acknowledged follow-ups wait for the current provider turn and remain serial", async () => {
+    process.env.ANTHROPIC_API_KEY = ANTHROPIC_KEY_VALUE
+    let release!: () => void
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const requests: ProviderRequest[] = []
+    let active = 0,
+      maximum = 0
+    const provider: ProviderClient = {
+      id: "anthropic",
+      models: [],
+      stream(request, signal) {
+        requests.push(request)
+        const first = requests.length === 1
+        return (async function* (): AsyncGenerator<ProviderStreamEvent> {
+          active++
+          maximum = Math.max(maximum, active)
+          try {
+            yield { type: "text_delta", text: "response" }
+            if (first)
+              await Promise.race([
+                barrier,
+                new Promise<void>((resolve) =>
+                  signal.addEventListener("abort", () => resolve(), { once: true }),
+                ),
+              ])
+            yield { type: "done", stopReason: "end_turn" }
+          } finally {
+            active--
+          }
+        })()
+      },
+    }
+    const session = await new CodesplashDriver({
+      providers: { anthropic: provider },
+      permissions: fakePermissions(),
+    }).openSession({ cwd, localSessionId: "queued-native" })
+    const { done } = collectEvents(session)
+    try {
+      const first = await session.submit?.({ text: "first" })
+      await until(() => (requests.length === 1 ? true : undefined), "first provider request")
+      const followup = await session.submit?.({ text: "follow-up" })
+      expect(followup?.status).toBe("queued")
+      expect(requests).toHaveLength(1)
+      release()
+      await until(
+        () =>
+          session.inputQueue
+            ?.snapshot()
+            .items.find((item) => item.id === followup?.id && item.status === "completed"),
+        "follow-up completion",
+      )
+      expect(session.inputQueue?.snapshot().items.find((item) => item.id === first?.id)?.status).toBe(
+        "completed",
+      )
+      expect(maximum).toBe(1)
+      expect(requests).toHaveLength(2)
+      expect(JSON.stringify(requests[1]?.messages)).toContain("first")
+    } finally {
+      release()
+      await session.close()
+      await done
+    }
+  })
+
+  test("interject cancels an approval before starting its own turn", async () => {
+    process.env.ANTHROPIC_API_KEY = ANTHROPIC_KEY_VALUE
+    const provider = fakeProvider("anthropic", [
+      [
+        {
+          type: "tool_call",
+          id: "write",
+          name: "write_file",
+          input: { path: "never-written.txt", content: "must not run" },
+        },
+        { type: "done", stopReason: "tool_use" },
+      ],
+      [
+        { type: "text_delta", text: "interjected" },
+        { type: "done", stopReason: "end_turn" },
+      ],
+    ])
+    const factory: PermissionRuntimeFactory = async (options) => {
+      const runtime = new FakePermissionRuntime(options)
+      runtime.decide = (name?: string) =>
+        name === "write_file" ? { kind: "ask", reason: "Fixture approval" } : { kind: "default" }
+      return runtime
+    }
+    const session = await new CodesplashDriver({
+      providers: { anthropic: provider },
+      permissions: factory,
+    }).openSession({ cwd, localSessionId: "interject-native" })
+    const { events, done } = collectEvents(session)
+    try {
+      await session.send({ text: "first" })
+      const request = await until(() => events.find((event) => event.kind === "request.opened"), "approval")
+      const next = await session.submit?.({ text: "instead explain" }, "interject")
+      await until(
+        () =>
+          session.inputQueue
+            ?.snapshot()
+            .items.find((item) => item.id === next?.id && item.status === "completed"),
+        "interjection completion",
+      )
+      const resolved = events.find(
+        (event) =>
+          event.kind === "request.resolved" &&
+          event.payload.id === (request.kind === "request.opened" ? request.payload.id : ""),
+      )
+      expect(resolved?.kind === "request.resolved" && resolved.payload.decision).toBe("cancel")
+      expect(await Bun.file(join(cwd, "never-written.txt")).exists()).toBe(false)
+      expect(provider.requests).toHaveLength(2)
+    } finally {
+      await session.close()
+      await done
+    }
+  })
+
   test("a second send while a turn is in flight is refused to the caller, not the session", async () => {
     process.env.ANTHROPIC_API_KEY = ANTHROPIC_KEY_VALUE
     const provider = fakeProvider("anthropic", [

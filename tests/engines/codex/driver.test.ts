@@ -76,6 +76,27 @@ describe("CodexDriver", () => {
     }
   })
 
+  test("routes acknowledged steering through the generated active-turn protocol", async () => {
+    const session = await openSession()
+    try {
+      await session.send({ text: "interrupt" })
+      const acknowledgment = await session.submit?.({ text: "new direction" }, "steering")
+      expect(acknowledgment).toBeDefined()
+      const deadline = Date.now() + 2000
+      while (
+        Date.now() < deadline &&
+        session.inputQueue?.snapshot().items.find((item) => item.id === acknowledgment?.id)?.status !==
+          "completed"
+      )
+        await Bun.sleep(5)
+      expect(
+        session.inputQueue?.snapshot().items.find((item) => item.id === acknowledgment?.id),
+      ).toMatchObject({ status: "completed", boundary: "within-turn" })
+    } finally {
+      await session.close()
+    }
+  })
+
   test("resumes a provider-native thread", async () => {
     const session = await openSession("thread-existing")
     try {

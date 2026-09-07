@@ -20,6 +20,7 @@ export type PendingRequest = {
 }
 
 export type AppViewState = {
+  inputQueue?: import("./session/input-queue.ts").InputQueueSnapshot
   engine?: EngineId
   model?: string
   /** Last permission mode a session.status reported; retained when later statuses omit it. */

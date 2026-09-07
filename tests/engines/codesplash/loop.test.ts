@@ -129,6 +129,99 @@ function turnRequest(provider: ProviderClient, userText = "do the thing"): TurnR
   }
 }
 
+test("steering settles undispatched tool calls before adding user context", async () => {
+  let pending = false
+  const tool = fakeTool({ name: "write_thing" })
+  const provider = scriptedProvider([
+    async function* () {
+      yield { type: "tool_call", id: "skip", name: "write_thing", input: {} }
+      pending = true
+      yield { type: "done", stopReason: "tool_use" }
+    },
+    [
+      { type: "text_delta", text: "steered response" },
+      { type: "done", stopReason: "end_turn" },
+    ],
+  ])
+  const { loop, events } = makeLoop({ tools: [tool] })
+  await loop.runTurn({
+    ...turnRequest(provider),
+    hasSteering: () => pending,
+    takeSteering: async () => {
+      if (!pending) return
+      pending = false
+      return {
+        id: "steering-id",
+        userText: "new direction",
+        userContent: [{ type: "text", text: "new direction" }],
+        system: "system prompt",
+      }
+    },
+  })
+  expect(tool.calls).toHaveLength(0)
+  expect(provider.requests).toHaveLength(2)
+  const history = provider.requests[1]?.messages ?? []
+  expect(history[2]?.content[0]?.type).toBe("tool_result")
+  expect(history[3]?.content).toEqual([{ type: "text", text: "new direction" }])
+  expect(ofKind(events, "user.message").map((event) => event.payload.id)).toContain("steering-id")
+  expect(ofKind(events, "turn.started")).toHaveLength(1)
+})
+
+test("steering waits for an active read batch and skips remaining undispatched reads", async () => {
+  let pending = false,
+    release!: () => void,
+    started = 0
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const tool = fakeTool({
+    name: "read_file",
+    readOnly: true,
+    run: async () => {
+      started++
+      await barrier
+      return { text: "read result", label: "read" }
+    },
+  })
+  const calls = Array.from({ length: 8 }, (_, i) => ({
+    type: "tool_call" as const,
+    id: `r${i}`,
+    name: "read_file",
+    input: { path: `file-${i}` },
+  }))
+  const provider = scriptedProvider([
+    [...calls, { type: "done", stopReason: "tool_use" }],
+    [
+      { type: "text_delta", text: "after steering" },
+      { type: "done", stopReason: "end_turn" },
+    ],
+  ])
+  const { loop } = makeLoop({ tools: [tool] })
+  const running = loop.runTurn({
+    ...turnRequest(provider),
+    hasSteering: () => pending,
+    takeSteering: async () => {
+      if (!pending) return
+      pending = false
+      return {
+        id: "batch-steer",
+        userText: "stop reading",
+        userContent: [{ type: "text", text: "stop reading" }],
+        system: "system",
+      }
+    },
+  })
+  await until(() => (started === 4 ? true : undefined), "active read batch")
+  pending = true
+  expect(provider.requests).toHaveLength(1)
+  release()
+  await running
+  expect(tool.calls).toHaveLength(4)
+  const history = provider.requests[1]?.messages ?? []
+  expect(history[2]?.content).toHaveLength(8)
+  expect(history[3]?.content).toEqual([{ type: "text", text: "stop reading" }])
+})
+
 function ofKind<K extends AgentEvent["kind"]>(
   events: AgentEvent[],
   kind: K,

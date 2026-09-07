@@ -40,6 +40,8 @@ export type HeadlessRecorder = Pick<SessionRecorder, "record" | "recordNativeSes
 export const DEFAULT_MAX_TURNS = 40
 
 export type HeadlessRunOptions = {
+  sessionState?: import("../../core/session/control.ts").SessionStateAccess
+  promptHistory?: import("../../core/session/prompt-history.ts").PromptHistory
   prompt: string
   cwd: string
   /** Model id, optionally already carrying `:<effort>`; omitted → the engine's default model. */
@@ -112,6 +114,9 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<number> 
       model: headlessModelSelector(options.model, options.effort),
       policy: { ...options.policy, permissionMode },
       nativeTranscriptPath: options.nativeTranscriptPath,
+      sessionState: options.sessionState,
+      resumeQueuedInput: false,
+      promptHistory: options.promptHistory,
       firstSequence: options.firstSequence,
       initialUsage: options.initialUsage,
       workspaceTrusted,

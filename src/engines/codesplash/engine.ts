@@ -2,7 +2,7 @@
  * The first-party CodeSplash engine behind the EngineDriver/EngineSession contract. Sessions run
  * entirely in-process: provider adapters stream model responses and the loop executes tools.
  */
-import { dirname, extname, join, resolve } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { configDirectory, dataDirectory } from "../../core/config.ts"
 import {
   type AgentConfig,
@@ -22,6 +22,14 @@ import {
   type SessionPolicy,
   type UserInput,
 } from "../../core/index.ts"
+import { bytes, digest } from "../../core/session/files.ts"
+import {
+  attachmentIdentity,
+  type InputAcknowledgment,
+  type InputIntent,
+  InputQueue,
+} from "../../core/session/input-queue.ts"
+import { type InputCompletion, QueueRunner } from "../../core/session/queue-runner.ts"
 import { APP_VERSION } from "../../version.ts"
 import { PROVIDER_ENV_VARS, resolveApiKey } from "./auth.ts"
 import {
@@ -38,7 +46,6 @@ import { estimateText } from "./context.ts"
 import type {
   ChatMessage,
   ContentBlock,
-  ImageBlock,
   ModelInfo,
   PermissionRuntime,
   ProviderClient,
@@ -46,9 +53,11 @@ import type {
   ReasoningEffort,
 } from "./contracts.ts"
 import { createSkill as writeSkill } from "./inputs/authoring.ts"
+import type { ContextToolRunner } from "./inputs/contracts.ts"
+import { readAttachedImage } from "./inputs/images.ts"
 import { contextReadTool, internalContextTools } from "./inputs/io.ts"
 import { ContextInputs, skillTool } from "./inputs/session.ts"
-import { fuzzyFiles } from "./inputs/syntax.ts"
+import { fuzzyFiles, mentions } from "./inputs/syntax.ts"
 import { CodesplashEventFactory, CodesplashLoop } from "./loop.ts"
 import { embeddingTool } from "./memory/embedding.ts"
 import { maintainMemory } from "./memory/maintenance.ts"
@@ -282,6 +291,12 @@ class CodesplashSession implements EngineSession {
   #reasoningEffort: ReasoningEffort | undefined
   /** Cached by model + permission mode + workspace trust; any of the three rebuilds the prompt. */
   #systemPrompt: { key: string; text: string } | undefined
+  readonly inputQueue: InputQueue
+  readonly #inputRunner: QueueRunner
+  readonly #steering = new Set<string>()
+  #lastInputCompletion: InputCompletion = "completed"
+  #admissionAbort: AbortController | undefined
+  #admissionSettled: Promise<void> | undefined
   #turnPromise: Promise<void> | undefined
   /** Set synchronously in send() before any await so concurrent sends are refused reliably. */
   #turnReserved = false
@@ -375,6 +390,34 @@ class CodesplashSession implements EngineSession {
       },
     })
     if (seededHistory.length > 0) this.#loop.seedHistory(seededHistory)
+    this.inputQueue = new InputQueue({
+      state: options.sessionState,
+      ...options.promptHistory,
+      cwd: options.cwd,
+      sanitize: sandbox.sanitize?.bind(sandbox),
+      mentions,
+    })
+    if (options.resumeQueuedInput === false) this.inputQueue.pause()
+    this.#inputRunner = new QueueRunner(
+      this.inputQueue,
+      {
+        busy: () => this.#turnReserved || this.#loop.isTurnActive,
+        run: async (input, item) => {
+          await this.#send(input, item.id)
+          await this.#turnPromise
+          return this.#lastInputCompletion
+        },
+        interrupt: () => this.#interruptAndSettle(),
+      },
+      (error) =>
+        this.#push(
+          this.#factory.event(
+            "input/error",
+            {},
+            { kind: "warning", payload: { message: `Input queue stopped: ${error.message}` } },
+          ),
+        ),
+    )
 
     this.#push(
       this.#factory.event("session/opening", {}, { kind: "session.status", payload: { status: "starting" } }),
@@ -416,6 +459,7 @@ class CodesplashSession implements EngineSession {
         },
       ),
     )
+    this.#inputRunner.wake()
   }
 
   get localSessionId(): string {
@@ -427,8 +471,21 @@ class CodesplashSession implements EngineSession {
     return this.options.localSessionId
   }
 
-  async send(input: UserInput): Promise<void> {
+  async submit(
+    input: UserInput,
+    intent: InputIntent = "follow-up",
+    submissionId?: string,
+  ): Promise<InputAcknowledgment> {
     this.#requireOpen()
+    if (this.#inputRunner.failure) throw this.#inputRunner.failure
+    return this.inputQueue.submit(input, intent, submissionId)
+  }
+  async send(input: UserInput): Promise<void> {
+    return this.#send(input)
+  }
+  async #send(input: UserInput, queuedId?: string): Promise<void> {
+    this.#requireOpen()
+    if (this.#inputRunner.failure) throw this.#inputRunner.failure
     if (this.#turnReserved || this.#loop.isTurnActive) {
       throw new Error("A CodeSplash turn is already running")
     }
@@ -437,13 +494,28 @@ class CodesplashSession implements EngineSession {
     // the live turn with a spurious non-recoverable error event.
     this.#turnReserved = true
     let turnStarted = false
+    let ownedId: string | undefined
+    let settleAdmission!: () => void
+    this.#admissionSettled = new Promise<void>((resolve) => {
+      settleAdmission = resolve
+    })
+    const admissionAbort = new AbortController()
+    this.#admissionAbort = admissionAbort
     try {
+      if (!queuedId) {
+        ownedId = this.inputQueue.submit(input).id
+        this.inputQueue.admit(ownedId, true)
+        this.inputQueue.running(ownedId)
+      }
+      const inputId = queuedId ?? ownedId
+      this.#lastInputCompletion = "completed"
       await this.#cancelLearning()
       this.#requireOpen()
       const provider = this.#providers[this.#model.provider]
       if (!provider) throw new Error(`No provider client for "${this.#model.provider}"`)
       const system = await this.#systemPromptFor()
-      const userContent = await buildUserContent(input)
+      admissionAbort.signal.throwIfAborted()
+      const userContent: ContentBlock[] = input.text ? [{ type: "text", text: input.text }] : []
       this.#requireOpen()
       this.#turnPromise = this.#loop
         .runTurn({
@@ -452,28 +524,36 @@ class CodesplashSession implements EngineSession {
           reasoningEffort: this.#reasoningEffort,
           system,
           userText: input.text,
+          userMessageId: inputId,
           userContent,
-          prepare: async (run, signal) => {
-            this.#contextSuffix = ""
-            const prepared = await this.#inputs.prepare(input, run, signal)
-            this.#inputSuffix = prepared.suffix
-            if (this.#memory.available) {
-              const permission = await run("memory_access", {})
-              if (permission.isError) throw new Error(permission.text)
-              if (this.#memoryEpoch !== this.#loop.historyRevision) {
-                this.#memory.invalidate()
-                this.#memoryEpoch = this.#loop.historyRevision
-              }
-              this.#memoryText = await this.#memory.prepare(input.text, signal, run)
-              if (this.#memory.lastSearch.reason)
-                this.#memoryNotice(
-                  `Memory retrieval: ${this.#memory.lastSearch.mode}: ${this.#memory.lastSearch.reason}`,
-                )
-              prepared.suffix = [prepared.suffix, this.#memoryText].filter(Boolean).join("\n\n")
+          hasSteering: () => Boolean(this.inputQueue.next("steering")),
+          takeSteering: async () => {
+            const item = this.inputQueue.next("steering")
+            if (!item) return undefined
+            let next: UserInput
+            try {
+              next = this.inputQueue.admit(item.id, false, "within-turn")
+              this.inputQueue.running(item.id)
+            } catch (error) {
+              this.inputQueue.finish(
+                item.id,
+                "blocked",
+                error instanceof Error ? error.message : String(error),
+              )
+              this.inputQueue.pause()
+              return undefined
             }
-            this.#contextSuffix = prepared.suffix
-            return prepared
+            this.#steering.add(item.id)
+            return {
+              id: item.id,
+              userText: next.text,
+              userContent: next.text ? [{ type: "text" as const, text: next.text }] : [],
+              system: await this.#systemPromptFor(),
+              prepare: (run: ContextToolRunner, signal: AbortSignal) =>
+                this.#prepareInput(next, run, signal, item.id),
+            }
           },
+          prepare: (run, signal) => this.#prepareInput(input, run, signal, inputId),
           invokeSkill: async (value, run) => {
             if (!value || typeof value !== "object" || !("name" in value) || typeof value.name !== "string")
               throw new Error("skill requires a name")
@@ -483,6 +563,7 @@ class CodesplashSession implements EngineSession {
           },
         })
         .catch((error) => {
+          this.#lastInputCompletion = "failed"
           this.#push(
             this.#factory.event(
               "loop/crash",
@@ -498,14 +579,55 @@ class CodesplashSession implements EngineSession {
           )
         })
         .then(() => this.#persistTurnTranscript())
+        .then(() => {
+          if (
+            this.#snapshotRequired &&
+            this.options.nativeTranscriptPath &&
+            this.options.sessionState?.durable
+          )
+            throw new Error("Native transcript persistence failed; inspect the last turn before retrying")
+          for (const id of this.#steering) this.inputQueue.finish(id, this.#lastInputCompletion)
+          this.#steering.clear()
+          if (ownedId) this.inputQueue.finish(ownedId, this.#lastInputCompletion)
+          if (this.#lastInputCompletion === "failed") this.inputQueue.pause()
+        })
         .finally(() => {
           this.#turnPromise = undefined
           this.#turnReserved = false
           this.#scheduleLearning()
+          this.#inputRunner.wake()
         })
+      void this.#turnPromise.catch((error) => {
+        try {
+          for (const id of [...this.#steering, ...(inputId ? [inputId] : [])])
+            this.inputQueue.finish(
+              id,
+              "execution-uncertain",
+              "Turn completion could not be persisted; inspect effects before retrying",
+            )
+          this.#steering.clear()
+          this.inputQueue.pause()
+        } catch {
+          /* The last durable admitted state remains recoverably uncertain. */
+        }
+        this.#inputRunner.halt(error)
+      })
       turnStarted = true
+    } catch (error) {
+      if (ownedId)
+        this.inputQueue.finish(
+          ownedId,
+          admissionAbort.signal.aborted ? "cancelled" : "blocked",
+          error instanceof Error ? error.message : String(error),
+        )
+      this.inputQueue.pause()
+      throw error
     } finally {
       if (!turnStarted) this.#turnReserved = false
+      this.#admissionAbort = undefined
+      this.#admissionSettled = undefined
+      settleAdmission()
+      this.#inputRunner.wake()
     }
   }
 
@@ -516,6 +638,11 @@ class CodesplashSession implements EngineSession {
 
   async interrupt(): Promise<void> {
     if (this.#closed) return
+    this.inputQueue.pause()
+    await this.#interruptAndSettle()
+  }
+  async #interruptAndSettle(): Promise<void> {
+    this.#admissionAbort?.abort(new Error("Input interrupted before provider admission"))
     this.#learningAbort?.abort()
     if (this.#learningTimer) {
       clearTimeout(this.#learningTimer)
@@ -523,6 +650,69 @@ class CodesplashSession implements EngineSession {
     }
     this.#maintenanceAbort?.abort()
     this.#loop.interrupt()
+    await this.#admissionSettled
+    await this.#turnPromise?.catch(() => {})
+    await this.#inputPromise?.catch(() => {})
+  }
+  async #prepareInput(input: UserInput, run: ContextToolRunner, signal: AbortSignal, inputId?: string) {
+    this.#contextSuffix = ""
+    const references = inputId ? this.inputQueue.references(inputId) : []
+    const checkedRun: ContextToolRunner = async (name, args) => {
+      const params = args as { root?: unknown; path?: unknown }
+      const path =
+        name === "context_read" && typeof params?.root === "string" && typeof params.path === "string"
+          ? resolve(params.root, params.path)
+          : undefined
+      const ref = references.find((value) => value.kind === "file" && value.source === path)
+      if (ref && attachmentIdentity(ref.source)?.fingerprint !== ref.fingerprint)
+        throw new Error("Queued file changed before context preparation; reattach it")
+      const result = await run(name, args)
+      if (ref && !result.isError && inputId) {
+        signal.throwIfAborted()
+        if (attachmentIdentity(ref.source)?.fingerprint !== ref.fingerprint)
+          throw new Error("Queued file changed during context preparation; reattach it")
+        const content = bytes(ref.source, 1024 * 1024)
+        if (attachmentIdentity(ref.source)?.fingerprint !== ref.fingerprint)
+          throw new Error("Queued file changed during its authorized read")
+        this.inputQueue.recordAttachmentHash(inputId, ref.source, digest(content))
+      }
+      return result
+    }
+    const prepared = await this.#inputs.prepare(input, checkedRun, signal)
+    for (const image of input.images ?? []) {
+      const value = await readAttachedImage(
+        image,
+        this.#cwd,
+        run,
+        signal,
+        inputId ? this.inputQueue.references(inputId) : [],
+      )
+      prepared.content.push(value.block)
+      if (inputId) this.inputQueue.recordAttachmentHash(inputId, value.source, value.hash)
+    }
+    this.#inputSuffix = prepared.suffix
+    if (this.#memory.available) {
+      const permission = await run("memory_access", {})
+      if (permission.isError) throw new Error(permission.text)
+      if (this.#memoryEpoch !== this.#loop.historyRevision) {
+        this.#memory.invalidate()
+        this.#memoryEpoch = this.#loop.historyRevision
+      }
+      this.#memoryText = await this.#memory.prepare(input.text, signal, run)
+      if (this.#memory.lastSearch.reason)
+        this.#memoryNotice(
+          `Memory retrieval: ${this.#memory.lastSearch.mode}: ${this.#memory.lastSearch.reason}`,
+        )
+      prepared.suffix = [prepared.suffix, this.#memoryText].filter(Boolean).join("\n\n")
+    }
+    for (const ref of references)
+      if (
+        (ref.kind === "file" || ref.kind === "image") &&
+        attachmentIdentity(ref.source)?.fingerprint !== ref.fingerprint
+      )
+        throw new Error("Queued attachment changed before provider admission; reattach it")
+    this.#contextSuffix = prepared.suffix
+    return prepared
   }
 
   async #inputOperation<T>(operation: () => Promise<T>): Promise<T> {
@@ -540,6 +730,7 @@ class CodesplashSession implements EngineSession {
     } finally {
       this.#turnReserved = false
       this.#inputPromise = undefined
+      this.#inputRunner.wake()
     }
   }
 
@@ -612,6 +803,7 @@ class CodesplashSession implements EngineSession {
       }
     } finally {
       this.#turnReserved = false
+      this.#inputRunner.wake()
     }
   }
 
@@ -649,6 +841,7 @@ class CodesplashSession implements EngineSession {
         this.#turnReserved = false
         this.#maintenanceAbort = undefined
         this.#turnPromise = undefined
+        this.#inputRunner.wake()
       }
     })()
     // close() may observe the promise too; this handler prevents a maintenance failure from
@@ -680,6 +873,7 @@ class CodesplashSession implements EngineSession {
       this.#systemPrompt = undefined
     } finally {
       this.#turnReserved = false
+      this.#inputRunner.wake()
     }
   }
   permissionRules() {
@@ -693,6 +887,8 @@ class CodesplashSession implements EngineSession {
   async close(): Promise<void> {
     if (this.#closed) return
     this.#closed = true
+    this.#inputRunner.stop()
+    this.#admissionAbort?.abort(new Error("Session closed"))
     this.#learningAbort?.abort()
     if (this.#learningTimer) {
       clearTimeout(this.#learningTimer)
@@ -700,9 +896,11 @@ class CodesplashSession implements EngineSession {
     }
     this.#maintenanceAbort?.abort()
     this.#loop.interrupt()
+    await this.#admissionSettled?.catch(() => {})
     await this.#turnPromise?.catch(() => {})
     await this.#inputPromise?.catch(() => {})
     await this.#cancelLearning()
+    await this.#inputRunner.settled()
     await this.#sandbox.close()
     this.#ended = true
     this.#queue.end()
@@ -927,6 +1125,8 @@ class CodesplashSession implements EngineSession {
   #scheduleLearning(): void {
     if (
       this.#closed ||
+      this.#inputRunner.failure ||
+      this.inputQueue.next() ||
       !this.#lastTurnSucceeded ||
       !this.#config.memory?.autoLearn ||
       !this.#memory.available ||
@@ -984,7 +1184,10 @@ class CodesplashSession implements EngineSession {
   }
 
   #push(event: AgentEvent): void {
-    if (event.kind === "turn.completed") this.#lastTurnSucceeded = event.payload.status === "completed"
+    if (event.kind === "turn.completed") {
+      this.#lastTurnSucceeded = event.payload.status === "completed"
+      this.#lastInputCompletion = event.payload.status === "interrupted" ? "cancelled" : event.payload.status
+    }
     if (this.#ended) return
     this.#queue.push(event)
   }
@@ -992,37 +1195,4 @@ class CodesplashSession implements EngineSession {
   #requireOpen(): void {
     if (this.#closed) throw new Error("CodeSplash session is closed")
   }
-}
-
-/* -------------------------------------- helpers -------------------------------------- */
-
-const IMAGE_MEDIA_TYPES: Record<string, string> = {
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".webp": "image/webp",
-}
-
-async function buildUserContent(input: UserInput): Promise<ContentBlock[]> {
-  const content: ContentBlock[] = []
-  if (input.text !== "") content.push({ type: "text", text: input.text })
-  for (const image of input.images ?? []) {
-    content.push(await readImageBlock(image))
-  }
-  if (content.length === 0) content.push({ type: "text", text: "" })
-  return content
-}
-
-/** Local image paths become base64 ImageBlocks; data: URIs pass through decoded. */
-async function readImageBlock(image: string): Promise<ImageBlock> {
-  const dataUri = image.match(/^data:([^;,]+);base64,(.+)$/s)
-  if (dataUri) {
-    return { type: "image", mediaType: dataUri[1] ?? "image/png", base64Data: dataUri[2] ?? "" }
-  }
-  const file = Bun.file(image)
-  if (!(await file.exists())) throw new Error(`Image not found: ${image}`)
-  const bytes = await file.arrayBuffer()
-  const mediaType = IMAGE_MEDIA_TYPES[extname(image).toLowerCase()] ?? "image/png"
-  return { type: "image", mediaType, base64Data: Buffer.from(bytes).toString("base64") }
 }
