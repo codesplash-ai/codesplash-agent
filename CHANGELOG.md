@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Durable memory (CodeSplash native engine)
+
+- Add `/remember`, `/memory` and `codesplash memory` for repository facts, reviewed candidates,
+  edit/delete, explicit move linking, index repair and bounded extraction/consolidation.
+- Store versioned Markdown behind atomic manifests with a rebuildable SQLite FTS5 index;
+  add optional governed embeddings, hybrid ranking, duplicate reduction and bounded context injection.
+- Add scoped memory/history tools and resumable session notes. Keep durable activity disabled
+  under no-history/untrusted sessions; permit retrieval and ephemeral notes in read-only/plan mode.
+- Keep automatic learning opt-in, cancellable and session-owned, with auxiliary usage accounting.
+  Verify the CLI memory lifecycle with local scripted providers in compiled release smoke tests.
+
 ### Long-session context (CodeSplash native engine)
 
 - Add automatic compaction, `/compact [instructions]`, bounded context-overflow recovery,

@@ -87,6 +87,11 @@ const PATTERN_TOOL_NAMES = new Set([...FILE_TOOL_NAMES, "bash", "web_fetch"])
 const KNOWN_TOOL_NAMES = new Set([
   "read_tool_output",
   "skill",
+  "memory_search",
+  "memory_read",
+  "memory_write",
+  "history_read",
+  "session_notes",
   "request_permissions",
   ...PATTERN_TOOL_NAMES,
   "glob",

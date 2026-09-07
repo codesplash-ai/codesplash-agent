@@ -76,6 +76,7 @@ export type AgentEvent =
       {
         inputTokens?: number
         cachedInputTokens?: number
+        embeddingInputTokens?: number
         outputTokens?: number
         contextTokens?: number
         totalTokens?: number

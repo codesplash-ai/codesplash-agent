@@ -24,6 +24,7 @@ const SUBCOMMANDS = [
   "secrets",
   "import",
   "create-skill",
+  "memory",
 ] as const
 
 const ROOT_FLAGS = [
@@ -180,6 +181,7 @@ _codesplash_completions() {
     stats) COMPREPLY=($(compgen -W "${words(STATS_FLAGS)}" -- "$cur")) ;;
     debug) COMPREPLY=($(compgen -W "${words(DEBUG_FLAGS)}" -- "$cur")) ;;
     sandbox) COMPREPLY=($(compgen -W "${words(SANDBOX_FLAGS)}" -- "$cur")) ;;
+    memory) COMPREPLY=($(compgen -W "list show search remember edit forget accept status repair index link refresh extract consolidate --path --trust --read-only --no-history --model --apply" -- "$cur")) ;;
     import) COMPREPLY=($(compgen -W "claude cursor --apply --destination" -- "$cur")) ;;
     create-skill) COMPREPLY=($(compgen -W "--write" -- "$cur")) ;;
     secrets) COMPREPLY=($(compgen -W "${words(SECRET_ACTIONS)}" -- "$cur")) ;;
@@ -221,6 +223,7 @@ _codesplash() {
     stats) compadd -- ${words(STATS_FLAGS)} ;;
     debug) compadd -- ${words(DEBUG_FLAGS)} ;;
     sandbox) compadd -- ${words(SANDBOX_FLAGS)} ;;
+    memory) compadd -- list show search remember edit forget accept status repair index link refresh extract consolidate --path --trust --read-only --no-history --model --apply ;;
     import) compadd -- claude cursor --apply --destination ;;
     create-skill) compadd -- --write ;;
     secrets) compadd ${words(SECRET_ACTIONS)} ;;
@@ -242,6 +245,13 @@ function fishScript(): string {
     `complete -c codesplash -n "__fish_seen_subcommand_from login" -l api-key -x`,
     `complete -c codesplash -n "__fish_seen_subcommand_from completions" -a "${words(COMPLETION_SHELLS)}"`,
     `complete -c codesplash -n "__fish_seen_subcommand_from debug" -a "${words(DEBUG_TOPICS)}"`,
+    `complete -c codesplash -n "__fish_seen_subcommand_from memory" -a "list show search remember edit forget accept status repair index link refresh extract consolidate"`,
+    `complete -c codesplash -n "__fish_seen_subcommand_from memory" -l path -r`,
+    `complete -c codesplash -n "__fish_seen_subcommand_from memory" -l trust`,
+    ...["read-only", "no-history", "apply"].map(
+      (flag) => `complete -c codesplash -n "__fish_seen_subcommand_from memory" -l ${flag}`,
+    ),
+    `complete -c codesplash -n "__fish_seen_subcommand_from memory" -l model -r`,
     `complete -c codesplash -n "__fish_seen_subcommand_from import" -a "claude cursor"`,
     `complete -c codesplash -n "__fish_seen_subcommand_from import" -l apply`,
     `complete -c codesplash -n "__fish_seen_subcommand_from import" -l destination -r`,
@@ -313,6 +323,7 @@ Register-ArgumentCompleter -Native -CommandName codesplash -ScriptBlock {
                 'stats' { @(${quotedList(STATS_FLAGS)}) }
                 'debug' { @(${quotedList(DEBUG_FLAGS)}) }
                 'sandbox' { @(${quotedList(SANDBOX_FLAGS)}) }
+                'memory' { @('list', 'show', 'search', 'remember', 'edit', 'forget', 'accept', 'status', 'repair', 'index', 'link', 'refresh', 'extract', 'consolidate', '--path', '--trust', '--read-only', '--no-history', '--model', '--apply') }
                 'import' { @('claude', 'cursor', '--apply', '--destination') }
                 'create-skill' { @('--write') }
                 'secrets' { @(${quotedList(SECRET_ACTIONS)}) }

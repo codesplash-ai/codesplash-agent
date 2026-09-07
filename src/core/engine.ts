@@ -44,6 +44,7 @@ export type SessionUsageSnapshot = {
   outputTokens?: number
   estimatedCostUsd?: number
   hasUnpricedUsage?: boolean
+  embeddingInputTokens?: number
 }
 
 /** CLI-tier permission rule overrides, highest-precedence rule source after the built-in floors. */
@@ -119,6 +120,8 @@ export type ContextInspection = {
   observedInputTokens?: number
   prefixChanges: string[]
   estimated: true
+  memoryTokens?: number
+  memoryMode?: string
 }
 
 export interface EngineSession {
@@ -142,6 +145,7 @@ export interface EngineSession {
   ): Promise<Array<{ name: string; description: string; path: string; source: string }>>
   setPersonality?(personality: string): Promise<void>
   createSkill?(name: string, write?: boolean): Promise<string>
+  memoryCommand?(command: string): Promise<string>
   /** Switches the permission mode; absent when the engine has no first-party permission layer. */
   setPermissionMode?(mode: PermissionMode): Promise<void>
   /** User-invoked rule edits only; engines reject these while tools/turns are active. */

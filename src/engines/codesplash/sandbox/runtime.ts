@@ -45,8 +45,11 @@ export class NativeSandbox implements SandboxRuntime {
     readonly secrets = new NamedSecrets(),
   ) {
     this.#log = new SandboxLog(logPath)
+    // Desktop session metadata is not a credential. Treating XDG_SESSION_ID=7 as
+    // a secret redacts every 7, including tool ids and structured provenance.
     for (const [key, value] of Object.entries(process.env))
-      if (SENSITIVE_NAME.test(key) && value) this.#secretValues.add(value)
+      if (SENSITIVE_NAME.test(key) && value && !/^XDG_SESSION_(?:ID|TYPE|CLASS|DESKTOP)$/.test(key))
+        this.#secretValues.add(value)
     this.#log.record("profile", profile.hash)
   }
   validateGrant(grant: AccessGrant, mode: PermissionMode): AccessGrant {
@@ -233,7 +236,10 @@ export class NativeSandbox implements SandboxRuntime {
   async runTool(tool: HarnessTool, input: unknown, context: ToolContext): Promise<ToolOutcome> {
     const mode = context.permissions?.mode ?? "default"
     if (!FILE_TOOLS.has(tool.name)) {
-      if (!["web_fetch", "web_search"].includes(tool.name) || this.profile.mode === "danger-full-access")
+      if (
+        !["web_fetch", "web_search"].includes(tool.permissionName ?? tool.name) ||
+        (this.profile.mode === "danger-full-access" && tool.name !== "memory_embed")
+      )
         return tool.run(input, { ...context, checkNetwork: this.checkNetwork })
       const broker = await startNetworkBroker(this.#effective(mode).allowedHosts)
       const stop = () => broker.close()

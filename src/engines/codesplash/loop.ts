@@ -171,6 +171,7 @@ export type CodesplashLoopOptions = {
     outputTokens?: number
     estimatedCostUsd?: number
     hasUnpricedUsage?: boolean
+    embeddingInputTokens?: number
   }
 }
 
@@ -227,6 +228,7 @@ export class CodesplashLoop {
   /** Mode to restore when a plan is approved; recorded by enter_plan_mode, "default" otherwise. */
   #modeBeforePlan: PermissionMode = "default"
   /** Session-cumulative usage committed from finished provider requests. */
+  #embeddingTokens = 0
   readonly #usageTotals = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, costUsd: 0 }
   #hasUnpricedUsage = false
   /** A misconfigured fallback model warns once per session, then stays ignored. */
@@ -270,6 +272,7 @@ export class CodesplashLoop {
       this.#usageTotals.outputTokens = options.initialUsage.outputTokens ?? 0
       this.#usageTotals.costUsd = options.initialUsage.estimatedCostUsd ?? 0
       this.#hasUnpricedUsage = options.initialUsage.hasUnpricedUsage ?? false
+      this.#embeddingTokens = options.initialUsage.embeddingInputTokens ?? 0
     }
   }
 
@@ -820,12 +823,41 @@ export class CodesplashLoop {
           // Always emitted, false included: a genuinely zero-cost priced session (e.g. a local
           // model priced at 0.0) must be distinguishable from one with unpriced usage.
           hasUnpricedUsage: this.#hasUnpricedUsage,
+          ...(this.#embeddingTokens ? { embeddingInputTokens: this.#embeddingTokens } : {}),
         },
       },
     )
   }
 
   /** Folds a finished request's usage snapshot into the session-cumulative totals. */
+  recordAuxiliaryUsage(usage: ProviderUsage, model: ModelInfo): void {
+    this.#commitRequestUsage(usage, model)
+    this.#emitAuxiliaryTotals()
+  }
+  recordEmbeddingUsage(tokens: number, cost: number | undefined): void {
+    this.#embeddingTokens += tokens
+    if (cost === undefined) this.#hasUnpricedUsage = true
+    else this.#usageTotals.costUsd += cost
+    this.#emitAuxiliaryTotals()
+  }
+  #emitAuxiliaryTotals(): void {
+    this.#event(
+      "memory/usage",
+      {},
+      {
+        kind: "usage.updated",
+        payload: {
+          inputTokens: this.#usageTotals.inputTokens,
+          cachedInputTokens: this.#usageTotals.cachedInputTokens,
+          outputTokens: this.#usageTotals.outputTokens,
+          estimatedCostUsd: this.#usageTotals.costUsd,
+          hasUnpricedUsage: this.#hasUnpricedUsage,
+          ...(this.#embeddingTokens ? { embeddingInputTokens: this.#embeddingTokens } : {}),
+        },
+      },
+    )
+  }
+
   #commitRequestUsage(usage: ProviderUsage, model: ModelInfo): void {
     this.#usageTotals.inputTokens += usage.inputTokens ?? 0
     this.#usageTotals.cachedInputTokens += usage.cachedInputTokens ?? 0
@@ -1302,7 +1334,10 @@ export class CodesplashLoop {
               ? await this.#sandbox.runTool(tool, call.input, this.#toolContext(signal))
               : await tool.run(call.input, this.#toolContext(signal))
       if (this.#sandbox?.sanitize) {
-        outcome.text = this.#sandbox.sanitize(outcome.text)
+        // This hidden adapter returns validated numbers only. Redacting its private JSON
+        // can turn vector coordinates into strings; its text is never logged or model-visible.
+        if (tool.name !== "memory_embed" || !tool.hidden || outcome.isError)
+          outcome.text = this.#sandbox.sanitize(outcome.text)
         outcome.label = this.#sandbox.sanitize(outcome.label)
         for (const step of outcome.planSteps ?? []) step.text = this.#sandbox.sanitize(step.text)
       }
@@ -1698,6 +1733,7 @@ export class CodesplashLoop {
       signal,
       permissions: this.#permissions,
       sanitizeOutput: this.#sandbox?.sanitize?.bind(this.#sandbox),
+      runInternal: this.#contextRunner(signal, new Set()),
     }
   }
 

@@ -204,6 +204,7 @@ export type ToolContext = {
   secretValues?: readonly string[]
   /** Trusted worker sanitizer; apply to complete content before slicing or truncation. */
   sanitizeOutput?: (text: string) => string
+  runInternal?: (name: string, input: unknown) => Promise<ToolResultBlock>
 }
 
 export type ToolPermission =

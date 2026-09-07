@@ -2,6 +2,8 @@ import { chmod, mkdir, readFile, rename } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import type { ContextInputConfig } from "../engines/codesplash/inputs/contracts.ts"
+import { validateMemoryConfig } from "../engines/codesplash/memory/config.ts"
+import type { MemoryConfig } from "../engines/codesplash/memory/contracts.ts"
 import type { NativeSandboxConfig } from "../engines/codesplash/sandbox/contracts.ts"
 import { validateEnvironmentName } from "../engines/codesplash/sandbox/env-policy.ts"
 import { redactSensitiveText } from "./redaction.ts"
@@ -74,6 +76,7 @@ export type AgentConfig = {
   permissions: PermissionsConfig
   codesplash: { fallbackModel?: string; autoCompact?: boolean; compactionStrategy?: "summary" | "prune" }
   providers: CustomProviderConfig[]
+  memory?: MemoryConfig
   context?: ContextInputConfig
   sandbox?: NativeSandboxConfig
   guardian?: {
@@ -382,6 +385,13 @@ export function validateConfig(parsed: unknown, path: string): AgentConfig {
     }
   }
 
+  if (parsed.memory !== undefined) {
+    try {
+      config.memory = validateMemoryConfig(parsed.memory)
+    } catch (error) {
+      problems.push(error instanceof Error ? error.message : "Invalid memory config")
+    }
+  }
   if (parsed.context !== undefined) {
     if (!isRecord(parsed.context)) problems.push("[context]: expected a table")
     else {
@@ -706,6 +716,11 @@ export async function saveConfig(config: AgentConfig, path = configFilePath()): 
   }
   const permissions = permissionsTable(config.permissions)
   if (permissions) table.permissions = permissions
+  if (config.memory)
+    table.memory = {
+      ...config.memory,
+      ...(config.memory.embedding ? { embedding: { ...config.memory.embedding } } : {}),
+    }
   if (config.context) table.context = { ...config.context }
   if (config.sandbox) table.sandbox = { ...config.sandbox }
   if (config.guardian) table.guardian = { ...config.guardian }

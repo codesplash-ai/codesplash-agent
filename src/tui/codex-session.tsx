@@ -45,6 +45,8 @@ export type SlashCommandName =
   | "skills"
   | "personality"
   | "create-skill"
+  | "remember"
+  | "memory"
   | "history"
   | "quit"
 
@@ -66,6 +68,8 @@ const slashCommandNames: readonly SlashCommandName[] = [
   "skills",
   "personality",
   "create-skill",
+  "remember",
+  "memory",
   "history",
   "quit",
 ]
@@ -77,7 +81,12 @@ export function parseSlashCommand(text: string): ParsedSlashCommand | undefined 
   const [word = "", ...rest] = trimmed.slice(1).split(/\s+/)
   const name = word.toLowerCase() as SlashCommandName
   if (!slashCommandNames.includes(name)) return { name: "unknown", raw: trimmed }
-  return { name, argument: rest.join(" ") || undefined }
+  return {
+    name,
+    argument:
+      (name === "memory" || name === "remember" ? trimmed.slice(word.length + 1).trim() : rest.join(" ")) ||
+      undefined,
+  }
 }
 
 /** Human-facing engine name for transcript headers and hints; the status line keeps the raw id. */
@@ -101,6 +110,11 @@ export const slashCommandHelp: ReadonlyArray<{ command: string; description: str
   { command: "/usage", description: "Show token usage, context left, and estimated cost" },
   { command: "/context", description: "Inspect model context and available input budget (CodeSplash)" },
   { command: "/compact [instructions]", description: "Compact older model context (CodeSplash)" },
+  { command: "/remember text", description: "Save a repository memory explicitly" },
+  {
+    command: "/memory [list|show|search|edit|forget|accept|status|extract|consolidate]",
+    description: "Inspect and manage memory",
+  },
   { command: "/commands · /skills", description: "List native templates or skills with source paths" },
   { command: "/skill name [arguments]", description: "Load a skill explicitly" },
   { command: "/personality neutral|concise|explanatory", description: "Set response style" },
@@ -675,6 +689,20 @@ export function CodexSessionApp({
           void runCommand(async () => {
             const context = await controller.inspectContext()
             setOverlay({ kind: "context", context })
+          })
+          return
+        case "remember":
+        case "memory":
+          void runCommand(async () => {
+            const source =
+              command.name === "remember"
+                ? `remember ${JSON.stringify(command.argument ?? "")}`
+                : (command.argument ?? "list")
+            setOverlay({
+              kind: "resources",
+              title: "Repository memory",
+              text: await controller.memoryCommand(source),
+            })
           })
           return
         case "commands":
@@ -1646,6 +1674,14 @@ export function buildContextOverlayLines(
     { label: "Model", value: context.model },
     { label: "Context window", value: String(context.contextWindow) },
     { label: "System (estimated)", value: String(context.systemTokens) },
+    ...(context.memoryTokens === undefined
+      ? []
+      : [
+          {
+            label: "Memory (in system)",
+            value: `${context.memoryTokens} estimated tokens · ${context.memoryMode ?? "lexical"}`,
+          },
+        ]),
     { label: "Tools (estimated)", value: String(context.toolTokens) },
     { label: "Messages (estimated)", value: `${context.messageTokens} (${context.messageCount} messages)` },
     { label: "Input (calibrated)", value: String(context.totalTokens) },
@@ -1693,6 +1729,9 @@ export function buildUsageOverlayLines(state: AppViewState): UsageOverlayLine[] 
     },
     { label: "Output tokens", value: formatTokenCount(usage.outputTokens) },
     { label: "Total tokens", value: formatTokenCount(total) },
+    ...(state.usage.embeddingInputTokens === undefined
+      ? []
+      : [{ label: "Embedding input", value: String(state.usage.embeddingInputTokens) }]),
     { label: "Context left", value: contextLeftValue(state) },
     { label: "Estimated cost", value: formatEstimatedCost(usage) },
   ]

@@ -157,6 +157,76 @@ beside the native transcript; with `--no-history` they remain in memory and expi
 session. Context epochs and prefix diagnostics describe the current live session. These native
 features leave Codex and Claude's own context management with their respective engines.
 
+
+### Repository memory (native engine)
+
+`/remember Use transactional parser updates` saves an explicit fact for this repository.
+`/memory` lists facts and pending candidates; use `show ID`, `search QUERY`, `edit ID TEXT`,
+`forget ID`, and `accept ID` to inspect or change them. Generated candidates stay inactive
+until you accept them and retain their provenance afterward. `/context` shows the selected
+memory contribution. Stored text is reference data and cannot grant permissions or execute.
+
+The same controls are available outside a session:
+
+```sh
+codesplash memory remember --trust "Use transactional parser updates"
+codesplash memory search parser
+codesplash memory status
+codesplash memory repair
+codesplash memory extract --model MODEL
+codesplash memory consolidate --model MODEL
+```
+
+`--path DIR` chooses the repository; `--read-only` permits retrieval but refuses durable changes.
+Use `--` before literal text containing command flags. Trust is required; `--trust` records your
+explicit decision. `--no-history`, disabled history, or `memory.enabled = false` disables durable
+memory reads, writes and learning. Plan mode permits retrieval and ephemeral session notes.
+
+Memory lives under the application's data directory in `memory/<repository UUID>/`: readable
+Markdown records referenced by an atomic manifest, plus a rebuildable SQLite FTS5 index.
+Git worktrees share repository facts; generated observations remain scoped to their worktree.
+Clones stay separate. After moving a repository, `memory link UUID` previews linking its previous
+identity; `memory link UUID --apply` applies it, refusing to abandon a nonempty current store.
+Use the commands for edits so revisions and indexes stay consistent. `repair` rebuilds the index
+and removes unreferenced crash leftovers; it never resurrects deleted facts.
+
+Keyword search works without a provider. Optional semantic retrieval needs explicit configuration:
+
+```toml
+[memory]
+enabled = true
+autoLearn = false
+
+[memory.embedding]
+url = "https://YOUR_ENDPOINT/v1/embeddings"
+model = "YOUR_EMBEDDING_MODEL"
+keyEnvVar = "MEMORY_EMBEDDING_KEY"
+dimensions = 1536
+# inputPerMTok = 0.10  # set your endpoint's actual price, or cost remains unknown
+```
+
+The endpoint must also pass the existing network allowlist and `web_fetch` permission rules.
+Keep the key in its named environment variable. Searches cache at most 15 new fact vectors per
+request; `memory index` explicitly builds the next batch of up to 16 and reports how many remain.
+Only indexed facts participate in semantic search. Edits and repair rebuild derived state;
+use `memory index` to repopulate vectors. Endpoint failures fall back visibly to keyword search.
+No embedding requests occur unless configured. Queries and selected fact text are sent to that
+endpoint; input tokens and configured cost appear separately in `/usage`.
+
+Automatic learning is **off by default**. Setting `autoLearn = true` permits bounded idle
+extraction/consolidation using the session's selected model. Foreground work and shutdown cancel
+it. Explicit `extract` uses current-session evidence (the latest native session for the CLI);
+`consolidate` reconciles pending candidates without replacing curated facts. Calls have no tools,
+a 60-second total deadline and accounted token usage. Inspect candidate claims before accepting
+them; fixture tests establish mechanics, not factual quality or perfect secret detection.
+
+Model tools `memory_search`, `memory_read`, `memory_write`, `session_notes` and `history_read`
+provide scoped access. Candidate writes and recorded-history recovery use the normal approval
+flow. Notes are bounded to 16 per session and restored on resume; they remain ephemeral under
+no-history or read-only mode. Recovery reads only bounded user/assistant evidence from the current
+session. General session search, organization and migration belong to the next milestone.
+
+
 ### Rules, file mentions, commands and skills
 
 Trusted native workspaces load `AGENTS.md` from the repository root down to the working

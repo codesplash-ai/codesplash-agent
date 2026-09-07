@@ -451,6 +451,8 @@ export function usageSnapshotOf(state: AppViewState): SessionUsageSnapshot | und
   if (cachedInputTokens !== undefined) snapshot.cachedInputTokens = cachedInputTokens
   if (outputTokens !== undefined) snapshot.outputTokens = outputTokens
   if (estimatedCostUsd !== undefined) snapshot.estimatedCostUsd = estimatedCostUsd
+  if (state.usage.embeddingInputTokens !== undefined)
+    snapshot.embeddingInputTokens = state.usage.embeddingInputTokens
   if (hasUnpricedUsage !== undefined) snapshot.hasUnpricedUsage = hasUnpricedUsage
   return Object.keys(snapshot).length > 0 ? snapshot : undefined
 }

@@ -17,6 +17,8 @@ import {
   MAX_TOOL_ROUNDS,
   type TurnRequest,
 } from "../../../src/engines/codesplash/loop.ts"
+import { createProfile } from "../../../src/engines/codesplash/sandbox/profile.ts"
+import { NativeSandbox } from "../../../src/engines/codesplash/sandbox/runtime.ts"
 import { askUserTool } from "../../../src/engines/codesplash/tools/question.ts"
 import { createToolRegistry } from "../../../src/engines/codesplash/tools/registry.ts"
 
@@ -832,4 +834,87 @@ describe("CodesplashLoop provider errors", () => {
     expect(ofKind(events, "message.completed")[0]?.payload.text).toBe("recovered")
     expectEnvelope(events)
   })
+})
+
+test("memory auxiliary and embedding usage accumulate without changing context calibration", async () => {
+  const { loop, events } = makeLoop()
+  const priced = { ...MODEL, pricing: { inputPerMTok: 1, outputPerMTok: 2 } }
+  loop.recordAuxiliaryUsage({ inputTokens: 100, outputTokens: 20 }, priced)
+  loop.recordEmbeddingUsage(50, 0.000005)
+  const latest = ofKind(events, "usage.updated").at(-1)?.payload
+  expect(latest?.inputTokens).toBe(100)
+  expect(latest?.outputTokens).toBe(20)
+  expect(latest?.embeddingInputTokens).toBe(50)
+  expect(latest?.estimatedCostUsd).toBeCloseTo(0.000145, 8)
+  expect(latest?.contextTokens).toBeUndefined()
+  expect(latest?.modelContextWindow).toBeUndefined()
+  const resumedEvents: AgentEvent[] = []
+  const resumed = new CodesplashLoop({
+    cwd: "/tmp/memory-fixture",
+    policy: POLICY,
+    registry: createToolRegistry([]),
+    events: new CodesplashEventFactory("resumed"),
+    emit: (e) => resumedEvents.push(e),
+    initialUsage: latest,
+  })
+  resumed.recordEmbeddingUsage(7, undefined)
+  const next = ofKind(resumedEvents, "usage.updated").at(-1)?.payload
+  expect(next?.embeddingInputTokens).toBe(57)
+  expect(next?.hasUnpricedUsage).toBe(true)
+  expect(next?.estimatedCostUsd).toBeCloseTo(0.000145, 8)
+})
+
+test("validated hidden embedding vectors stay numeric even when a short secret matches a coordinate", async () => {
+  const previous = process.env.MEMORY_SHORT_TOKEN
+  process.env.MEMORY_SHORT_TOKEN = "1"
+  const sandbox = new NativeSandbox(createProfile("/tmp", "read-only"))
+  try {
+    const tool = Object.assign(
+      fakeTool({
+        name: "memory_embed",
+        readOnly: true,
+        run: async () => ({ text: '{"vectors":[[1,0]]}', label: "Embeddings" }),
+      }),
+      { hidden: true },
+    )
+    const events: AgentEvent[] = []
+    const loop = new CodesplashLoop({
+      cwd: "/tmp",
+      policy: POLICY,
+      registry: createToolRegistry([tool]),
+      events: new CodesplashEventFactory("memory-fixture"),
+      emit: (e) => events.push(e),
+      sandbox,
+    })
+    const result = await loop.withContextTools((run) => run("memory_embed", {}))
+    expect(result.text).toBe('{"vectors":[[1,0]]}')
+    expect(JSON.stringify(events)).not.toContain("vectors")
+  } finally {
+    await sandbox.close()
+    if (previous === undefined) delete process.env.MEMORY_SHORT_TOKEN
+    else process.env.MEMORY_SHORT_TOKEN = previous
+  }
+})
+test("Linux desktop session metadata does not redact ids while real short secrets remain protected", async () => {
+  const oldId = process.env.XDG_SESSION_ID,
+    oldClass = process.env.XDG_SESSION_CLASS,
+    oldSecret = process.env.MEMORY_TEST_TOKEN
+  process.env.XDG_SESSION_ID = "7"
+  process.env.XDG_SESSION_CLASS = "user"
+  process.env.MEMORY_TEST_TOKEN = "xy"
+  const sandbox = new NativeSandbox(createProfile("/tmp", "read-only"))
+  try {
+    expect(sandbox.sanitize("user fact 7 xy")).toBe("user fact 7 [REDACTED]")
+  } finally {
+    await sandbox.close()
+    for (const [name, value] of [
+      ["XDG_SESSION_ID", oldId],
+      ["XDG_SESSION_CLASS", oldClass],
+      ["MEMORY_TEST_TOKEN", oldSecret],
+    ]) {
+      if (!name) continue
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+  }
 })

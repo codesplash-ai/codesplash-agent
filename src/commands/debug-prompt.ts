@@ -1,4 +1,4 @@
-import { resolve } from "node:path"
+import { join, resolve } from "node:path"
 /**
  * `codesplash debug prompt`: prints the model-visible surface for a session that WOULD open in
  * the given project — the resolved model selector, the assembled system prompt, and every tool
@@ -8,6 +8,7 @@ import { resolve } from "node:path"
 import {
   configDirectory,
   configFilePath,
+  dataDirectory,
   inspectProject,
   isSandboxMode,
   loadConfig,
@@ -18,6 +19,8 @@ import { applyStoredCredentials } from "../engines/codesplash/auth.ts"
 import { buildProviderRegistry, formatModelSelector } from "../engines/codesplash/catalog.ts"
 import { contextReadTool, internalContextTools } from "../engines/codesplash/inputs/io.ts"
 import { ContextInputs, skillTool } from "../engines/codesplash/inputs/session.ts"
+import { MemorySession } from "../engines/codesplash/memory/session.ts"
+import { memoryTools } from "../engines/codesplash/memory/tools.ts"
 import { createPermissionRuntime } from "../engines/codesplash/permissions.ts"
 import { buildSystemPrompt } from "../engines/codesplash/prompt.ts"
 import type { HeadlessSink } from "../engines/codesplash/runner.ts"
@@ -136,7 +139,6 @@ export async function runDebugPromptCommand(
     approvalPolicy: config.codex.approvalPolicy,
   }
 
-  const tools = [...builtinTools(), skillTool].sort((a, b) => a.name.localeCompare(b.name))
   const userRoot = resolve(configDirectory(env), "context")
   const permissions = await createPermissionRuntime({
     cwd: project.cwd,
@@ -145,6 +147,19 @@ export async function runDebugPromptCommand(
     configRules: config.permissions,
   })
   const sandbox = new NativeSandbox(createProfile(project.cwd, policy.sandbox, config.sandbox))
+  const memory = new MemorySession({
+    root: join(dataDirectory(env), "memory"),
+    cwd: project.cwd,
+    session: "preview",
+    history: false,
+    trusted: true,
+    writable: () => false,
+    permissions,
+    sanitize: sandbox.sanitize.bind(sandbox),
+  })
+  const tools = [...builtinTools(), skillTool, ...memoryTools(memory, () => [])].sort((a, b) =>
+    a.name.localeCompare(b.name),
+  )
   const inputs = new ContextInputs(
     project.cwd,
     userRoot,

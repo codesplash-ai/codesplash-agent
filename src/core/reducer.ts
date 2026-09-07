@@ -32,6 +32,7 @@ export type AppViewState = {
   usage: {
     inputTokens?: number
     cachedInputTokens?: number
+    embeddingInputTokens?: number
     outputTokens?: number
     contextTokens?: number
     totalTokens?: number

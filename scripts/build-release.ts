@@ -124,6 +124,7 @@ async function main(): Promise<void> {
     await run([process.execPath, "scripts/sandbox-smoke.ts", binaryPath])
     await run([process.execPath, "scripts/context-smoke.ts", binaryPath])
     await run([process.execPath, "scripts/context-inputs-smoke.ts", binaryPath])
+    await run([process.execPath, "scripts/memory-smoke.ts", binaryPath])
   }
 
   await Bun.write(join(outDirectory, "LICENSE"), Bun.file(join(projectRoot, "LICENSE")))

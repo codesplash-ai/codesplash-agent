@@ -3,7 +3,7 @@
  * entirely in-process: provider adapters stream model responses and the loop executes tools.
  */
 import { dirname, extname, join, resolve } from "node:path"
-import { configDirectory } from "../../core/config.ts"
+import { configDirectory, dataDirectory } from "../../core/config.ts"
 import {
   type AgentConfig,
   type AgentEvent,
@@ -34,6 +34,7 @@ import {
   PROVIDER_KEY_VARIABLES,
   type ProviderRegistry,
 } from "./catalog.ts"
+import { estimateText } from "./context.ts"
 import type {
   ChatMessage,
   ContentBlock,
@@ -49,6 +50,10 @@ import { contextReadTool, internalContextTools } from "./inputs/io.ts"
 import { ContextInputs, skillTool } from "./inputs/session.ts"
 import { fuzzyFiles } from "./inputs/syntax.ts"
 import { CodesplashEventFactory, CodesplashLoop } from "./loop.ts"
+import { embeddingTool } from "./memory/embedding.ts"
+import { maintainMemory } from "./memory/maintenance.ts"
+import { MemorySession } from "./memory/session.ts"
+import { memoryGate, memoryTools } from "./memory/tools.ts"
 import { editPermissionRule, parsePermissionEdit, ruleConflict } from "./permission-editor.ts"
 import {
   createPermissionRuntime,
@@ -57,7 +62,7 @@ import {
 } from "./permissions.ts"
 import { buildSystemPrompt } from "./prompt.ts"
 import type { SandboxRuntime } from "./sandbox/contracts.ts"
-import { createProfile, pinProfile } from "./sandbox/profile.ts"
+import { createProfile, physicalPath, pinProfile } from "./sandbox/profile.ts"
 import { NativeSandbox } from "./sandbox/runtime.ts"
 import { ToolOutputStore } from "./tool-output-store.ts"
 import { builtinTools, createToolRegistry, type ToolRegistry } from "./tools/registry.ts"
@@ -250,9 +255,17 @@ class CodesplashSession implements EngineSession {
   readonly #queue = new AsyncQueue<AgentEvent>()
   readonly #factory: CodesplashEventFactory
   readonly #loop: CodesplashLoop
+  readonly #memory: MemorySession
+  #memoryText = ""
+  #memoryEpoch = 0
+  #learningTimer: ReturnType<typeof setTimeout> | undefined
+  #learningAbort: AbortController | undefined
+  #learningPromise: Promise<void> | undefined
+  #lastTurnSucceeded = false
   readonly #inputs: ContextInputs
   #inputPromise: Promise<unknown> | undefined
   #contextSuffix = ""
+  #inputSuffix = ""
   #personality: "neutral" | "concise" | "explanatory"
   readonly #registry: ToolRegistry
   readonly #providerRegistry: ProviderRegistry
@@ -308,12 +321,31 @@ class CodesplashSession implements EngineSession {
       config.context,
       sandbox.sanitize?.bind(sandbox),
     )
+    this.#memory = new MemorySession({
+      root: physicalPath(join(dataDirectory(), "memory")),
+      cwd: this.#cwd,
+      session: options.localSessionId,
+      history: !!options.nativeTranscriptPath,
+      trusted: options.workspaceTrusted ?? true,
+      config: config.memory,
+      permissions,
+      sanitize: sandbox.sanitize?.bind(sandbox) ?? ((text) => text),
+      writable: () => sandbox.profile.mode === "workspace-write" && permissions.mode !== "plan",
+    })
     this.#personality = config.context?.personality ?? "neutral"
     this.#registry = createToolRegistry([
       ...builtinTools(),
       ...internalContextTools(),
       contextReadTool(userRoot),
       skillTool,
+      ...memoryTools(this.#memory, () => this.#loop.historySnapshot(), options.nativeTranscriptPath),
+      memoryGate("memory_access", "memory_search"),
+      memoryGate("memory_history_access", "history_read"),
+      memoryGate("memory_access_read", "memory_read"),
+      memoryGate("memory_change", "memory_write", true),
+      embeddingTool(config.memory?.embedding, (tokens, cost) =>
+        this.#loop.recordEmbeddingUsage(tokens, cost),
+      ),
     ])
     this.#loop = new CodesplashLoop({
       cwd: options.cwd,
@@ -367,6 +399,7 @@ class CodesplashSession implements EngineSession {
     const selection = options.model
       ? this.#selectModel(options.model)
       : { model: this.#providerRegistry.defaultModel(), effort: undefined }
+    this.#memory.invalidate()
     this.#model = selection.model
     this.#reasoningEffort = selection.effort
     this.#push(
@@ -405,6 +438,8 @@ class CodesplashSession implements EngineSession {
     this.#turnReserved = true
     let turnStarted = false
     try {
+      await this.#cancelLearning()
+      this.#requireOpen()
       const provider = this.#providers[this.#model.provider]
       if (!provider) throw new Error(`No provider client for "${this.#model.provider}"`)
       const system = await this.#systemPromptFor()
@@ -421,6 +456,21 @@ class CodesplashSession implements EngineSession {
           prepare: async (run, signal) => {
             this.#contextSuffix = ""
             const prepared = await this.#inputs.prepare(input, run, signal)
+            this.#inputSuffix = prepared.suffix
+            if (this.#memory.available) {
+              const permission = await run("memory_access", {})
+              if (permission.isError) throw new Error(permission.text)
+              if (this.#memoryEpoch !== this.#loop.historyRevision) {
+                this.#memory.invalidate()
+                this.#memoryEpoch = this.#loop.historyRevision
+              }
+              this.#memoryText = await this.#memory.prepare(input.text, signal, run)
+              if (this.#memory.lastSearch.reason)
+                this.#memoryNotice(
+                  `Memory retrieval: ${this.#memory.lastSearch.mode}: ${this.#memory.lastSearch.reason}`,
+                )
+              prepared.suffix = [prepared.suffix, this.#memoryText].filter(Boolean).join("\n\n")
+            }
             this.#contextSuffix = prepared.suffix
             return prepared
           },
@@ -451,6 +501,7 @@ class CodesplashSession implements EngineSession {
         .finally(() => {
           this.#turnPromise = undefined
           this.#turnReserved = false
+          this.#scheduleLearning()
         })
       turnStarted = true
     } finally {
@@ -465,6 +516,11 @@ class CodesplashSession implements EngineSession {
 
   async interrupt(): Promise<void> {
     if (this.#closed) return
+    this.#learningAbort?.abort()
+    if (this.#learningTimer) {
+      clearTimeout(this.#learningTimer)
+      this.#learningTimer = undefined
+    }
     this.#maintenanceAbort?.abort()
     this.#loop.interrupt()
   }
@@ -473,7 +529,11 @@ class CodesplashSession implements EngineSession {
     this.#requireOpen()
     if (this.#turnReserved || this.#loop.isTurnActive) throw new Error("Wait for the current turn")
     this.#turnReserved = true
-    const promise = operation()
+    const promise = (async () => {
+      await this.#cancelLearning()
+      this.#requireOpen()
+      return operation()
+    })()
     this.#inputPromise = promise
     try {
       return await promise
@@ -540,9 +600,16 @@ class CodesplashSession implements EngineSession {
       throw new Error("Wait for the current turn before inspecting context")
     this.#turnReserved = true
     try {
+      await this.#cancelLearning()
+      this.#requireOpen()
       const system = [await this.#systemPromptFor(), this.#contextSuffix].filter(Boolean).join("\n\n")
       this.#requireOpen()
-      return this.#loop.inspectContext(this.#model, system, this.#reasoningEffort)
+      return {
+        ...this.#loop.inspectContext(this.#model, system, this.#reasoningEffort),
+        ...(this.#memory.available
+          ? { memoryTokens: estimateText(this.#memoryText), memoryMode: this.#memory.lastSearch.mode }
+          : {}),
+      }
     } finally {
       this.#turnReserved = false
     }
@@ -558,6 +625,9 @@ class CodesplashSession implements EngineSession {
     this.#maintenanceAbort = abort
     this.#turnPromise = (async () => {
       try {
+        await this.#cancelLearning()
+        this.#requireOpen()
+        abort.signal.throwIfAborted()
         await this.#loop.compact(async () => {
           const system = [await this.#systemPromptFor(), this.#contextSuffix].filter(Boolean).join("\n\n")
           this.#requireOpen()
@@ -593,6 +663,8 @@ class CodesplashSession implements EngineSession {
     // Reserve admission across disk I/O so send()/mode changes cannot race a policy edit.
     this.#turnReserved = true
     try {
+      await this.#cancelLearning()
+      this.#requireOpen()
       const updated = await editPermissionRule(parsePermissionEdit(command), {
         cwd: this.#cwd,
         trusted: this.options.workspaceTrusted ?? true,
@@ -602,6 +674,8 @@ class CodesplashSession implements EngineSession {
       await this.#permissions.reload?.()
       this.#contextSuffix = ""
       this.#inputs.catalog = { resources: [], diagnostics: [] }
+      this.#memory.invalidate()
+      this.#memoryText = ""
       this.#loop.clearApprovalCache()
       this.#systemPrompt = undefined
     } finally {
@@ -619,10 +693,16 @@ class CodesplashSession implements EngineSession {
   async close(): Promise<void> {
     if (this.#closed) return
     this.#closed = true
+    this.#learningAbort?.abort()
+    if (this.#learningTimer) {
+      clearTimeout(this.#learningTimer)
+      this.#learningTimer = undefined
+    }
     this.#maintenanceAbort?.abort()
     this.#loop.interrupt()
     await this.#turnPromise?.catch(() => {})
     await this.#inputPromise?.catch(() => {})
+    await this.#cancelLearning()
     await this.#sandbox.close()
     this.#ended = true
     this.#queue.end()
@@ -645,19 +725,24 @@ class CodesplashSession implements EngineSession {
     if (this.#turnReserved || this.#loop.isTurnActive) {
       throw new Error("Wait for the current turn before switching models")
     }
-    const selection = this.#selectModel(model)
-    this.#model = selection.model
-    this.#reasoningEffort = selection.effort
-    this.#push(
-      this.#factory.event(
-        "client/modelSelected",
-        {},
-        {
-          kind: "session.status",
-          payload: { status: "ready", model: formatModelSelector(selection.model, selection.effort) },
-        },
-      ),
-    )
+    await this.#inputOperation(async () => {
+      const selection = this.#selectModel(model)
+      this.#memory.invalidate()
+      this.#model = selection.model
+      this.#reasoningEffort = selection.effort
+      this.#push(
+        this.#factory.event(
+          "client/modelSelected",
+          {},
+          {
+            kind: "session.status",
+            payload: { status: "ready", model: formatModelSelector(selection.model, selection.effort) },
+          },
+        ),
+      )
+      this.#memoryText = ""
+      this.#contextSuffix = this.#inputSuffix
+    })
   }
 
   /**
@@ -674,9 +759,13 @@ class CodesplashSession implements EngineSession {
     if (mode === "bypass" && !this.#bypassAllowed) {
       throw new Error("Bypass mode requires launching with --bypass-approvals")
     }
-    this.#permissions.setMode(mode)
-    this.#contextSuffix = ""
-    this.#inputs.catalog = { resources: [], diagnostics: [] }
+    await this.#inputOperation(async () => {
+      this.#memory.invalidate()
+      this.#memoryText = ""
+      this.#permissions.setMode(mode)
+      this.#contextSuffix = ""
+      this.#inputs.catalog = { resources: [], diagnostics: [] }
+    })
   }
 
   /**
@@ -782,7 +871,120 @@ class CodesplashSession implements EngineSession {
     return text
   }
 
+  async memoryCommand(command: string): Promise<string> {
+    return this.#inputOperation(() =>
+      this.#loop.withContextTools(async (run, signal) => {
+        const action = command.trim().split(/\s+/)[0] || "list"
+        if (action === "status" && !this.#memory.available)
+          return "Durable memory is disabled for this untrusted, no-history or disabled session."
+        const write =
+          ["remember", "edit", "forget", "accept", "repair", "index", "extract", "consolidate"].includes(
+            action,
+          ) ||
+          (action === "link" && command.includes("--apply"))
+        const result = await run(
+          write ? "memory_change" : action === "show" ? "memory_access_read" : "memory_access",
+          {},
+        )
+        if (result.isError) throw new Error(result.text)
+        if (action === "extract" || action === "consolidate") {
+          const recovered = await run("memory_history_access", {})
+          if (recovered.isError) throw new Error(recovered.text)
+          return this.#maintain(action, signal)
+        }
+        const output = await this.#memory.command(command, signal, run)
+        if (write || action === "refresh") {
+          this.#memoryText = ""
+          this.#contextSuffix = this.#inputSuffix
+        }
+        return output
+      }),
+    )
+  }
+  async #maintain(action: "extract" | "consolidate", signal: AbortSignal): Promise<string> {
+    const model = this.#model,
+      provider = this.#providers[model.provider]
+    if (!provider) throw new Error("No provider for memory maintenance")
+    return maintainMemory({
+      memory: this.#memory,
+      messages: this.#loop.historySnapshot(),
+      model,
+      provider,
+      signal,
+      action,
+      onUsage: (usage) => this.#loop.recordAuxiliaryUsage(usage, model),
+    })
+  }
+  #memoryNotice(message: string): void {
+    this.#push(
+      this.#factory.event(
+        "memory/status",
+        {},
+        { kind: "warning", payload: { message: this.#sandbox.sanitize?.(message) ?? message } },
+      ),
+    )
+  }
+  #scheduleLearning(): void {
+    if (
+      this.#closed ||
+      !this.#lastTurnSucceeded ||
+      !this.#config.memory?.autoLearn ||
+      !this.#memory.available ||
+      !this.#memory.options.writable() ||
+      this.#learningPromise
+    )
+      return
+    if (
+      ["memory_search", "memory_write", "history_read"].some((name) =>
+        ["deny", "ask"].includes(this.#permissions.decide(name, undefined, name !== "memory_write").kind),
+      )
+    )
+      return
+    this.#learningTimer = setTimeout(() => {
+      this.#learningTimer = undefined
+      if (this.#closed || this.#turnReserved || this.#loop.isTurnActive) return
+      const abort = new AbortController()
+      this.#learningAbort = abort
+      this.#learningPromise = (async () => {
+        const timer = setTimeout(
+          () => abort.abort(new Error("Automatic memory maintenance reached its 60-second limit")),
+          60000,
+        )
+        try {
+          const extracted = await this.#maintain("extract", abort.signal)
+          this.#memoryNotice(extracted)
+          if (/^[1-9][0-9]* memory candidates saved/.test(extracted)) {
+            const snapshot = (await this.#memory.store(abort.signal))?.snapshot()
+            if ((snapshot?.records.filter((r) => r.kind === "candidate").length ?? 0) > 1)
+              this.#memoryNotice(await this.#maintain("consolidate", abort.signal))
+          }
+        } finally {
+          clearTimeout(timer)
+        }
+      })()
+        .catch((error) => {
+          if (!abort.signal.aborted)
+            this.#memoryNotice(
+              `Memory learning stopped: ${error instanceof Error ? error.message : String(error)}`,
+            )
+        })
+        .finally(() => {
+          this.#learningAbort = undefined
+          this.#learningPromise = undefined
+        })
+    }, 100)
+  }
+  async #cancelLearning(): Promise<void> {
+    if (this.#learningTimer) {
+      clearTimeout(this.#learningTimer)
+      this.#learningTimer = undefined
+    }
+    this.#learningAbort?.abort(new Error("Foreground work or shutdown interrupted memory learning"))
+    await this.#learningPromise
+  }
+
   #push(event: AgentEvent): void {
+    if (event.kind === "turn.completed") this.#lastTurnSucceeded = event.payload.status === "completed"
     if (this.#ended) return
     this.#queue.push(event)
   }

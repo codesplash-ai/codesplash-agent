@@ -36,6 +36,8 @@ Usage:
   codesplash secrets set NAME | list | delete NAME
   codesplash import <claude|cursor> <source-dir> [--apply] [--destination DIR]
   codesplash create-skill <name> [--write]
+  codesplash memory <list|show|search|remember|edit|forget|accept|status|repair|index|link|refresh|extract|consolidate> [args]
+                    [--path DIR] [--trust] [--read-only] [--no-history] [--model ID]
   codesplash debug prompt [path] [--model <id[:effort]>] [--sandbox <mode>] [-c <key=value>]
   codesplash --doctor
   codesplash --version
@@ -55,6 +57,7 @@ Commands:
   stats          Aggregate recorded session usage (tokens, estimated cost) per engine and model
   completions    Print a shell completion script for bash, zsh, fish, or powershell
   import         Preview or import supported Claude/Cursor rules, commands and skills
+  memory         Inspect and manage repository memory; automatic learning is opt-in
   create-skill   Preview a native skill scaffold; --write creates it without overwriting
   debug          Inspect harness internals; "debug prompt" prints the model-visible surface
                  (model, system prompt, tool specs) as JSON without opening a session
@@ -805,6 +808,8 @@ function usageSnapshotFromEvents(events: readonly AgentEvent[]): SessionUsageSna
     if (payload.cachedInputTokens !== undefined) snapshot.cachedInputTokens = payload.cachedInputTokens
     if (payload.outputTokens !== undefined) snapshot.outputTokens = payload.outputTokens
     if (payload.estimatedCostUsd !== undefined) snapshot.estimatedCostUsd = payload.estimatedCostUsd
+    if (payload.embeddingInputTokens !== undefined)
+      snapshot.embeddingInputTokens = payload.embeddingInputTokens
     if (payload.hasUnpricedUsage !== undefined) snapshot.hasUnpricedUsage = payload.hasUnpricedUsage
   }
   return snapshot
@@ -888,6 +893,13 @@ async function main(): Promise<void> {
     return
   }
 
+  if (args[0] === "memory") {
+    const { args: rest, configOverrides } = extractConfigOverrides(args.slice(1))
+    process.exitCode = await (await import("./commands/memory.ts")).runMemoryCommand(rest, {
+      configOverrides,
+    })
+    return
+  }
   if (args[0] === "import") {
     process.exitCode = await (await import("./commands/import.ts")).runImportCommand(args.slice(1))
     return

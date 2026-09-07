@@ -106,6 +106,11 @@ export class SessionController {
     return this.#session.setPersonality(personality)
   }
 
+  async memoryCommand(command: string) {
+    if (this.#closed || !this.#session.memoryCommand) throw new Error("Memory is unavailable for this engine")
+    return this.#session.memoryCommand(command)
+  }
+
   async createSkill(name: string, write = false) {
     if (this.#closed || !this.#session.createSkill)
       throw new Error("Skill creation is unavailable for this engine")
