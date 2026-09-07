@@ -165,7 +165,7 @@ describe("runDebugPromptCommand", () => {
     await runDebugPromptCommand([fixture.projectDir], fixture)
 
     const surface = surfaceFrom(fixture.stdout)
-    expect(surface.system).toContain("Project instructions")
+    expect(surface.system).toContain("Instructions from")
     expect(surface.system).toContain("Always answer in haiku.")
   })
 })

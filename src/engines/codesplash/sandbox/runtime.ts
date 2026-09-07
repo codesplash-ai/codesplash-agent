@@ -20,7 +20,18 @@ import { canonicalHost, contains, physicalPath, validateAccessGrant } from "./pr
 import type { SupervisorInput } from "./supervisor.ts"
 import type { WorkerInput } from "./worker.ts"
 
-const FILE_TOOLS = new Set(["read_file", "write_file", "edit_file", "apply_patch", "glob", "grep", "bash"])
+const FILE_TOOLS = new Set([
+  "context_read",
+  "context_list",
+  "context_files",
+  "read_file",
+  "write_file",
+  "edit_file",
+  "apply_patch",
+  "glob",
+  "grep",
+  "bash",
+])
 
 export class NativeSandbox implements SandboxRuntime {
   readonly #grants: AccessGrant[] = []

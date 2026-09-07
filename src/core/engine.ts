@@ -90,6 +90,7 @@ export type OpenSessionOptions = {
 export type UserInput = {
   text: string
   images?: string[]
+  files?: string[]
 }
 
 export type EngineDecision = {
@@ -135,6 +136,12 @@ export interface EngineSession {
   setModel?(model: string): Promise<void>
   inspectContext?(): Promise<ContextInspection>
   compact?(instructions?: string): Promise<void>
+  completeFileMention?(query: string): Promise<string[]>
+  contextResources?(
+    kind: "skill" | "command",
+  ): Promise<Array<{ name: string; description: string; path: string; source: string }>>
+  setPersonality?(personality: string): Promise<void>
+  createSkill?(name: string, write?: boolean): Promise<string>
   /** Switches the permission mode; absent when the engine has no first-party permission layer. */
   setPermissionMode?(mode: PermissionMode): Promise<void>
   /** User-invoked rule edits only; engines reject these while tools/turns are active. */

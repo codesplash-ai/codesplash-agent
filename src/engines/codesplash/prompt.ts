@@ -35,12 +35,18 @@ export async function discoverProjectRules(cwd: string): Promise<ProjectRulesFil
   return rules
 }
 
+/** Fixed ancestor candidates only; consumers still authorize every body read. */
+export async function projectRuleDirectories(cwd: string): Promise<string[]> {
+  const start = await resolveDirectory(cwd)
+  return directoryChain((await gitTopLevel(start)) ?? start, start)
+}
+
 /** Builds the system prompt: identity, environment, policy summary, tool guidance, project rules. */
 export async function buildSystemPrompt(options: SystemPromptOptions): Promise<string> {
   const workspaceTrusted = options.workspaceTrusted !== false
   // An untrusted folder's rule files are not the user's vetted instructions: discovery is skipped
   // ENTIRELY (never read, never truncated in) and the prompt says so instead of silently omitting.
-  const rules = workspaceTrusted ? await discoverProjectRules(options.cwd) : []
+  const rules = options.rules ?? (workspaceTrusted ? await discoverProjectRules(options.cwd) : [])
 
   const sections = [
     "You are CodeSplash Agent, a coding harness running in a terminal. You complete the user's coding tasks by inspecting and editing their workspace with the tools below.",
@@ -62,6 +68,17 @@ export async function buildSystemPrompt(options: SystemPromptOptions): Promise<s
   ]
 
   if (options.permissionMode === "plan") sections.push(planModeSection())
+  sections.push(
+    options.model.protocol === "openai"
+      ? "For edits, use apply_patch when a patch expresses the change clearly; inspect the result and verify it."
+      : "Read the relevant files before editing; use precise edits and verify the changed behavior.",
+  )
+  if (options.personality === "concise")
+    sections.push("Communication style: be concise; lead with the result and essential evidence.")
+  if (options.personality === "explanatory")
+    sections.push(
+      "Communication style: explain the reasoning and tradeoffs with concrete examples, while staying focused on the task.",
+    )
 
   if (rules.length > 0) {
     const blocks = rules.map((rule) => `### ${rule.path}\n\n${rule.text}`)

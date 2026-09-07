@@ -157,6 +157,80 @@ beside the native transcript; with `--no-history` they remain in memory and expi
 session. Context epochs and prefix diagnostics describe the current live session. These native
 features leave Codex and Claude's own context management with their respective engines.
 
+### Rules, file mentions, commands and skills
+
+Trusted native workspaces load `AGENTS.md` from the repository root down to the working
+folder, with `CLAUDE.md` as the fallback in each directory. Every body read uses the read
+permission policy. Ancestor rules outside the session's sandbox roots require configured
+read access; opening the session at the repository root avoids that extra boundary.
+Untrusted projects supply no automatic rules, commands or skill metadata.
+
+Attach a text file with `@src/file.ts` or `@"path with spaces.md"`. Tab completes a trailing
+file mention using an ignore-aware filename search. Attachments stay within the workspace,
+with at most 16 files, 24 KiB per file and 48 KiB combined. Email addresses and escaped
+`\@mentions` remain literal. Attached contents are file data; they are not expanded again.
+
+Create a Markdown command at `.codesplash/commands/review.md`, then invoke `/review arguments`.
+`/commands` lists templates and their sources. Templates support `$ARGUMENTS`, `$@`, `$1`,
+`${2:-default}` and `${@:2:3}` substitutions. Static `@file` references attach workspace files.
+Shell spans such as !`git status --short` use the ordinary bash approval and sandbox flow;
+arguments become shell positional parameters, so they cannot introduce new executable spans.
+There are at most four shell expansions, each limited to ten seconds, with 8 KiB output combined.
+
+Skills live at `.codesplash/skills/<name>/SKILL.md`:
+
+```markdown
+---
+name: verify
+description: Review changes and verify the relevant behavior.
+disable-model-invocation: true
+---
+Read the changed files, identify affected behavior, and run the relevant checks.
+```
+
+`/skills` lists skills and sources; `/skill verify arguments` invokes one explicitly. Without
+`disable-model-invocation: true`, the model can load the skill through its `skill` tool.
+Only metadata enters the initial prompt; invocation loads the body. Frontmatter uses a flat
+subset of YAML (strings, booleans and multiline strings), and skill bodies are limited to 6 KiB.
+Skill instructions grant no permissions. `context: fork` is recognized but requires the future
+subagent milestone. `/create-skill name` previews a scaffold; adding `--write` creates it.
+
+User-wide counterparts live under `context/` inside the CodeSplash configuration directory:
+`context/AGENTS.md`, `context/commands/*.md`, and `context/skills/<name>/SKILL.md`. For duplicate
+command or skill names, native project resources win over user resources, then vendor resources.
+These settings opt into vendor locations and choose the response style:
+
+```toml
+[context]
+claudeRules = true                 # CLAUDE.md fallback; enabled by default
+claudeCommands = false             # .claude/commands/*.md
+claudeSkills = false               # .claude/skills/<name>/SKILL.md
+cursorRules = false                # .cursor/rules/*.mdc with alwaysApply: true
+sharedSkills = false               # .agents/skills/<name>/SKILL.md
+personality = "neutral"            # neutral, concise, explanatory
+# includeRoots = ["docs"]          # restrict @include to these workspace-relative directories
+```
+
+`/personality concise` changes the live session style at idle. An `@include path` line loads
+instructions relative to the containing resource, only within its allowed source roots and
+after explicit approval. The default root is the workspace (the fixed configuration subtree
+for user resources); `includeRoots` narrows project imports. Imports reject cycles, symlinks,
+hardlinks and excessive size/depth. Headless runs refuse imports requiring an interactive decision.
+
+Migration and authoring are preview-first CLI commands:
+
+```sh
+codesplash import claude /path/to/source --destination /path/to/project
+codesplash import cursor /path/to/source --destination /path/to/project --apply
+codesplash create-skill verify
+codesplash create-skill verify --write
+```
+
+Import maps supported rules, commands and skills, records source hashes, and reports unsupported
+settings fields without their values. It never overwrites existing files, migrates credentials,
+or activates MCP. General settings/session migration and forked execution remain later work.
+`debug prompt` uses the governed loader too; reads that need approval require an interactive session.
+
 #### Custom providers (BYOK)
 
 Any OpenAI- or Anthropic-protocol endpoint can serve models through `[providers.*]` tables in

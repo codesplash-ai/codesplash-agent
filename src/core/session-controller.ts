@@ -88,6 +88,30 @@ export class SessionController {
     await this.#consumePromise
   }
 
+  async contextResources(kind: "skill" | "command") {
+    if (this.#closed || !this.#session.contextResources)
+      throw new Error("Context resources are unavailable for this engine")
+    return this.#session.contextResources(kind)
+  }
+
+  async completeFileMention(query: string) {
+    if (this.#closed || !this.#session.completeFileMention)
+      throw new Error("File completion is unavailable for this engine")
+    return this.#session.completeFileMention(query)
+  }
+
+  async setPersonality(personality: string) {
+    if (this.#closed || !this.#session.setPersonality)
+      throw new Error("Personality is unavailable for this engine")
+    return this.#session.setPersonality(personality)
+  }
+
+  async createSkill(name: string, write = false) {
+    if (this.#closed || !this.#session.createSkill)
+      throw new Error("Skill creation is unavailable for this engine")
+    return this.#session.createSkill(name, write)
+  }
+
   async inspectContext(): Promise<ContextInspection> {
     if (this.#closed) throw new Error("Session is closed")
     if (!this.#session.inspectContext) throw new Error("This engine does not support context inspection")

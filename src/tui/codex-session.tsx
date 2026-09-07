@@ -27,6 +27,7 @@ import type {
 import { defaultSessionPolicy, isPermissionMode, suspendToShell } from "../core/index.ts"
 import { extractImageAttachments } from "./attachments.ts"
 import type { BrandPalette } from "./brand.ts"
+import { completeMentionDraft, trailingMention } from "./file-mentions.ts"
 
 export type CodexSessionAction = "home" | "reconnect" | "new" | "resume-picker" | "quit"
 
@@ -40,6 +41,10 @@ export type SlashCommandName =
   | "usage"
   | "context"
   | "compact"
+  | "commands"
+  | "skills"
+  | "personality"
+  | "create-skill"
   | "history"
   | "quit"
 
@@ -57,6 +62,10 @@ const slashCommandNames: readonly SlashCommandName[] = [
   "usage",
   "context",
   "compact",
+  "commands",
+  "skills",
+  "personality",
+  "create-skill",
   "history",
   "quit",
 ]
@@ -92,6 +101,10 @@ export const slashCommandHelp: ReadonlyArray<{ command: string; description: str
   { command: "/usage", description: "Show token usage, context left, and estimated cost" },
   { command: "/context", description: "Inspect model context and available input budget (CodeSplash)" },
   { command: "/compact [instructions]", description: "Compact older model context (CodeSplash)" },
+  { command: "/commands · /skills", description: "List native templates or skills with source paths" },
+  { command: "/skill name [arguments]", description: "Load a skill explicitly" },
+  { command: "/personality neutral|concise|explanatory", description: "Set response style" },
+  { command: "/create-skill name [--write]", description: "Preview or create a skill scaffold" },
   { command: "/history", description: "Show where this session is stored" },
   { command: "/help", description: "Toggle this overlay (also F1)" },
   { command: "/quit", description: "Quit the app" },
@@ -397,6 +410,7 @@ type OverlayState =
   | { kind: "permissions"; rules?: PermissionsOverlayRules }
   | { kind: "usage" }
   | { kind: "context"; context: ContextInspection }
+  | { kind: "resources"; title: string; text: string }
   | { kind: "history" }
   | { kind: "models"; state: ModelOverlayState }
 
@@ -427,6 +441,7 @@ export function CodexSessionApp({
   const renderer = useRenderer()
   const { width: terminalWidth, height: terminalHeight } = useTerminalDimensions()
   const textareaRef = useRef<TextareaRenderable>(null)
+  const draftRevision = useRef(0)
   const resetCursorBlinkRef = useRef<() => void>(() => {})
   const scrollboxRef = useRef<ScrollBoxRenderable>(null)
   const [state, setState] = useState(controller.state)
@@ -622,7 +637,8 @@ export function CodexSessionApp({
     (command: ParsedSlashCommand) => {
       switch (command.name) {
         case "unknown":
-          setCommandError(`Unknown command ${command.raw.split(/\s+/)[0]} — try /help`)
+          if (engine === "codesplash") void runCommand(() => controller.send({ text: command.raw }))
+          else setCommandError(`Unknown command ${command.raw.split(/\s+/)[0]} — try /help`)
           return
         case "help":
           setOverlay((current) => (current?.kind === "help" ? undefined : { kind: "help" }))
@@ -661,6 +677,36 @@ export function CodexSessionApp({
             setOverlay({ kind: "context", context })
           })
           return
+        case "commands":
+        case "skills":
+          void runCommand(async () => {
+            const resources = await controller.contextResources(
+              command.name === "skills" ? "skill" : "command",
+            )
+            setOverlay({
+              kind: "resources",
+              title: command.name,
+              text: resources.length
+                ? resources.map((r) => `${r.name}: ${r.description}\n  ${r.source}: ${r.path}`).join("\n\n")
+                : "No enabled resources found.",
+            })
+          })
+          return
+        case "personality":
+          void runCommand(() => controller.setPersonality(command.argument ?? "neutral"))
+          return
+        case "create-skill":
+          void runCommand(async () => {
+            const [name, flag, ...extra] = (command.argument ?? "").split(/\s+/)
+            if (!name || (flag && flag !== "--write") || extra.length)
+              throw new Error("Usage: /create-skill name [--write]")
+            setOverlay({
+              kind: "resources",
+              title: "Skill scaffold",
+              text: await controller.createSkill(name, flag === "--write"),
+            })
+          })
+          return
         case "compact":
           void runCommand(() => controller.compact(command.argument))
           return
@@ -675,6 +721,7 @@ export function CodexSessionApp({
     },
     [
       controller,
+      engine,
       historyLocation,
       onAction,
       openModelOverlay,
@@ -709,6 +756,33 @@ export function CodexSessionApp({
       key.preventDefault()
       cyclePermissionMode()
       return
+    }
+
+    if (
+      key.name === "tab" &&
+      !key.shift &&
+      !overlay &&
+      !state.pendingRequest &&
+      state.turnStatus !== "running" &&
+      engine === "codesplash"
+    ) {
+      const readDraft = () => ({
+        text: textareaRef.current?.plainText ?? "",
+        cursor: textareaRef.current?.cursorOffset ?? 0,
+        revision: draftRevision.current,
+      })
+      if (trailingMention(readDraft())) {
+        key.preventDefault()
+        void runCommand(() =>
+          completeMentionDraft(
+            readDraft,
+            (query) => controller.completeFileMention(query),
+            (text) => textareaRef.current?.setText(text),
+            () => controller.state.turnStatus !== "running" && !controller.state.pendingRequest,
+          ),
+        )
+        return
+      }
     }
 
     if (overlay) {
@@ -938,8 +1012,14 @@ export function CodexSessionApp({
           focusedBackgroundColor={palette.secondary}
           keyBindings={composerKeyBindings}
           style={{ flexGrow: 1, height: "100%" }}
-          onContentChange={() => resetCursorBlinkRef.current()}
-          onCursorChange={() => resetCursorBlinkRef.current()}
+          onContentChange={() => {
+            draftRevision.current++
+            resetCursorBlinkRef.current()
+          }}
+          onCursorChange={() => {
+            draftRevision.current++
+            resetCursorBlinkRef.current()
+          }}
           onSubmit={() => {
             const text = textareaRef.current?.plainText.trim() ?? ""
             if (!text) return
@@ -1167,6 +1247,16 @@ function SessionOverlay({
         <text fg={palette.muted} style={{ marginTop: 1 }}>
           {usageOverlayNote(state.usage)}
         </text>
+      </box>
+    )
+  }
+
+  if (overlay.kind === "resources") {
+    return (
+      <box title={`${overlay.title} · Esc closes`} style={frame}>
+        <scrollbox style={{ flexGrow: 1 }}>
+          <text fg={palette.foreground}>{overlay.text}</text>
+        </scrollbox>
       </box>
     )
   }

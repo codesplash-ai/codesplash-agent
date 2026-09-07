@@ -234,6 +234,9 @@ export type ToolOutcome = {
  * never silently skipped) and enforce their own output truncation.
  */
 export interface HarnessTool {
+  /** Internal preparation operations are never exposed to the model. */
+  readonly hidden?: boolean
+  readonly permissionName?: string
   readonly name: string
   readonly description: string
   readonly inputSchema: Record<string, unknown>
@@ -273,6 +276,8 @@ export const EXIT_PLAN_MODE_TOOL_NAME = "exit_plan_mode"
 /* -------------------------------- prompt assembly -------------------------------- */
 
 export type SystemPromptOptions = {
+  rules?: ProjectRulesFile[]
+  personality?: "neutral" | "concise" | "explanatory"
   cwd: string
   model: ModelInfo
   policy: SessionPolicy

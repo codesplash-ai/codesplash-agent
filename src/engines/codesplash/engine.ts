@@ -2,7 +2,8 @@
  * The first-party CodeSplash engine behind the EngineDriver/EngineSession contract. Sessions run
  * entirely in-process: provider adapters stream model responses and the loop executes tools.
  */
-import { dirname, extname, join } from "node:path"
+import { dirname, extname, join, resolve } from "node:path"
+import { configDirectory } from "../../core/config.ts"
 import {
   type AgentConfig,
   type AgentEvent,
@@ -43,6 +44,10 @@ import type {
   ProviderId,
   ReasoningEffort,
 } from "./contracts.ts"
+import { createSkill as writeSkill } from "./inputs/authoring.ts"
+import { contextReadTool, internalContextTools } from "./inputs/io.ts"
+import { ContextInputs, skillTool } from "./inputs/session.ts"
+import { fuzzyFiles } from "./inputs/syntax.ts"
 import { CodesplashEventFactory, CodesplashLoop } from "./loop.ts"
 import { editPermissionRule, parsePermissionEdit, ruleConflict } from "./permission-editor.ts"
 import {
@@ -245,6 +250,10 @@ class CodesplashSession implements EngineSession {
   readonly #queue = new AsyncQueue<AgentEvent>()
   readonly #factory: CodesplashEventFactory
   readonly #loop: CodesplashLoop
+  readonly #inputs: ContextInputs
+  #inputPromise: Promise<unknown> | undefined
+  #contextSuffix = ""
+  #personality: "neutral" | "concise" | "explanatory"
   readonly #registry: ToolRegistry
   readonly #providerRegistry: ProviderRegistry
   /** Provider clients keyed by runtime id ("anthropic", "openai", or a custom config key). */
@@ -291,7 +300,21 @@ class CodesplashSession implements EngineSession {
     this.#sandbox = sandbox
     this.#bypassAllowed = options.policy?.permissionMode === "bypass"
     this.#factory = new CodesplashEventFactory(options.localSessionId, options.firstSequence ?? 0)
-    this.#registry = createToolRegistry(builtinTools())
+    const userRoot = resolve(configDirectory(), "context")
+    this.#inputs = new ContextInputs(
+      options.cwd,
+      userRoot,
+      options.workspaceTrusted ?? true,
+      config.context,
+      sandbox.sanitize?.bind(sandbox),
+    )
+    this.#personality = config.context?.personality ?? "neutral"
+    this.#registry = createToolRegistry([
+      ...builtinTools(),
+      ...internalContextTools(),
+      contextReadTool(userRoot),
+      skillTool,
+    ])
     this.#loop = new CodesplashLoop({
       cwd: options.cwd,
       policy: this.#policy,
@@ -395,6 +418,19 @@ class CodesplashSession implements EngineSession {
           system,
           userText: input.text,
           userContent,
+          prepare: async (run, signal) => {
+            this.#contextSuffix = ""
+            const prepared = await this.#inputs.prepare(input, run, signal)
+            this.#contextSuffix = prepared.suffix
+            return prepared
+          },
+          invokeSkill: async (value, run) => {
+            if (!value || typeof value !== "object" || !("name" in value) || typeof value.name !== "string")
+              throw new Error("skill requires a name")
+            const args = "arguments" in value ? value.arguments : ""
+            if (typeof args !== "string") throw new Error("skill arguments must be a string")
+            return this.#inputs.invoke(value.name, args, run, true)
+          },
         })
         .catch((error) => {
           this.#push(
@@ -433,13 +469,78 @@ class CodesplashSession implements EngineSession {
     this.#loop.interrupt()
   }
 
+  async #inputOperation<T>(operation: () => Promise<T>): Promise<T> {
+    this.#requireOpen()
+    if (this.#turnReserved || this.#loop.isTurnActive) throw new Error("Wait for the current turn")
+    this.#turnReserved = true
+    const promise = operation()
+    this.#inputPromise = promise
+    try {
+      return await promise
+    } finally {
+      this.#turnReserved = false
+      this.#inputPromise = undefined
+    }
+  }
+
+  async contextResources(kind: "skill" | "command") {
+    return this.#inputOperation(() =>
+      this.#loop.withContextTools(async (run, signal) => {
+        const catalog = await this.#inputs.discover(run, signal)
+        return catalog.resources
+          .filter((r) => r.kind === kind)
+          .map((r) => ({
+            ...r,
+            description: `${r.description}${r.disabled ? " [user invocation only]" : ""}${r.fork ? " [requires M7]" : ""}`,
+          }))
+      }),
+    )
+  }
+
+  async completeFileMention(query: string) {
+    return this.#inputOperation(() =>
+      this.#loop.withContextTools(async (run) => {
+        const result = await run("context_files", { root: this.#cwd })
+        if (result.isError) throw new Error(result.text)
+        const paths: unknown = JSON.parse(result.text)
+        if (!Array.isArray(paths) || !paths.every((p) => typeof p === "string"))
+          throw new Error("Invalid filename index")
+        return fuzzyFiles(query, paths)
+      }),
+    )
+  }
+
+  async setPersonality(personality: string): Promise<void> {
+    await this.#inputOperation(async () => {
+      if (personality !== "neutral" && personality !== "concise" && personality !== "explanatory")
+        throw new Error("Use neutral, concise or explanatory")
+      this.#personality = personality
+      this.#systemPrompt = undefined
+    })
+  }
+
+  async createSkill(name: string, write = false): Promise<string> {
+    return this.#inputOperation(async () => {
+      if (
+        write &&
+        (!(this.options.workspaceTrusted ?? true) ||
+          this.#sandbox.profile.mode !== "workspace-write" ||
+          this.#permissions.mode === "plan")
+      )
+        throw new Error(
+          "Creating a skill requires a trusted workspace in workspace-write mode outside plan mode",
+        )
+      return writeSkill(this.#cwd, name, write)
+    })
+  }
+
   async inspectContext() {
     this.#requireOpen()
     if (this.#turnReserved || this.#loop.isTurnActive)
       throw new Error("Wait for the current turn before inspecting context")
     this.#turnReserved = true
     try {
-      const system = await this.#systemPromptFor()
+      const system = [await this.#systemPromptFor(), this.#contextSuffix].filter(Boolean).join("\n\n")
       this.#requireOpen()
       return this.#loop.inspectContext(this.#model, system, this.#reasoningEffort)
     } finally {
@@ -458,7 +559,7 @@ class CodesplashSession implements EngineSession {
     this.#turnPromise = (async () => {
       try {
         await this.#loop.compact(async () => {
-          const system = await this.#systemPromptFor()
+          const system = [await this.#systemPromptFor(), this.#contextSuffix].filter(Boolean).join("\n\n")
           this.#requireOpen()
           abort.signal.throwIfAborted()
           const provider = this.#providers[this.#model.provider]
@@ -499,6 +600,8 @@ class CodesplashSession implements EngineSession {
       })
       if (updated) Object.assign(this.#config.permissions, updated)
       await this.#permissions.reload?.()
+      this.#contextSuffix = ""
+      this.#inputs.catalog = { resources: [], diagnostics: [] }
       this.#loop.clearApprovalCache()
       this.#systemPrompt = undefined
     } finally {
@@ -519,6 +622,7 @@ class CodesplashSession implements EngineSession {
     this.#maintenanceAbort?.abort()
     this.#loop.interrupt()
     await this.#turnPromise?.catch(() => {})
+    await this.#inputPromise?.catch(() => {})
     await this.#sandbox.close()
     this.#ended = true
     this.#queue.end()
@@ -571,6 +675,8 @@ class CodesplashSession implements EngineSession {
       throw new Error("Bypass mode requires launching with --bypass-approvals")
     }
     this.#permissions.setMode(mode)
+    this.#contextSuffix = ""
+    this.#inputs.catalog = { resources: [], diagnostics: [] }
   }
 
   /**
@@ -660,7 +766,7 @@ class CodesplashSession implements EngineSession {
     const workspaceTrusted = this.options.workspaceTrusted ?? true
     // Plan mode injects its own prompt section and untrusted folders skip project rules, so the
     // cache key covers mode and trust alongside the model (mode can flip between turns).
-    const key = `${this.#model.id}\0${permissionMode}\0${workspaceTrusted}`
+    const key = `${this.#model.id}\0${permissionMode}\0${workspaceTrusted}\0${this.#personality}`
     if (this.#systemPrompt?.key === key) return this.#systemPrompt.text
     const text = await buildSystemPrompt({
       cwd: this.#cwd,
@@ -669,6 +775,8 @@ class CodesplashSession implements EngineSession {
       toolNames: this.#registry.specs().map((spec) => spec.name),
       permissionMode,
       workspaceTrusted,
+      rules: [],
+      personality: this.#personality,
     })
     this.#systemPrompt = { key, text }
     return text

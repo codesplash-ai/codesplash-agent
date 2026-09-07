@@ -1,6 +1,7 @@
 import { chmod, mkdir, readFile, rename } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
+import type { ContextInputConfig } from "../engines/codesplash/inputs/contracts.ts"
 import type { NativeSandboxConfig } from "../engines/codesplash/sandbox/contracts.ts"
 import { validateEnvironmentName } from "../engines/codesplash/sandbox/env-policy.ts"
 import { redactSensitiveText } from "./redaction.ts"
@@ -73,6 +74,7 @@ export type AgentConfig = {
   permissions: PermissionsConfig
   codesplash: { fallbackModel?: string; autoCompact?: boolean; compactionStrategy?: "summary" | "prune" }
   providers: CustomProviderConfig[]
+  context?: ContextInputConfig
   sandbox?: NativeSandboxConfig
   guardian?: {
     enabled: boolean
@@ -380,6 +382,39 @@ export function validateConfig(parsed: unknown, path: string): AgentConfig {
     }
   }
 
+  if (parsed.context !== undefined) {
+    if (!isRecord(parsed.context)) problems.push("[context]: expected a table")
+    else {
+      const context: ContextInputConfig = {}
+      for (const [key, value] of Object.entries(parsed.context)) {
+        if (["claudeRules", "cursorRules", "claudeSkills", "claudeCommands", "sharedSkills"].includes(key)) {
+          if (typeof value !== "boolean") problems.push(`[context].${key}: expected a boolean`)
+          else Object.assign(context, { [key]: value })
+        } else if (key === "personality") {
+          if (value === "neutral" || value === "concise" || value === "explanatory")
+            context.personality = value
+          else problems.push("[context].personality: expected neutral, concise or explanatory")
+        } else if (key === "includeRoots") {
+          if (
+            !Array.isArray(value) ||
+            value.length > 16 ||
+            !value.every(
+              (v) =>
+                typeof v === "string" &&
+                v.length > 0 &&
+                !/^[\\/]|[*?{}[\]~]/.test(v) &&
+                !Array.from(v).some((char) => char.charCodeAt(0) < 32) &&
+                !v.split(/[\\/]/).includes(".."),
+            )
+          )
+            problems.push("[context].includeRoots: expected up to 16 workspace-relative literal directories")
+          else context.includeRoots = value as string[]
+        } else problems.push(`[context].${key}: unknown setting`)
+      }
+      config.context = context
+    }
+  }
+
   if (problems.length > 0) {
     throw new Error(`Invalid config at ${path}:\n${problems.map((problem) => `  - ${problem}`).join("\n")}`)
   }
@@ -671,6 +706,7 @@ export async function saveConfig(config: AgentConfig, path = configFilePath()): 
   }
   const permissions = permissionsTable(config.permissions)
   if (permissions) table.permissions = permissions
+  if (config.context) table.context = { ...config.context }
   if (config.sandbox) table.sandbox = { ...config.sandbox }
   if (config.guardian) table.guardian = { ...config.guardian }
   if (Object.keys(config.codesplash).length > 0) {

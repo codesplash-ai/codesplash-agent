@@ -34,6 +34,8 @@ Usage:
   codesplash sandbox [--read-only] [--read-root PATH] [--write-root PATH]
                      [--allow-host HOST:PORT] [--no-history] -- CMD [ARGS...]
   codesplash secrets set NAME | list | delete NAME
+  codesplash import <claude|cursor> <source-dir> [--apply] [--destination DIR]
+  codesplash create-skill <name> [--write]
   codesplash debug prompt [path] [--model <id[:effort]>] [--sandbox <mode>] [-c <key=value>]
   codesplash --doctor
   codesplash --version
@@ -52,6 +54,8 @@ Commands:
   review         Collect a git diff and run one read-only CodeSplash review turn over it
   stats          Aggregate recorded session usage (tokens, estimated cost) per engine and model
   completions    Print a shell completion script for bash, zsh, fish, or powershell
+  import         Preview or import supported Claude/Cursor rules, commands and skills
+  create-skill   Preview a native skill scaffold; --write creates it without overwriting
   debug          Inspect harness internals; "debug prompt" prints the model-visible surface
                  (model, system prompt, tool specs) as JSON without opening a session
 
@@ -881,6 +885,24 @@ async function main(): Promise<void> {
   if (args.includes("--version") || args.includes("-v")) {
     const { APP_VERSION } = await import("./version.ts")
     process.stdout.write(`${APP_VERSION}\n`)
+    return
+  }
+
+  if (args[0] === "import") {
+    process.exitCode = await (await import("./commands/import.ts")).runImportCommand(args.slice(1))
+    return
+  }
+  if (args[0] === "create-skill") {
+    const [name, flag, ...extra] = args.slice(1)
+    if (!name || (flag && flag !== "--write") || extra.length)
+      throw new UsageError("Usage: codesplash create-skill <name> [--write]")
+    process.stdout.write(
+      await (await import("./engines/codesplash/inputs/authoring.ts")).createSkill(
+        process.cwd(),
+        name,
+        flag === "--write",
+      ),
+    )
     return
   }
 

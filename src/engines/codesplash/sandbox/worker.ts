@@ -1,5 +1,6 @@
 import { redactSensitiveText } from "../../../core/redaction.ts"
 import type { ToolContext } from "../contracts.ts"
+import { internalContextTools } from "../inputs/io.ts"
 import { createPermissionRuntime } from "../permissions.ts"
 import { builtinTools } from "../tools/registry.ts"
 import { SecretSanitizer } from "./env-policy.ts"
@@ -18,7 +19,7 @@ export async function workerMain(): Promise<void> {
   const bytes = await new Response(Bun.stdin.stream()).arrayBuffer()
   if (bytes.byteLength > 8 * 1024 * 1024) throw new Error("Tool request exceeds 8 MiB")
   const request = JSON.parse(Buffer.from(bytes).toString()) as WorkerInput
-  const tool = builtinTools().find((t) => t.name === request.tool)
+  const tool = [...builtinTools(), ...internalContextTools()].find((t) => t.name === request.tool)
   if (!tool || ["ask_user", "enter_plan_mode", "exit_plan_mode", "request_permissions"].includes(tool.name))
     throw new Error("Unknown sandbox worker tool")
   const permissions = await createPermissionRuntime({

@@ -52,6 +52,7 @@ export function createToolRegistry(tools: HarnessTool[]): ToolRegistry {
   return {
     specs: () =>
       [...byName.values()]
+        .filter((tool) => !tool.hidden)
         .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
         .map((tool) => ({
           name: tool.name,

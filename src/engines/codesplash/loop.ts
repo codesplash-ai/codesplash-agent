@@ -51,6 +51,7 @@ import {
   type ToolResultBlock,
 } from "./contracts.ts"
 import { Guardian, type GuardianConfig } from "./guardian.ts"
+import type { ContextToolRunner } from "./inputs/contracts.ts"
 import { derivePersistableRule } from "./permissions.ts"
 import type { SandboxRuntime } from "./sandbox/contracts.ts"
 import { READ_TOOL_OUTPUT, ToolOutputStore } from "./tool-output-store.ts"
@@ -174,6 +175,11 @@ export type CodesplashLoopOptions = {
 }
 
 export type TurnRequest = {
+  prepare?: (
+    run: ContextToolRunner,
+    signal: AbortSignal,
+  ) => Promise<{ suffix: string; content: ContentBlock[] }>
+  invokeSkill?: (input: unknown, run: ContextToolRunner, signal: AbortSignal) => Promise<string>
   provider: ProviderClient
   model: ModelInfo
   reasoningEffort?: ReasoningEffort
@@ -347,6 +353,7 @@ export class CodesplashLoop {
 
   /** Runs one full turn; provider and tool failures become events, never rejections. */
   async runTurn(request: TurnRequest): Promise<void> {
+    request = { ...request }
     if (this.#abort) throw new Error("A turn is already running")
     const abort = new AbortController()
     this.#abort = abort
@@ -376,6 +383,18 @@ export class CodesplashLoop {
       )
       this.#event("loop/turnStarted", {}, { kind: "turn.started", payload: {} })
       this.#history.push({ role: "user", content: request.userContent })
+      if (request.prepare) {
+        const prepared = await request.prepare(
+          this.#contextRunner(abort.signal, turnMutatedPaths),
+          abort.signal,
+        )
+        abort.signal.throwIfAborted()
+        request.system = [request.system, prepared.suffix].filter(Boolean).join("\n\n")
+        this.#history[this.#history.length - 1] = {
+          role: "user",
+          content: [...request.userContent, ...prepared.content],
+        }
+      }
 
       let executedRounds = 0
       while (true) {
@@ -961,7 +980,7 @@ export class CodesplashLoop {
         continue
       }
       const tool = this.#registry.get(call.name)
-      if (!tool) {
+      if (!tool || tool.hidden) {
         const message = `Unknown tool: ${call.name}`
         this.#emitToolItem(call.id, call.name, message, "failed")
         results[index] = { type: "tool_result", toolCallId: call.id, text: message, isError: true }
@@ -1037,6 +1056,7 @@ export class CodesplashLoop {
       return false
     }
     try {
+      if (tool.name === "skill") return false
       if (!tool.isReadOnly(call.input)) return false
       const decision = this.#permissionDecision(tool, call, signal).decision
       if (decision.kind === "allow") return true
@@ -1071,7 +1091,10 @@ export class CodesplashLoop {
         return { decision: { kind: "default" }, targets: undefined }
       }
     }
-    return { decision: permissions.decide(tool.name, targets, tool.isReadOnly(call.input)), targets }
+    return {
+      decision: permissions.decide(tool.permissionName ?? tool.name, targets, tool.isReadOnly(call.input)),
+      targets,
+    }
   }
 
   async #runToolCall(
@@ -1079,6 +1102,7 @@ export class CodesplashLoop {
     call: ToolCallBlock,
     signal: AbortSignal,
     mutated: Set<string>,
+    retainOutput = true,
   ): Promise<ToolResultBlock> {
     const itemId = call.id
     const provisionalLabel = callLabel(tool.name, call.input)
@@ -1263,11 +1287,20 @@ export class CodesplashLoop {
           )
       }
       const outcome =
-        call.name === READ_TOOL_OUTPUT
-          ? { text: await this.#outputStore.read(call.input), label: "Retained tool output" }
-          : this.#sandbox
-            ? await this.#sandbox.runTool(tool, call.input, this.#toolContext(signal))
-            : await tool.run(call.input, this.#toolContext(signal))
+        call.name === "skill" && this.#guardianRequest?.invokeSkill
+          ? {
+              text: await this.#guardianRequest.invokeSkill(
+                call.input,
+                this.#contextRunner(signal, mutated),
+                signal,
+              ),
+              label: "Skill instructions",
+            }
+          : call.name === READ_TOOL_OUTPUT
+            ? { text: await this.#outputStore.read(call.input), label: "Retained tool output" }
+            : this.#sandbox
+              ? await this.#sandbox.runTool(tool, call.input, this.#toolContext(signal))
+              : await tool.run(call.input, this.#toolContext(signal))
       if (this.#sandbox?.sanitize) {
         outcome.text = this.#sandbox.sanitize(outcome.text)
         outcome.label = this.#sandbox.sanitize(outcome.label)
@@ -1277,11 +1310,16 @@ export class CodesplashLoop {
         this.#event("tool/plan", { itemId }, { kind: "plan.updated", payload: { steps: outcome.planSteps } })
       }
       for (const path of outcome.mutatedPaths ?? []) mutated.add(path)
-      this.#emitToolItem(itemId, outcome.label, outcome.text, outcome.isError ? "failed" : "completed")
+      this.#emitToolItem(
+        itemId,
+        outcome.label,
+        tool.hidden ? (outcome.isError ? outcome.text : "Context loaded") : outcome.text,
+        outcome.isError ? "failed" : "completed",
+      )
       const result: ToolResultBlock = {
         type: "tool_result",
         toolCallId: call.id,
-        text: await this.#outputStore.retain(outcome.text),
+        text: tool.hidden || !retainOutput ? outcome.text : await this.#outputStore.retain(outcome.text),
       }
       if (outcome.isError) result.isError = true
       return result
@@ -1612,8 +1650,55 @@ export class CodesplashLoop {
     return { type: "tool_result", toolCallId: call.id, text: message, isError: true }
   }
 
+  async withContextTools<T>(
+    operation: (run: ContextToolRunner, signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    if (this.#abort) throw new Error("A turn is already running")
+    const abort = new AbortController()
+    this.#abort = abort
+    try {
+      return await operation(this.#contextRunner(abort.signal, new Set()), abort.signal)
+    } finally {
+      this.#abort = undefined
+    }
+  }
+
+  #contextRunner(signal: AbortSignal, mutated: Set<string>): ContextToolRunner {
+    return async (name, input) => {
+      signal.throwIfAborted()
+      const id = crypto.randomUUID()
+      if (name === "context_confirm") {
+        const choice = await this.#awaitDecision(
+          "approval",
+          "Load included instructions?",
+          JSON.stringify(input),
+          ["accept", "decline", "cancel"],
+          id,
+          signal,
+          true,
+          "Context imports require explicit approval",
+        )
+        return {
+          type: "tool_result",
+          toolCallId: id,
+          text: choice === "accept" ? "Approved" : "Context import was not approved",
+          ...(choice === "accept" ? {} : { isError: true }),
+        }
+      }
+      const tool = this.#registry.get(name)
+      if (!tool || (!tool.hidden && name !== "bash")) throw new Error("Invalid context operation")
+      return this.#runToolCall(tool, { type: "tool_call", id, name, input }, signal, mutated, false)
+    }
+  }
+
   #toolContext(signal: AbortSignal): ToolContext {
-    return { cwd: this.#cwd, policy: this.#policy, signal, permissions: this.#permissions }
+    return {
+      cwd: this.#cwd,
+      policy: this.#policy,
+      signal,
+      permissions: this.#permissions,
+      sanitizeOutput: this.#sandbox?.sanitize?.bind(this.#sandbox),
+    }
   }
 
   #event(providerEvent: string, native: NativeEventIds, input: AgentEventInput, sensitive = false): void {

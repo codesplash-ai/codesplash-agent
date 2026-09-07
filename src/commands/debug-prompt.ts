@@ -1,3 +1,4 @@
+import { resolve } from "node:path"
 /**
  * `codesplash debug prompt`: prints the model-visible surface for a session that WOULD open in
  * the given project — the resolved model selector, the assembled system prompt, and every tool
@@ -15,8 +16,13 @@ import {
 } from "../core/index.ts"
 import { applyStoredCredentials } from "../engines/codesplash/auth.ts"
 import { buildProviderRegistry, formatModelSelector } from "../engines/codesplash/catalog.ts"
+import { contextReadTool, internalContextTools } from "../engines/codesplash/inputs/io.ts"
+import { ContextInputs, skillTool } from "../engines/codesplash/inputs/session.ts"
+import { createPermissionRuntime } from "../engines/codesplash/permissions.ts"
 import { buildSystemPrompt } from "../engines/codesplash/prompt.ts"
 import type { HeadlessSink } from "../engines/codesplash/runner.ts"
+import { createProfile } from "../engines/codesplash/sandbox/profile.ts"
+import { NativeSandbox } from "../engines/codesplash/sandbox/runtime.ts"
 import { builtinTools } from "../engines/codesplash/tools/registry.ts"
 import { UsageError } from "./usage-error.ts"
 
@@ -130,17 +136,69 @@ export async function runDebugPromptCommand(
     approvalPolicy: config.codex.approvalPolicy,
   }
 
-  const tools = builtinTools()
+  const tools = [...builtinTools(), skillTool].sort((a, b) => a.name.localeCompare(b.name))
+  const userRoot = resolve(configDirectory(env), "context")
+  const permissions = await createPermissionRuntime({
+    cwd: project.cwd,
+    mode: config.permissions.mode,
+    workspaceTrusted: true,
+    configRules: config.permissions,
+  })
+  const sandbox = new NativeSandbox(createProfile(project.cwd, policy.sandbox, config.sandbox))
+  const inputs = new ContextInputs(
+    project.cwd,
+    userRoot,
+    true,
+    config.context,
+    sandbox.sanitize.bind(sandbox),
+  )
+  const signal = new AbortController().signal
+  let suffix: string
+  try {
+    const prepared = await inputs.prepare(
+      { text: "" },
+      async (name, input) => {
+        const tool = [...internalContextTools(), contextReadTool(userRoot)].find((t) => t.name === name)
+        if (!tool)
+          throw new Error("Prompt preview requires interactive import approval; inspect it in a session")
+        const context = {
+          cwd: project.cwd,
+          policy,
+          signal,
+          permissions,
+          sanitizeOutput: sandbox.sanitize.bind(sandbox),
+        }
+        const decision = permissions.decide(
+          tool.permissionName ?? tool.name,
+          tool.permissionTargets?.(input, context),
+          true,
+        )
+        if (decision.kind === "ask" || decision.kind === "deny")
+          throw new Error(
+            `Prompt preview read ${decision.kind}: inspect permissions in an interactive session`,
+          )
+        const result = await sandbox.runTool(tool, input, context)
+        return { ...result, type: "tool_result", toolCallId: "preview" }
+      },
+      signal,
+    )
+    suffix = prepared.suffix
+  } finally {
+    await sandbox.close()
+  }
   const system = await buildSystemPrompt({
     cwd: project.cwd,
     model: selection.model,
     policy,
     toolNames: tools.map((tool) => tool.name),
+    rules: [],
+    personality: config.context?.personality,
+    permissionMode: config.permissions.mode,
   })
 
   const surface: DebugPromptSurface = {
     model: formatModelSelector(selection.model, selection.effort),
-    system,
+    system: [system, suffix].filter(Boolean).join("\n\n"),
     tools: tools.map((tool) => ({
       name: tool.name,
       description: tool.description,

@@ -22,6 +22,8 @@ const SUBCOMMANDS = [
   "debug",
   "sandbox",
   "secrets",
+  "import",
+  "create-skill",
 ] as const
 
 const ROOT_FLAGS = [
@@ -178,6 +180,8 @@ _codesplash_completions() {
     stats) COMPREPLY=($(compgen -W "${words(STATS_FLAGS)}" -- "$cur")) ;;
     debug) COMPREPLY=($(compgen -W "${words(DEBUG_FLAGS)}" -- "$cur")) ;;
     sandbox) COMPREPLY=($(compgen -W "${words(SANDBOX_FLAGS)}" -- "$cur")) ;;
+    import) COMPREPLY=($(compgen -W "claude cursor --apply --destination" -- "$cur")) ;;
+    create-skill) COMPREPLY=($(compgen -W "--write" -- "$cur")) ;;
     secrets) COMPREPLY=($(compgen -W "${words(SECRET_ACTIONS)}" -- "$cur")) ;;
     login) COMPREPLY=($(compgen -W "--api-key" -- "$cur")) ;;
     *) COMPREPLY=($(compgen -W "${words(ROOT_FLAGS)}" -- "$cur")) ;;
@@ -217,6 +221,8 @@ _codesplash() {
     stats) compadd -- ${words(STATS_FLAGS)} ;;
     debug) compadd -- ${words(DEBUG_FLAGS)} ;;
     sandbox) compadd -- ${words(SANDBOX_FLAGS)} ;;
+    import) compadd -- claude cursor --apply --destination ;;
+    create-skill) compadd -- --write ;;
     secrets) compadd ${words(SECRET_ACTIONS)} ;;
     login) compadd -- --api-key ;;
     *) compadd -- ${words(ROOT_FLAGS)} ;;
@@ -236,6 +242,10 @@ function fishScript(): string {
     `complete -c codesplash -n "__fish_seen_subcommand_from login" -l api-key -x`,
     `complete -c codesplash -n "__fish_seen_subcommand_from completions" -a "${words(COMPLETION_SHELLS)}"`,
     `complete -c codesplash -n "__fish_seen_subcommand_from debug" -a "${words(DEBUG_TOPICS)}"`,
+    `complete -c codesplash -n "__fish_seen_subcommand_from import" -a "claude cursor"`,
+    `complete -c codesplash -n "__fish_seen_subcommand_from import" -l apply`,
+    `complete -c codesplash -n "__fish_seen_subcommand_from import" -l destination -r`,
+    `complete -c codesplash -n "__fish_seen_subcommand_from create-skill" -l write`,
     `complete -c codesplash -n "__fish_seen_subcommand_from secrets" -a "${words(SECRET_ACTIONS)}"`,
     `complete -c codesplash -n "__fish_seen_subcommand_from sandbox" -l read-only`,
     `complete -c codesplash -n "__fish_seen_subcommand_from sandbox" -l read-root -r`,
@@ -303,6 +313,8 @@ Register-ArgumentCompleter -Native -CommandName codesplash -ScriptBlock {
                 'stats' { @(${quotedList(STATS_FLAGS)}) }
                 'debug' { @(${quotedList(DEBUG_FLAGS)}) }
                 'sandbox' { @(${quotedList(SANDBOX_FLAGS)}) }
+                'import' { @('claude', 'cursor', '--apply', '--destination') }
+                'create-skill' { @('--write') }
                 'secrets' { @(${quotedList(SECRET_ACTIONS)}) }
                 'login' { @('--api-key') }
                 default { @(${quotedList(SUBCOMMANDS)}, ${quotedList(ROOT_FLAGS)}) }
