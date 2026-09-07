@@ -1,8 +1,8 @@
 import { existsSync } from "node:fs"
 import { dirname, join } from "node:path"
+import { logBytes } from "../../../core/session/compression.ts"
 import type { ChatMessage, HarnessTool } from "../contracts.ts"
 import { MEMORY_BODY_BYTES } from "./contracts.ts"
-import { readBounded } from "./files.ts"
 import { memoryHash } from "./identity.ts"
 import type { MemorySession } from "./session.ts"
 export function memoryGate(name: string, permissionName: string, write = false): HarnessTool {
@@ -171,8 +171,9 @@ export function memoryTools(
         }
         if (transcript && memory.options.history && memory.options.trusted) {
           const path = join(dirname(transcript), "events.jsonl")
-          if (existsSync(path)) {
-            for (const line of readBounded(path, 8 * 1024 * 1024)
+          if (existsSync(path) || existsSync(`${path}.storage.json`)) {
+            for (const line of logBytes(path, 8 * 1024 * 1024)
+              .toString()
               .split("\n")
               .slice(-1000)) {
               if (!line.trim()) continue

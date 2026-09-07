@@ -87,7 +87,7 @@ describe("session store", () => {
     expect(reread?.lastSequence).toBe(12)
     expect(reread?.updatedAt).not.toBe("2026-08-16T00:00:00.000Z")
     const { readdir } = await import("node:fs/promises")
-    expect((await readdir(handle.directory)).sort()).toEqual(["meta.json"])
+    expect((await readdir(handle.directory)).sort()).toEqual([".writer.lease.sqlite", "meta.json"])
   })
 
   test("drops a torn final line on read and heals it before the next append", async () => {

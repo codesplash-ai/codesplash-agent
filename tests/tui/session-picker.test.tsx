@@ -1,10 +1,19 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { createTestRenderer } from "@opentui/core/testing"
+import { createRoot } from "@opentui/react"
 import type { SessionMeta } from "../../src/core/index.ts"
+import { SessionRepository } from "../../src/core/session/repository.ts"
+import { SessionStore } from "../../src/core/sessions.ts"
 import { CODESPLASH_CAPABILITIES } from "../../src/engines/codesplash/index.ts"
+import { brandThemes } from "../../src/tui/brand.ts"
 import {
   displaySessionStatus,
   formatRelativeTime,
   isResumableSession,
+  SessionPickerApp,
   sandboxBadge,
 } from "../../src/tui/session-picker.tsx"
 
@@ -76,4 +85,67 @@ describe("session picker", () => {
     )
     expect(sandboxBadge(makeMeta({ engine: "codesplash" }))).toBe("workspace-write")
   })
+})
+
+test("picker search, rename, archive and delete use persisted repository state", async () => {
+  const root = await mkdtemp(join(tmpdir(), "m5-picker-")),
+    repository = new SessionRepository(root)
+  const meta = makeMeta({ schemaVersion: 2, title: "Original title" })
+  await new SessionStore(root).create(meta)
+  const setup = await createTestRenderer({ width: 120, height: 30 })
+  const render = createRoot(setup.renderer)
+  const settle = async () => {
+    await setup.flush()
+    await Bun.sleep(25)
+    await setup.flush()
+  }
+  try {
+    render.render(
+      <SessionPickerApp
+        sessions={[meta]}
+        repository={repository}
+        palette={brandThemes.dark}
+        onAction={() => {}}
+      />,
+    )
+    await settle()
+    setup.mockInput.pressArrow("down")
+    await settle()
+    setup.mockInput.pressKey("r")
+    await settle()
+    await setup.mockInput.typeText("Renamed title")
+    await settle()
+    setup.mockInput.pressEnter()
+    await settle()
+    expect((await repository.resolve(meta.localSessionId)).title).toBe("Renamed title")
+    setup.mockInput.pressKey("/")
+    await settle()
+    await setup.mockInput.typeText("Renamed")
+    await settle()
+    setup.mockInput.pressEnter()
+    await settle()
+    setup.mockInput.pressArrow("down")
+    await settle()
+    setup.mockInput.pressKey("h")
+    await settle()
+    expect((await repository.resolve(meta.localSessionId)).archived).toBe(true)
+    setup.mockInput.pressKey("a")
+    await settle()
+    setup.mockInput.pressArrow("down")
+    await settle()
+    setup.mockInput.pressKey("d")
+    await settle()
+    setup.mockInput.pressEnter()
+    await settle()
+    expect(await repository.all()).toHaveLength(1)
+    await setup.mockInput.typeText("delete")
+    await settle()
+    setup.mockInput.pressEnter()
+    await settle()
+    expect(await repository.all()).toHaveLength(0)
+  } finally {
+    render.unmount()
+    setup.renderer.destroy()
+    await rm(root, { recursive: true, force: true })
+  }
 })

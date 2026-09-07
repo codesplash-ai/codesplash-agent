@@ -1,18 +1,27 @@
 /** Durable local session metadata and coalesced event history. */
 import { createHash } from "node:crypto"
-import { chmod, mkdir, open, readdir, readFile, rename, truncate } from "node:fs/promises"
-import { join } from "node:path"
+import { constants, existsSync } from "node:fs"
+import { mkdir, open, readdir, truncate } from "node:fs/promises"
+import { dirname, join } from "node:path"
 import type { ApprovalPolicy, SandboxMode } from "./config.ts"
 import { dataDirectory } from "./config.ts"
 import type { AgentEvent, EngineId, SessionStatus } from "./events.ts"
+import { invalidateSession } from "./session/changes.ts"
+import { logBytes, materialize } from "./session/compression.ts"
+import { control } from "./session/control.ts"
+import { atomic, canonicalRoot, component, digest, hostPath, json, lease } from "./session/files.ts"
 
 export type SessionMeta = {
-  schemaVersion: 1
+  schemaVersion: 1 | 2
   engine: EngineId
   localSessionId: string
   nativeSessionId?: string
   projectPath: string
   projectId: string
+  archived?: boolean
+  section?: string
+  organization?: string
+  position?: number
   title?: string
   createdAt: string
   updatedAt: string
@@ -43,7 +52,7 @@ export function projectIdFor(canonicalPath: string): string {
 }
 
 export function sessionDirectory(root: string, projectId: string, localSessionId: string): string {
-  return join(root, projectId, localSessionId)
+  return join(root, component(projectId), component(localSessionId))
 }
 
 /**
@@ -66,8 +75,9 @@ export function permissionGrantsPathFor(dataDir: string, projectId: string): str
 export async function listProjectSessions(
   projectId: string,
   root = sessionsRootDirectory(),
+  includeArchived = false,
 ): Promise<SessionMeta[]> {
-  const projectDirectory = join(root, projectId)
+  const projectDirectory = join(root, component(projectId))
   let entries: string[]
   try {
     entries = await readdir(projectDirectory)
@@ -79,26 +89,60 @@ export async function listProjectSessions(
   const metas: SessionMeta[] = []
   for (const entry of entries) {
     const meta = await readSessionMeta(join(projectDirectory, entry))
-    if (meta && meta.projectId === projectId) metas.push(meta)
+    if (meta && meta.projectId === projectId && (includeArchived || !meta.archived)) metas.push(meta)
   }
   return metas.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
 }
 
-export async function readSessionMeta(directory: string): Promise<SessionMeta | undefined> {
+export async function readSessionMeta(
+  directory: string,
+  recoverPrepared = false,
+): Promise<SessionMeta | undefined> {
+  return readSessionMetaSync(directory, recoverPrepared)
+}
+
+function readSessionMetaSync(directory: string, recoverPrepared = false): SessionMeta | undefined {
+  directory = hostPath(directory)
+  const root = dirname(dirname(directory)),
+    key = digest(`${directory.split("/").at(-2)}/${directory.split("/").at(-1)}`)
+  if (existsSync(join(root, "tombstones", `${key}.json`))) return undefined
+  let parsed: unknown
   try {
-    const parsed: unknown = JSON.parse(await readFile(join(directory, "meta.json"), "utf8"))
-    return isSessionMeta(parsed) ? parsed : undefined
+    parsed = json<unknown>(join(directory, "meta.json"))
   } catch {
     return undefined
+  }
+  if (!isSessionMeta(parsed)) return undefined
+  let resolved = parsed
+  const state = control(directory).state
+  if (state.migrated && parsed.schemaVersion !== 2) {
+    const prepared = state.values.migrationMeta
+    if (
+      !recoverPrepared ||
+      !isSessionMeta(prepared) ||
+      prepared.schemaVersion !== 2 ||
+      prepared.localSessionId !== parsed.localSessionId ||
+      prepared.projectId !== parsed.projectId ||
+      state.values.migrationSourceHash !== digest(JSON.stringify(parsed))
+    )
+      throw new Error(
+        "Legacy session writer changed migrated metadata or migration was interrupted; inspect and recover before resuming",
+      )
+    resolved = prepared
+  }
+  return {
+    ...resolved,
+    ...(state.title === undefined ? {} : { title: state.title }),
+    ...(state.archived === undefined ? {} : { archived: state.archived }),
+    ...(state.section === undefined ? {} : { section: state.section }),
+    ...(state.organization === undefined ? {} : { organization: state.organization }),
+    ...(state.position === undefined ? {} : { position: state.position }),
   }
 }
 
 export async function writeSessionMeta(directory: string, meta: SessionMeta): Promise<void> {
-  const path = join(directory, "meta.json")
-  const temporaryPath = `${path}.${process.pid}.tmp`
-  await Bun.write(temporaryPath, `${JSON.stringify(meta, null, 2)}\n`)
-  await chmod(temporaryPath, 0o600)
-  await rename(temporaryPath, path)
+  invalidateSession(directory)
+  atomic(join(directory, "meta.json"), `${JSON.stringify(meta, null, 2)}\n`)
 }
 
 /**
@@ -106,16 +150,11 @@ export async function writeSessionMeta(directory: string, meta: SessionMeta): Pr
  * skipping isolated corrupt lines without discarding intact history after them.
  */
 export async function readSessionEvents(directory: string): Promise<SessionEventsRead> {
-  const path = join(directory, "events.jsonl")
-  let source: Buffer
-  try {
-    source = Buffer.from(await readFile(path))
-  } catch (error) {
-    if (isNodeError(error) && error.code === "ENOENT") {
-      return { events: [], validByteLength: 0, truncatedLineRecovered: false, skippedLineCount: 0 }
-    }
-    throw error
-  }
+  return readSessionEventsSync(directory)
+}
+
+function readSessionEventsSync(directory: string): SessionEventsRead {
+  const source = logBytes(join(directory, "events.jsonl"))
 
   const events: AgentEvent[] = []
   let validByteLength = 0
@@ -150,12 +189,27 @@ export async function readSessionEvents(directory: string): Promise<SessionEvent
 }
 
 export class SessionStore {
-  constructor(readonly root = sessionsRootDirectory()) {}
+  readonly root: string
+  constructor(root = sessionsRootDirectory()) {
+    this.root = canonicalRoot(root)
+  }
 
   async create(meta: SessionMeta): Promise<SessionHandle> {
     const directory = sessionDirectory(this.root, meta.projectId, meta.localSessionId)
     await mkdir(directory, { recursive: true, mode: 0o700 })
-    await writeSessionMeta(directory, meta)
+    const release = lease(directory)
+    try {
+      if (existsSync(join(directory, "meta.json"))) throw new Error("Session already exists")
+      if (
+        existsSync(
+          join(this.root, "tombstones", `${digest(`${meta.projectId}/${meta.localSessionId}`)}.json`),
+        )
+      )
+        throw new Error("Deleted session identities cannot be reused")
+      await writeSessionMeta(directory, meta)
+    } finally {
+      release()
+    }
     return new SessionHandle(directory, meta, 0)
   }
 
@@ -177,6 +231,29 @@ export class SessionHandle {
   #meta: SessionMeta
   #validByteLength: number
   #healed = false
+  #release: (() => void) | undefined
+  #writes: Promise<void> = Promise.resolve()
+  acquire(): void {
+    if (this.#release) return
+    this.#release = lease(this.directory)
+    try {
+      invalidateSession(this.directory)
+      const meta = readSessionMetaSync(this.directory)
+      if (!meta) throw new Error("Session no longer exists")
+      this.#meta = meta
+      this.#validByteLength = readSessionEventsSync(this.directory).validByteLength
+      this.#healed = false
+      materialize(this.eventsPath)
+      materialize(join(this.directory, "transcript.jsonl"))
+    } catch (error) {
+      this.release()
+      throw error
+    }
+  }
+  release(): void {
+    this.#release?.()
+    this.#release = undefined
+  }
 
   constructor(
     readonly directory: string,
@@ -198,21 +275,57 @@ export class SessionHandle {
   async updateMeta(
     patch: Partial<Omit<SessionMeta, "schemaVersion" | "localSessionId" | "projectId">>,
   ): Promise<void> {
-    this.#meta = { ...this.#meta, ...patch, updatedAt: new Date().toISOString() }
-    await writeSessionMeta(this.directory, this.#meta)
+    await this.#write(async () => {
+      const next = { ...this.#meta, ...patch, updatedAt: new Date().toISOString() }
+      await writeSessionMeta(this.directory, next)
+      this.#meta = next
+    })
   }
 
   async appendEventLines(lines: string[]): Promise<void> {
     if (lines.length === 0) return
-    await this.#healTrailingBytes()
+    await this.#write(async () => {
+      materialize(this.eventsPath)
+      await this.#healTrailingBytes()
+      const handle = await open(
+        this.eventsPath,
+        constants.O_RDWR |
+          constants.O_APPEND |
+          constants.O_CREAT |
+          constants.O_NOFOLLOW |
+          constants.O_NONBLOCK,
+        0o600,
+      )
+      let serialized = lines.map((line) => `${line}\n`).join("")
+      try {
+        const info = await handle.stat()
+        if (!info.isFile() || info.nlink !== 1) throw new Error("Unsafe session event file")
+        if (info.size) {
+          const last = Buffer.alloc(1)
+          await handle.read(last, 0, 1, info.size - 1)
+          if (last[0] !== 10) serialized = `\n${serialized}`
+        }
+        await handle.writeFile(serialized)
+        await handle.sync()
+      } finally {
+        await handle.close()
+      }
+      this.#validByteLength += Buffer.byteLength(serialized)
+    })
+  }
 
-    const handle = await open(this.eventsPath, "a", 0o600)
-    try {
-      await handle.write(lines.map((line) => `${line}\n`).join(""))
-    } finally {
-      await handle.close()
-    }
-    this.#validByteLength += Buffer.byteLength(lines.map((line) => `${line}\n`).join(""))
+  #write(operation: () => Promise<void>): Promise<void> {
+    const result = this.#writes.then(async () => {
+      const temporary = !this.#release
+      if (temporary) this.acquire()
+      try {
+        await operation()
+      } finally {
+        if (temporary) this.release()
+      }
+    })
+    this.#writes = result.catch(() => {})
+    return result
   }
 
   async #healTrailingBytes(): Promise<void> {
@@ -252,7 +365,7 @@ function isAgentEventShape(value: unknown): value is AgentEvent {
 function isSessionMeta(value: unknown): value is SessionMeta {
   if (!isRecord(value)) return false
   return (
-    value.schemaVersion === 1 &&
+    (value.schemaVersion === 1 || value.schemaVersion === 2) &&
     (value.engine === "codex" || value.engine === "claude" || value.engine === "codesplash") &&
     typeof value.localSessionId === "string" &&
     typeof value.projectPath === "string" &&

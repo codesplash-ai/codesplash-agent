@@ -222,8 +222,8 @@ export async function runCodexSession(
     let handle: SessionHandle
     if (options.resume) {
       handle = await store.open(projectId, localSessionId)
-      const { events } = await readSessionEvents(handle.directory)
       recorder = new SessionRecorder(handle)
+      const { events } = await readSessionEvents(handle.directory)
       recorder.seedFromHistory(events)
       for (const event of events) initialState = reduceAgentEvent(initialState, event)
       initialState = clearTransientState(initialState)
@@ -265,7 +265,7 @@ export async function runCodexSession(
       // The widened type carries the recorded permission mode until session-wiring lands the
       // loose SessionMeta.permissionMode field; a resume reopens in this mode.
       const meta: SessionMeta = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         engine,
         localSessionId,
         projectPath: project.cwd,

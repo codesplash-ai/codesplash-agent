@@ -3,6 +3,8 @@ import { createRoot, useKeyboard, useRenderer } from "@opentui/react"
 import { useEffect, useState } from "react"
 import type { SessionMeta, SessionStatus, ThemePreference } from "../core/index.ts"
 import { registerCleanup } from "../core/index.ts"
+import { control } from "../core/session/control.ts"
+import { SessionRepository, safeSessionText } from "../core/session/repository.ts"
 import { CODESPLASH_CAPABILITIES } from "../engines/codesplash/index.ts"
 import { type BrandPalette, brandThemes } from "./brand.ts"
 
@@ -49,19 +51,150 @@ export function isResumableSession(meta: SessionMeta): boolean {
 type SessionPickerAppProps = {
   sessions: SessionMeta[]
   palette: BrandPalette
+  repository?: SessionRepository
   onAction(action: SessionPickerAction): void
 }
 
-export function SessionPickerApp({ sessions, palette, onAction }: SessionPickerAppProps) {
+export function SessionPickerApp({
+  sessions,
+  palette,
+  onAction,
+  repository: suppliedRepository,
+}: SessionPickerAppProps) {
   const renderer = useRenderer()
   const [selected, setSelected] = useState(0)
-  const rowCount = sessions.length + 1
+  const [repository] = useState(() => suppliedRepository ?? new SessionRepository())
+  const [rows, setRows] = useState(sessions.filter((meta) => !meta.archived))
+  const [archived, setArchived] = useState(false)
+  const [query, setQuery] = useState("")
+  const [offset, setOffset] = useState(0)
+  const [input, setInput] = useState("")
+  const [mode, setMode] = useState<"search" | "rename" | "delete" | undefined>()
+  const [message, setMessage] = useState("")
+  const [busy, setBusy] = useState(false)
+  const [refresh, setRefresh] = useState(0)
+  const [target, setTarget] = useState<{ meta: SessionMeta; revision: string }>()
+  const rowCount = rows.length + 1
+  useEffect(() => {
+    if (!query && !archived && refresh === 0 && offset === 0) return
+    let current = true
+    repository
+      .list({
+        project: sessions[0]?.projectId,
+        engine: sessions[0]?.engine,
+        archived,
+        query,
+        limit: 30,
+        offset,
+      })
+      .then((page) => {
+        if (current) {
+          setRows(page.sessions)
+          setSelected(0)
+          setMessage(
+            [`${page.total} sessions · page ${Math.floor(offset / 30) + 1}`, ...page.warnings].join(" · "),
+          )
+        }
+      })
+      .catch((error) => {
+        if (current) setMessage(safeSessionText(String(error)))
+      })
+    return () => {
+      current = false
+    }
+  }, [repository, sessions, archived, query, refresh, offset])
+  const perform = (operation: () => Promise<unknown>) => {
+    setBusy(true)
+    void operation()
+      .then(() => {
+        setRefresh((n) => n + 1)
+        setMode(undefined)
+        setInput("")
+      })
+      .catch((error) => setMessage(safeSessionText(String(error))))
+      .finally(() => setBusy(false))
+  }
 
   useEffect(() => {
     renderer.setBackgroundColor(palette.background)
   }, [palette.background, renderer])
 
   useKeyboard((key) => {
+    if (key.ctrl && key.name === "c") {
+      key.preventDefault()
+      onAction({ type: "back" })
+      return
+    }
+    if (busy) {
+      key.preventDefault()
+      return
+    }
+    if (mode) {
+      key.preventDefault()
+      if (key.name === "escape") {
+        setMode(undefined)
+        setInput("")
+        return
+      }
+      if (key.name === "return" || key.name === "enter") {
+        if (mode === "search") {
+          setOffset(0)
+          setQuery(input)
+          setMode(undefined)
+          setRefresh((n) => n + 1)
+        } else if (target && mode === "rename")
+          perform(() => repository.rename(target.meta, input, target.revision))
+        else if (target && mode === "delete" && input === "delete")
+          perform(() => repository.maintenance(target.meta, "delete", target.revision))
+        return
+      }
+      if (key.name === "backspace") setInput((value) => Array.from(value).slice(0, -1).join(""))
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: reject terminal control sequences
+      else if (!key.ctrl && !key.meta && key.sequence && !/[\x00-\x1f\x7f]/.test(key.sequence))
+        setInput((value) => (value + key.sequence).slice(0, 1000))
+      return
+    }
+    if (key.name === "pagedown" || key.name === "pageup") {
+      key.preventDefault()
+      setOffset((value) => Math.max(0, value + (key.name === "pagedown" ? 30 : -30)))
+      setRefresh((n) => n + 1)
+      return
+    }
+    if (key.name === "/") {
+      key.preventDefault()
+      setMode("search")
+      setInput(query)
+      return
+    }
+    if (key.name === "a") {
+      key.preventDefault()
+      setOffset(0)
+      setArchived((value) => !value)
+      setRefresh((n) => n + 1)
+      return
+    }
+    if (["r", "d", "h"].includes(key.name)) {
+      const meta = rows[selected - 1]
+      if (!meta) return
+      key.preventDefault()
+      try {
+        const revision = control(repository.path(meta)).revision
+        setTarget({ meta, revision })
+        setInput("")
+        if (key.name === "h") perform(() => repository.archive(meta, !meta.archived, revision))
+        else {
+          setMode(key.name === "r" ? "rename" : "delete")
+          setMessage(
+            key.name === "d"
+              ? "Delete local history? Provider threads and repository memories remain. Type delete and press Enter."
+              : "Enter a new title.",
+          )
+        }
+      } catch (error) {
+        setMessage(safeSessionText(String(error)))
+      }
+      return
+    }
     if (key.ctrl && key.name === "c") {
       key.preventDefault()
       onAction({ type: "back" })
@@ -88,7 +221,7 @@ export function SessionPickerApp({ sessions, palette, onAction }: SessionPickerA
         onAction({ type: "new" })
         return
       }
-      const meta = sessions[selected - 1]
+      const meta = rows[selected - 1]
       if (meta && isResumableSession(meta)) onAction({ type: "resume", meta })
     }
   })
@@ -124,10 +257,10 @@ export function SessionPickerApp({ sessions, palette, onAction }: SessionPickerA
             selected={selected === 0}
             enabled
           />
-          {sessions.map((meta, index) => (
+          {rows.map((meta, index) => (
             <PickerRow
               key={meta.localSessionId}
-              label={meta.title ?? "Untitled session"}
+              label={safeSessionText(meta.title ?? "Untitled session")}
               detail={[formatRelativeTime(meta.updatedAt), displaySessionStatus(meta), sandboxBadge(meta)]
                 .filter(Boolean)
                 .join(" · ")}
@@ -138,8 +271,20 @@ export function SessionPickerApp({ sessions, palette, onAction }: SessionPickerA
             />
           ))}
         </box>
+        {mode ? (
+          <text fg={palette.accent}>
+            {mode}: {input}▏
+          </text>
+        ) : null}
+        {query || archived ? (
+          <text fg={palette.muted}>
+            {archived ? "Archived" : "Active"} · {query || "All titles"}
+          </text>
+        ) : null}
+        {message ? <text fg={palette.muted}>{message}</text> : null}
         <text fg={palette.muted} style={{ marginTop: 1 }}>
-          Enter resume · Esc back
+          Enter resume · PgUp/PgDn pages · / search · a archived · r rename · h archive/unarchive · d delete ·
+          Esc back
         </text>
       </box>
     </box>

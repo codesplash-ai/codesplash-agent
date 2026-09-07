@@ -125,6 +125,38 @@ Resumed runs reuse the session's recorded policy and append to the same history
 (`--no-history` with resume is a usage error). Native execution profiles are pinned:
 conflicting sandbox overrides require a new session.
 
+### Find and organize sessions
+
+```sh
+codesplash session list --path .
+codesplash session search "parser" --engine codesplash
+codesplash session rename <id> "Parser investigation"
+codesplash session move <id> Work Backlog 1   # organization, section, order
+codesplash session archive <id>
+codesplash session list --archived
+codesplash session unarchive <id>
+codesplash session reindex --apply
+codesplash session compress <id>             # preview; add --apply to compress
+codesplash session delete <id>               # preview; add --apply to delete local history
+```
+
+Use `--json` for structured output and `--limit 1..100 --offset N` for pages. Search covers
+sanitized titles and user/assistant conversation text; it excludes reasoning and tool payloads.
+The session picker offers `/` search, `a` archived visibility, `r` rename, `h` archive/unarchive,
+`d` deletion preview, and Page Up/Down. Archives still count toward usage statistics.
+Organizations and sections do not change the working directory, repository trust or permissions.
+
+Session files remain the recoverable source; SQLite is a rebuildable index. Cold logs use checked
+gzip representations and resume automatically materializes them. Compression supports logs up to
+64 MiB each. Maintenance refuses active or foreign-host owners. Unknown/network filesystems permit
+inspection with a local derived cache; writing history requires verified local storage.
+
+For legacy history, close the old application, inspect `session migrate <id>`, then apply it with
+`--apply`. An interrupted legacy session first needs `session recover <id> --apply`. Recovery does
+not replay tool calls or approvals. Migration preserves a metadata backup and writes version 2
+metadata, which older builds cannot resume. Deletion removes local history and search projections;
+provider threads and independently stored repository memories remain separate.
+
 ### Long sessions and context
 
 The native CodeSplash engine automatically shortens old tool results and summarizes older

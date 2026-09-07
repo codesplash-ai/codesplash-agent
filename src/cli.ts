@@ -36,6 +36,7 @@ Usage:
   codesplash secrets set NAME | list | delete NAME
   codesplash import <claude|cursor> <source-dir> [--apply] [--destination DIR]
   codesplash create-skill <name> [--write]
+  codesplash session <list|search|show|rename|archive|unarchive|delete|projects|move|section|migrate|compress|recover|reindex> [args]
   codesplash memory <list|show|search|remember|edit|forget|accept|status|repair|index|link|refresh|extract|consolidate> [args]
                     [--path DIR] [--trust] [--read-only] [--no-history] [--model ID]
   codesplash debug prompt [path] [--model <id[:effort]>] [--sandbox <mode>] [-c <key=value>]
@@ -57,6 +58,7 @@ Commands:
   stats          Aggregate recorded session usage (tokens, estimated cost) per engine and model
   completions    Print a shell completion script for bash, zsh, fish, or powershell
   import         Preview or import supported Claude/Cursor rules, commands and skills
+  session        Search, organize and recover local sessions
   memory         Inspect and manage repository memory; automatic learning is opt-in
   create-skill   Preview a native skill scaffold; --write creates it without overwriting
   debug          Inspect harness internals; "debug prompt" prints the model-visible surface
@@ -714,6 +716,7 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
       // turn.completed/session.status), so the on-disk events decide the next sequence — reusing
       // an already-issued sequence would break the monotonic invariant replay relies on. The
       // same read seeds the cumulative usage the resumed engine session continues from.
+      recorder = new SessionRecorder(handle)
       const { events: priorEvents } = await readSessionEvents(handle.directory)
       let highestSequence = handle.meta.lastSequence
       for (const event of priorEvents) {
@@ -726,13 +729,12 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
       // The runner settles mode precedence (flag > recorded > policy) and reports what it used;
       // the write goes through the recorder's chain so it never races other meta updates.
       recordedPermissionMode = handle.meta.permissionMode
-      recorder = new SessionRecorder(handle)
       const resumedRecorder = recorder
       recordPermissionMode = (mode) => resumedRecorder.recordPermissionMode(mode)
     } else {
       const now = new Date().toISOString()
       const handle = await store.create({
-        schemaVersion: 1,
+        schemaVersion: 2,
         engine: "codesplash",
         localSessionId,
         projectPath: project.cwd,
@@ -890,6 +892,11 @@ async function main(): Promise<void> {
   if (args.includes("--version") || args.includes("-v")) {
     const { APP_VERSION } = await import("./version.ts")
     process.stdout.write(`${APP_VERSION}\n`)
+    return
+  }
+
+  if (args[0] === "session") {
+    process.exitCode = await (await import("./commands/session.ts")).runSessionCommand(args.slice(1))
     return
   }
 

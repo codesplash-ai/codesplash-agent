@@ -7,7 +7,6 @@ import {
   deferSignalExit,
   effectiveHistoryEnabled,
   effectiveSessionPolicy,
-  listProjectSessions,
   loadConfig,
   type ProjectPreflight,
   projectIdFor,
@@ -16,6 +15,7 @@ import {
   saveConfig,
   type ThemePreference,
 } from "../core/index.ts"
+import { SessionRepository } from "../core/session/repository.ts"
 import { launchClaude } from "./run-claude.ts"
 import { type HarnessEngineId, permissionLaunchOptionsFrom, runCodexSession } from "./run-codex-session.tsx"
 import { renderSessionPicker } from "./session-picker.tsx"
@@ -90,9 +90,9 @@ async function openEngine(
 
   while (true) {
     if (!skipPicker) {
-      const sessions = (await listProjectSessions(projectIdFor(project.cwd))).filter(
-        (meta) => meta.engine === engine,
-      )
+      const sessions = (
+        await new SessionRepository().list({ project: projectIdFor(project.cwd), engine, limit: 30 })
+      ).sessions
       resume = undefined
       if (sessions.length > 0) {
         const choice = await renderSessionPicker(sessions, config.theme)

@@ -9,12 +9,14 @@
  */
 import { mkdir, open, readFile, rename, stat, truncate, unlink } from "node:fs/promises"
 import { dirname } from "node:path"
+import { logBytes, materialize } from "../../core/session/compression.ts"
 import type { ChatMessage } from "./contracts.ts"
 
 const TRANSCRIPT_VERSION = 1
 
 /** Replace model-visible context atomically; event history remains untouched. */
 export async function writeTranscriptSnapshot(path: string, messages: readonly ChatMessage[]): Promise<void> {
+  materialize(path)
   await mkdir(dirname(path), { recursive: true, mode: 0o700 })
   const temporary = `${path}.${crypto.randomUUID()}.tmp`
   const handle = await open(temporary, "wx", 0o600)
@@ -36,13 +38,7 @@ export async function writeTranscriptSnapshot(path: string, messages: readonly C
  * corrupt lines and a torn final line are skipped, never fatal.
  */
 export async function loadTranscript(path: string): Promise<ChatMessage[]> {
-  let source: string
-  try {
-    source = await readFile(path, "utf8")
-  } catch (error) {
-    if (isNodeError(error) && error.code === "ENOENT") return []
-    throw error
-  }
+  const source = logBytes(path).toString("utf8")
 
   const messages: ChatMessage[] = []
   for (const line of source.split("\n")) {
@@ -61,6 +57,7 @@ export async function loadTranscript(path: string): Promise<ChatMessage[]> {
 export async function appendTranscriptMessages(path: string, messages: ChatMessage[]): Promise<void> {
   if (messages.length === 0) return
   await mkdir(dirname(path), { recursive: true })
+  materialize(path)
   const prefix = await healTornTail(path)
 
   const handle = await open(path, "a", 0o600)

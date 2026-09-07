@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { configDirectory, configFilePath, dataDirectory, loadConfig } from "../core/config.ts"
+import { logBytes } from "../core/session/compression.ts"
 import {
   listProjectSessions,
   projectIdFor,
@@ -12,7 +13,6 @@ import { applyStoredCredentials } from "../engines/codesplash/auth.ts"
 import { buildProviderRegistry } from "../engines/codesplash/catalog.ts"
 import type { ChatMessage } from "../engines/codesplash/contracts.ts"
 import { embeddingTool } from "../engines/codesplash/memory/embedding.ts"
-import { readBounded } from "../engines/codesplash/memory/files.ts"
 import { maintainMemory } from "../engines/codesplash/memory/maintenance.ts"
 import { MemorySession } from "../engines/codesplash/memory/session.ts"
 import { createPermissionRuntime } from "../engines/codesplash/permissions.ts"
@@ -124,8 +124,9 @@ export async function runMemoryCommand(
           sessionDirectory(sessionsRootDirectory(data), meta.projectId, meta.localSessionId),
           "transcript.jsonl",
         )
-        if (existsSync(path))
-          for (const line of readBounded(path, 8 * 1024 * 1024)
+        if (existsSync(path) || existsSync(`${path}.storage.json`))
+          for (const line of logBytes(path, 8 * 1024 * 1024)
+            .toString()
             .split("\n")
             .slice(-1000)) {
             if (!line.trim()) continue

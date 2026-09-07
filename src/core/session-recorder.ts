@@ -12,10 +12,12 @@ export class SessionRecorder {
   readonly #knownTurnIds: string[] = []
   #chain: Promise<void> = Promise.resolve()
   #failure: Error | undefined
+  #closed = false
   #lastSequence: number
   #lastStatus: SessionStatus
 
   constructor(handle: SessionHandle) {
+    handle.acquire()
     this.#handle = handle
     this.#lastSequence = handle.meta.lastSequence
     this.#lastStatus = handle.meta.lastStatus
@@ -46,7 +48,7 @@ export class SessionRecorder {
 
   /** Synchronous tap for SessionController; ordering is preserved by an internal write chain. */
   record = (event: AgentEvent): void => {
-    if (this.#failure) return
+    if (this.#failure || this.#closed) return
     if (event.sequence > this.#lastSequence) this.#lastSequence = event.sequence
 
     switch (event.kind) {
@@ -104,13 +106,13 @@ export class SessionRecorder {
   }
 
   recordNativeSessionId(nativeSessionId: string): void {
-    if (this.#failure) return
+    if (this.#failure || this.#closed) return
     this.#enqueue(() => this.#handle.updateMeta({ nativeSessionId }))
   }
 
   /** Records the run's effective permission mode; serialized on the same write chain as events. */
   recordPermissionMode(permissionMode: string): void {
-    if (this.#failure) return
+    if (this.#failure || this.#closed) return
     this.#enqueue(() => this.#handle.updateMeta({ permissionMode }))
   }
 
@@ -119,9 +121,15 @@ export class SessionRecorder {
   }
 
   async close(finalStatus?: SessionStatus): Promise<void> {
+    if (this.#closed) return this.#chain
     if (finalStatus) this.#lastStatus = finalStatus
     this.#enqueueMetaSync()
-    await this.#chain
+    this.#closed = true
+    try {
+      await this.#chain
+    } finally {
+      this.#handle.release()
+    }
   }
 
   #append(event: AgentEvent): void {
