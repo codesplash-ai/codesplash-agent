@@ -14,11 +14,15 @@ export async function runSessionCommand(
   const query: SessionQuery = { archived: false },
     positional: string[] = []
   let apply = false,
-    json = false
+    json = false,
+    revision: string | undefined
   for (let i = 0; i < args.length; i++) {
     const arg = args[i] as string
     if (arg === "--apply") apply = true
-    else if (arg === "--json") json = true
+    else if (arg === "--revision") {
+      revision = args[++i]
+      if (!revision) throw new UsageError("--revision requires a value")
+    } else if (arg === "--json") json = true
     else if (arg === "--archived") query.archived = true
     else if (arg === "--all") query.archived = undefined
     else if (
@@ -111,6 +115,39 @@ export async function runSessionCommand(
       process.removeListener("SIGINT", cancel)
       process.removeListener("SIGTERM", cancel)
     }
+    return 0
+  }
+
+  if (
+    [
+      "tree",
+      "gc-recovery",
+      "acknowledge-fork",
+      "fork",
+      "rewind",
+      "checkpoints",
+      "checkpoint-diff",
+      "restore",
+      "recover-restore",
+      "pin-branch",
+      "pin-checkpoint",
+      "prune-branches",
+      "prune-checkpoints",
+    ].includes(action)
+  ) {
+    if (!id) throw new UsageError(`session ${action} requires a session id`)
+    const { recoveryCommand } = await import("../core/session/recovery-command.ts")
+    const { sessionRecoveryCommand } = await import("./session-recovery.ts")
+    const request = recoveryCommand(action, [...rest, ...(revision ? ["--revision", revision] : [])], apply)
+    emit(
+      await sessionRecoveryCommand(
+        repository,
+        await repository.resolve(id, query.project),
+        request,
+        apply,
+        options.env,
+      ),
+    )
     return 0
   }
 

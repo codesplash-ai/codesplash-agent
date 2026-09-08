@@ -56,6 +56,22 @@ function handleMessage(message: {
     return
   }
 
+  if (message.method === "thread/fork") {
+    if (message.params?.threadId === "thread-unsupported") {
+      send({ id: message.id, error: { code: -32601, message: "thread/fork unsupported" } })
+      return
+    }
+    send({
+      id: message.id,
+      result: { thread: { id: `fork-${message.params?.threadId}`, turns: [] }, model: "gpt-test" },
+    })
+    send({
+      method: "warning",
+      params: { threadId: message.params?.threadId, message: `fork:${message.params?.lastTurnId ?? "all"}` },
+    })
+    return
+  }
+
   if (message.method === "thread/resume") {
     const threadId = String(message.params?.threadId)
     if (threadId === "thread-gone") {
@@ -63,7 +79,7 @@ function handleMessage(message: {
       return
     }
     const turns =
-      threadId === "thread-existing"
+      threadId === "thread-existing" || threadId === "thread-unsupported"
         ? [
             {
               id: "turn-past",

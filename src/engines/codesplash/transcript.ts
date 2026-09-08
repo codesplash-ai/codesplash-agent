@@ -27,6 +27,12 @@ export async function writeTranscriptSnapshot(path: string, messages: readonly C
     await handle.sync()
     await handle.close()
     await rename(temporary, path)
+    const parent = await open(dirname(path), "r")
+    try {
+      await parent.sync()
+    } finally {
+      await parent.close()
+    }
   } finally {
     await handle.close()
     await unlink(temporary).catch(() => {})
@@ -66,6 +72,7 @@ export async function appendTranscriptMessages(path: string, messages: ChatMessa
       .map((message) => `${JSON.stringify({ v: TRANSCRIPT_VERSION, message })}\n`)
       .join("")
     await handle.write(`${prefix}${lines}`)
+    await handle.sync()
   } finally {
     await handle.close()
   }

@@ -22,6 +22,7 @@ import {
   type SessionPolicy,
   type UserInput,
 } from "../../core/index.ts"
+import { MemorySessionState } from "../../core/session/control.ts"
 import { bytes, digest } from "../../core/session/files.ts"
 import {
   attachmentIdentity,
@@ -30,6 +31,7 @@ import {
   InputQueue,
 } from "../../core/session/input-queue.ts"
 import { type InputCompletion, QueueRunner } from "../../core/session/queue-runner.ts"
+import type { RecoveryRequest, RecoveryResult } from "../../core/session/recovery-contract.ts"
 import { APP_VERSION } from "../../version.ts"
 import { PROVIDER_ENV_VARS, resolveApiKey } from "./auth.ts"
 import {
@@ -70,8 +72,9 @@ import {
   type PermissionRuntimeOptions,
 } from "./permissions.ts"
 import { buildSystemPrompt } from "./prompt.ts"
+import { NativeRecovery } from "./recovery.ts"
 import type { SandboxRuntime } from "./sandbox/contracts.ts"
-import { createProfile, physicalPath, pinProfile } from "./sandbox/profile.ts"
+import { contains, createProfile, physicalPath, pinProfile } from "./sandbox/profile.ts"
 import { NativeSandbox } from "./sandbox/runtime.ts"
 import { ToolOutputStore } from "./tool-output-store.ts"
 import { builtinTools, createToolRegistry, type ToolRegistry } from "./tools/registry.ts"
@@ -214,12 +217,13 @@ export class CodesplashDriver implements EngineDriver {
               options.cwd,
               options.policy?.sandbox ?? defaultSessionPolicy.sandbox,
               config.sandbox,
+              options.sessionState?.directory ? [dirname(dirname(options.sessionState.directory))] : [],
             ),
             directory ? join(directory, "sandbox-profile.json") : undefined,
           ),
           directory ? join(directory, "sandbox-events.jsonl") : undefined,
         )
-    return new CodesplashSession(
+    const session = new CodesplashSession(
       options,
       config,
       registry,
@@ -229,6 +233,13 @@ export class CodesplashDriver implements EngineDriver {
       bridge,
       sandbox,
     )
+    try {
+      await session.initializeRecovery()
+      return session
+    } catch (error) {
+      await session.close()
+      throw error
+    }
   }
 }
 
@@ -292,6 +303,8 @@ class CodesplashSession implements EngineSession {
   /** Cached by model + permission mode + workspace trust; any of the three rebuilds the prompt. */
   #systemPrompt: { key: string; text: string } | undefined
   readonly inputQueue: InputQueue
+  #turnEventStart = 0
+  readonly #recovery: NativeRecovery
   readonly #inputRunner: QueueRunner
   readonly #steering = new Set<string>()
   #lastInputCompletion: InputCompletion = "completed"
@@ -318,6 +331,7 @@ class CodesplashSession implements EngineSession {
     bridge: PermissionEventBridge,
     sandbox: SandboxRuntime,
   ) {
+    const state = options.sessionState ?? new MemorySessionState()
     this.events = this.#queue
     this.#config = config
     this.#providerRegistry = providerRegistry
@@ -364,6 +378,23 @@ class CodesplashSession implements EngineSession {
     ])
     this.#loop = new CodesplashLoop({
       cwd: options.cwd,
+      onContextBoundary: (kind, messages) => this.#recovery.capture(kind, kind, messages),
+      beforeMutation: async (label, signal) => {
+        try {
+          return await this.#recovery.checkpoints.begin(label, signal)
+        } catch (error) {
+          this.#loop.interrupt()
+          throw error
+        }
+      },
+      afterMutation: async (id) => {
+        try {
+          await this.#recovery.checkpoints.end(id)
+        } catch (error) {
+          this.#loop.interrupt()
+          throw error
+        }
+      },
       policy: this.#policy,
       registry: this.#registry,
       events: this.#factory,
@@ -391,12 +422,59 @@ class CodesplashSession implements EngineSession {
     })
     if (seededHistory.length > 0) this.#loop.seedHistory(seededHistory)
     this.inputQueue = new InputQueue({
-      state: options.sessionState,
+      state,
       ...options.promptHistory,
       cwd: options.cwd,
       sanitize: sandbox.sanitize?.bind(sandbox),
       mentions,
     })
+    this.#recovery = new NativeRecovery(
+      state,
+      {
+        cwd: this.#cwd,
+        trusted: () => options.workspaceTrusted ?? true,
+        writable: () => sandbox.profile.mode === "workspace-write" && permissions.mode !== "plan",
+        readable: (path) =>
+          contains(this.#cwd, path) &&
+          !sandbox.profile.deniedReadPaths.some((root) => contains(root, path)) &&
+          !["deny", "ask"].includes(permissions.decide("read_file", { paths: [path] }, true).kind),
+        writablePath: (path) =>
+          contains(this.#cwd, path) &&
+          !sandbox.profile.protectedPaths.some((root) => contains(root, path)) &&
+          !["deny", "ask"].includes(permissions.decide("write_file", { paths: [path] }, false).kind),
+        protectedPaths: sandbox.profile.protectedPaths,
+        sanitize: sandbox.sanitize?.bind(sandbox) ?? ((text) => text),
+      },
+      {
+        history: () => this.#loop.historySnapshot(),
+        replace: (messages) => {
+          this.#loop.selectHistory(messages)
+          this.#persistedRevision = this.#loop.historyRevision
+        },
+        usage: () => this.#loop.usageSnapshot(),
+        notes: () => Object.fromEntries(this.#memory.notes),
+        selectNotes: (notes) => this.#memory.selectBranchNotes(notes),
+        sequence: () => this.#factory.nextSequence - 1,
+        startSequence: () => this.#turnEventStart,
+        reset: () => {
+          this.#loop.clearApprovalCache()
+          this.#sandbox.resetGrants?.()
+          this.#inputs.catalog = { resources: [], diagnostics: [] }
+          this.#memory.invalidate()
+          this.#contextSuffix = ""
+          this.#inputSuffix = ""
+          this.#memoryText = ""
+          this.#systemPrompt = undefined
+          this.#lastTurnSucceeded = false
+        },
+        pause: () => {
+          this.inputQueue.pause()
+        },
+        flush: () => options.flushSessionEvents?.() ?? Promise.resolve(),
+        transcript: options.nativeTranscriptPath,
+        notice: (text) => this.#memoryNotice(text),
+      },
+    )
     if (options.resumeQueuedInput === false) this.inputQueue.pause()
     this.#inputRunner = new QueueRunner(
       this.inputQueue,
@@ -459,6 +537,9 @@ class CodesplashSession implements EngineSession {
         },
       ),
     )
+  }
+  async initializeRecovery(): Promise<void> {
+    await this.#recovery.initialize()
     this.#inputRunner.wake()
   }
 
@@ -486,6 +567,7 @@ class CodesplashSession implements EngineSession {
   async #send(input: UserInput, queuedId?: string): Promise<void> {
     this.#requireOpen()
     if (this.#inputRunner.failure) throw this.#inputRunner.failure
+    this.#recovery.assertReady()
     if (this.#turnReserved || this.#loop.isTurnActive) {
       throw new Error("A CodeSplash turn is already running")
     }
@@ -517,6 +599,7 @@ class CodesplashSession implements EngineSession {
       admissionAbort.signal.throwIfAborted()
       const userContent: ContentBlock[] = input.text ? [{ type: "text", text: input.text }] : []
       this.#requireOpen()
+      this.#turnEventStart = this.#factory.nextSequence
       this.#turnPromise = this.#loop
         .runTurn({
           provider,
@@ -586,6 +669,7 @@ class CodesplashSession implements EngineSession {
             this.options.sessionState?.durable
           )
             throw new Error("Native transcript persistence failed; inspect the last turn before retrying")
+          this.#recovery.capture("turn", input.text.slice(0, 80) || "Attachment input", undefined, inputId)
           for (const id of this.#steering) this.inputQueue.finish(id, this.#lastInputCompletion)
           this.#steering.clear()
           if (ownedId) this.inputQueue.finish(ownedId, this.#lastInputCompletion)
@@ -629,6 +713,17 @@ class CodesplashSession implements EngineSession {
       settleAdmission()
       this.#inputRunner.wake()
     }
+  }
+
+  async sessionRecovery(request: RecoveryRequest): Promise<RecoveryResult> {
+    this.#requireOpen()
+    if (request.action === "tree") return { title: "Session branches", data: this.#recovery.branches.view() }
+    if (request.action === "checkpoints")
+      return { title: "File checkpoints", data: this.#recovery.checkpoints.view() }
+    return this.#inputOperation(async () => {
+      this.inputQueue.pause()
+      return this.#recovery.execute(request)
+    })
   }
 
   async resolveRequest(requestId: string, decision: EngineDecision): Promise<void> {
@@ -815,6 +910,7 @@ class CodesplashSession implements EngineSession {
     this.#turnReserved = true
     const abort = new AbortController()
     this.#maintenanceAbort = abort
+    this.#turnEventStart = this.#factory.nextSequence
     this.#turnPromise = (async () => {
       try {
         await this.#cancelLearning()

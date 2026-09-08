@@ -42,6 +42,7 @@ export interface SandboxRuntime {
   validateGrant(grant: AccessGrant, mode: PermissionMode): AccessGrant
   grant(grant: AccessGrant): void
   endTurn(): void
+  resetGrants?(): void
   close(): Promise<void>
   sanitize?(value: string): string
   status?(): string

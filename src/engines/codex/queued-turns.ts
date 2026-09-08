@@ -30,6 +30,7 @@ export class CodexQueuedTurns {
   constructor(
     readonly queue: InputQueue,
     readonly backend: {
+      busy?(): boolean
       start(input: UserInput, id: string): Promise<string>
       steer(input: UserInput, id: string, expectedTurnId: string): Promise<string>
       interrupt(turnId: string): Promise<void>
@@ -39,7 +40,7 @@ export class CodexQueuedTurns {
     this.runner = new QueueRunner(
       queue,
       {
-        busy: () => this.busy,
+        busy: () => this.busy || backend.busy?.() === true,
         run: async (input, item) => {
           const active = this.#reserve(item, false)
           await this.#start(active, input)
@@ -65,7 +66,8 @@ export class CodexQueuedTurns {
   }
   async send(input: UserInput): Promise<void> {
     this.#requireOpen()
-    if (this.busy) throw new Error("A Codex turn is already running")
+    if (this.busy || this.backend.busy?.())
+      throw new Error("A Codex turn or recovery operation is already running")
     const ack = this.queue.submit(input)
     let admitted: UserInput
     try {
@@ -149,7 +151,8 @@ export class CodexQueuedTurns {
   }
   #reserve(item: InputItem, owned: boolean): Active {
     this.#requireOpen()
-    if (this.#active) throw new Error("A Codex turn is already running")
+    if (this.#active || this.backend.busy?.())
+      throw new Error("A Codex turn or recovery operation is already running")
     let resolve!: Active["resolve"]
     const done = new Promise<InputCompletion | Error>((accept) => {
       resolve = accept

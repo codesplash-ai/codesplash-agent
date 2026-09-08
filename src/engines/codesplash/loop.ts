@@ -48,6 +48,7 @@ import {
   type ToolCallBlock,
   type ToolContext,
   ToolInputError,
+  type ToolOutcome,
   type ToolResultBlock,
 } from "./contracts.ts"
 import { Guardian, type GuardianConfig } from "./guardian.ts"
@@ -137,6 +138,9 @@ export type DiffCollector = (cwd: string, paths: string[]) => Promise<string>
 export type ResolvedModel = { model: ModelInfo; provider: ProviderClient }
 
 export type CodesplashLoopOptions = {
+  onContextBoundary?: (kind: "before-compaction" | "compaction", messages: ChatMessage[]) => void
+  beforeMutation?: (label: string, signal: AbortSignal) => Promise<string | undefined>
+  afterMutation?: (id: string | undefined) => Promise<void>
   context?: ContextOptions
   outputStore?: ToolOutputStore
   cwd: string
@@ -218,6 +222,10 @@ type StreamResult =
     }
 
 export class CodesplashLoop {
+  readonly #recoveryHooks: Pick<
+    CodesplashLoopOptions,
+    "onContextBoundary" | "beforeMutation" | "afterMutation"
+  >
   readonly #cwd: string
   readonly #policy: SessionPolicy
   readonly #registry: ToolRegistry
@@ -262,6 +270,7 @@ export class CodesplashLoop {
   #compactionFailures = 0
 
   constructor(options: CodesplashLoopOptions) {
+    this.#recoveryHooks = options
     this.#contextOptions = options.context ?? {}
     this.#outputStore = options.outputStore ?? new ToolOutputStore()
     this.#cwd = options.cwd
@@ -340,6 +349,24 @@ export class CodesplashLoop {
     if (this.#abort) throw new Error("Cannot seed history while a turn is active")
     this.#history.length = 0
     this.#history.push(...messages)
+  }
+
+  selectHistory(messages: ChatMessage[]): void {
+    this.seedHistory(messages)
+    this.clearApprovalCache()
+    this.#historyRevision++
+    this.#turnStartIndex = 0
+    this.#contextTracker.reset()
+  }
+  usageSnapshot() {
+    return {
+      inputTokens: this.#usageTotals.inputTokens,
+      outputTokens: this.#usageTotals.outputTokens,
+      cachedInputTokens: this.#usageTotals.cachedInputTokens,
+      estimatedCostUsd: this.#usageTotals.costUsd,
+      embeddingInputTokens: this.#embeddingTokens,
+      hasUnpricedUsage: this.#hasUnpricedUsage,
+    }
   }
 
   /** The current history in the same array shape sent to providers, thinking blocks included. */
@@ -674,10 +701,12 @@ export class CodesplashLoop {
   /* --------------------------------- provider stream --------------------------------- */
 
   #replaceHistory(messages: ChatMessage[]): void {
+    this.#recoveryHooks.onContextBoundary?.("before-compaction", this.historySnapshot())
     this.#history.splice(0, this.#history.length, ...messages)
     this.#historyRevision++
     this.#turnStartIndex = 0
     this.#contextTracker.reset()
+    this.#recoveryHooks.onContextBoundary?.("compaction", this.historySnapshot())
   }
 
   #pruneHistory(): boolean {
@@ -1375,21 +1404,29 @@ export class CodesplashLoop {
             "Named secrets require the native sandbox runtime",
           )
       }
-      const outcome =
-        call.name === "skill" && this.#guardianRequest?.invokeSkill
-          ? {
-              text: await this.#guardianRequest.invokeSkill(
-                call.input,
-                this.#contextRunner(signal, mutated),
-                signal,
-              ),
-              label: "Skill instructions",
-            }
-          : call.name === READ_TOOL_OUTPUT
-            ? { text: await this.#outputStore.read(call.input), label: "Retained tool output" }
-            : this.#sandbox
-              ? await this.#sandbox.runTool(tool, call.input, this.#toolContext(signal))
-              : await tool.run(call.input, this.#toolContext(signal))
+      const checkpoint = !tool.isReadOnly(call.input)
+        ? await this.#recoveryHooks.beforeMutation?.(call.name, signal)
+        : undefined
+      let outcome: ToolOutcome
+      try {
+        outcome =
+          call.name === "skill" && this.#guardianRequest?.invokeSkill
+            ? {
+                text: await this.#guardianRequest.invokeSkill(
+                  call.input,
+                  this.#contextRunner(signal, mutated),
+                  signal,
+                ),
+                label: "Skill instructions",
+              }
+            : call.name === READ_TOOL_OUTPUT
+              ? { text: await this.#outputStore.read(call.input), label: "Retained tool output" }
+              : this.#sandbox
+                ? await this.#sandbox.runTool(tool, call.input, this.#toolContext(signal))
+                : await tool.run(call.input, this.#toolContext(signal))
+      } finally {
+        if (checkpoint) await this.#recoveryHooks.afterMutation?.(checkpoint)
+      }
       if (this.#sandbox?.sanitize) {
         // This hidden adapter returns validated numbers only. Redacting its private JSON
         // can turn vector coordinates into strings; its text is never logged or model-visible.

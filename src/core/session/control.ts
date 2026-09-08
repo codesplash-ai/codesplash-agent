@@ -95,6 +95,8 @@ export function updateControl(
   })
 }
 export interface SessionStateAccess {
+  readonly directory?: string
+  assertOwned?(): void
   readonly durable: boolean
   read(): ControlRecord
   update(expected: string, operation: string, change: (state: ControlState) => void): ControlRecord

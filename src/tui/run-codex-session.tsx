@@ -312,6 +312,7 @@ export async function runCodexSession(
           nativeTranscriptPath,
           sessionState,
           promptHistory,
+          flushSessionEvents: () => recorder?.flush() ?? Promise.resolve(),
           // Resume/reconnect: the engine continues the replayed cumulative usage so the /usage
           // overlay and recorded events never drop back toward zero after the next turn.
           initialUsage: isCodesplash ? usageSnapshotOf(initialState) : undefined,

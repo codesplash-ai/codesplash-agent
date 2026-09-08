@@ -106,6 +106,10 @@ async function main(): Promise<void> {
     new URL("../node_modules/@anthropic-ai/sandbox-runtime/LICENSE", import.meta.url),
   )
   await copyFile(upstream, join(runtimeAssets, "LICENSE"))
+  await copyFile(
+    join(projectRoot, "src", "core", "session", "secure-path.c"),
+    join(runtimeAssets, "restore.c"),
+  )
   if (process.platform === "linux") {
     const helper = join(runtimeAssets, "apply-seccomp")
     await copyFile(await verifiedSeccompHelper(), helper)
@@ -127,6 +131,7 @@ async function main(): Promise<void> {
     await run([process.execPath, "scripts/memory-smoke.ts", binaryPath])
     await run([process.execPath, "scripts/session-smoke.ts", binaryPath])
     await run([process.execPath, "scripts/queue-smoke.ts", binaryPath])
+    await run([process.execPath, "scripts/recovery-smoke.ts", binaryPath])
   }
 
   await Bun.write(join(outDirectory, "LICENSE"), Bun.file(join(projectRoot, "LICENSE")))

@@ -25,11 +25,14 @@ import type {
   TranscriptItem,
 } from "../core/index.ts"
 import { defaultSessionPolicy, isPermissionMode, suspendToShell } from "../core/index.ts"
+import type { BranchView } from "../core/session/branches.ts"
 import type { AcceptedPrompt, InputIntent, InputItem } from "../core/session/input-queue.ts"
+import { recoveryCommand } from "../core/session/recovery-command.ts"
 import { extractImageAttachments } from "./attachments.ts"
 import type { BrandPalette } from "./brand.ts"
 import { completeMentionDraft, trailingMention } from "./file-mentions.ts"
 import { InputPanel, inputDraftText } from "./input-panel.tsx"
+import { RecoveryPanel } from "./recovery-panel.tsx"
 
 export type CodexSessionAction = "home" | "reconnect" | "new" | "resume-picker" | "quit"
 
@@ -55,6 +58,19 @@ export type SlashCommandName =
   | "interject"
   | "prompt-history"
   | "stash"
+  | "acknowledge-fork"
+  | "gc-recovery"
+  | "tree"
+  | "fork"
+  | "rewind"
+  | "checkpoints"
+  | "checkpoint-diff"
+  | "restore"
+  | "recover-restore"
+  | "pin-branch"
+  | "pin-checkpoint"
+  | "prune-branches"
+  | "prune-checkpoints"
   | "quit"
 
 export type ParsedSlashCommand =
@@ -83,6 +99,19 @@ const slashCommandNames: readonly SlashCommandName[] = [
   "interject",
   "prompt-history",
   "stash",
+  "acknowledge-fork",
+  "gc-recovery",
+  "tree",
+  "fork",
+  "rewind",
+  "checkpoints",
+  "checkpoint-diff",
+  "restore",
+  "recover-restore",
+  "pin-branch",
+  "pin-checkpoint",
+  "prune-branches",
+  "prune-checkpoints",
   "quit",
 ]
 
@@ -140,6 +169,14 @@ export const slashCommandHelp: ReadonlyArray<{ command: string; description: str
   {
     command: "/stash [list|save NAME TEXT|apply ID|pop ID|drop ID]",
     description: "Explicit draft stashes; Ctrl+S saves the composer",
+  },
+  {
+    command: "/tree · /fork [NODE] · /rewind NODE",
+    description: "Preserved conversation branches; Esc-Esc backtracks",
+  },
+  {
+    command: "/checkpoints · /checkpoint-diff ID · /restore ID [PATH…]",
+    description: "Inspect eligible file snapshots and preview restore",
   },
   { command: "/help", description: "Toggle this overlay (also F1)" },
   { command: "/quit", description: "Quit the app" },
@@ -441,6 +478,7 @@ type PermissionsOverlayRules =
   | { phase: "ready"; rules: PermissionRuleView[]; selectedGrant: number; notice?: string }
 
 type OverlayState =
+  | { kind: "recovery"; tree: BranchView }
   | { kind: "input"; tab: "queue" | "history" | "stash" }
   | { kind: "help" }
   | { kind: "permissions"; rules?: PermissionsOverlayRules }
@@ -552,6 +590,7 @@ export function CodexSessionApp({
     }
   }, [])
 
+  const lastEscape = useRef(0)
   const restoreInput = useCallback(
     (prompt: AcceptedPrompt, mode: "edit" | "recall" | "pop", revision: string) => {
       const queue = controller.inputQueue
@@ -804,6 +843,31 @@ export function CodexSessionApp({
         case "compact":
           void runCommand(() => controller.compact(command.argument))
           return
+        case "tree":
+          void runCommand(async () => {
+            const result = await controller.sessionRecovery({ action: "tree" })
+            setOverlay({ kind: "recovery", tree: result.data as BranchView })
+          })
+          return
+        case "acknowledge-fork":
+        case "gc-recovery":
+        case "fork":
+        case "rewind":
+        case "checkpoints":
+        case "checkpoint-diff":
+        case "restore":
+        case "recover-restore":
+        case "pin-branch":
+        case "pin-checkpoint":
+        case "prune-branches":
+        case "prune-checkpoints":
+          void runCommand(async () => {
+            const result = await controller.sessionRecovery(
+              recoveryCommand(command.name, command.argument ?? ""),
+            )
+            setOverlay({ kind: "resources", title: result.title, text: JSON.stringify(result.data, null, 2) })
+          })
+          return
         case "queue":
         case "prompt-history":
           if (!controller.inputQueue) {
@@ -1038,6 +1102,19 @@ export function CodexSessionApp({
       return
     }
 
+    if (key.name === "escape" && !state.pendingRequest && state.turnStatus !== "running") {
+      key.preventDefault()
+      const now = Date.now()
+      if (now - lastEscape.current < 600) {
+        lastEscape.current = 0
+        void runCommand(async () => {
+          const result = await controller.sessionRecovery({ action: "tree" })
+          setOverlay({ kind: "recovery", tree: result.data as BranchView })
+        })
+      } else lastEscape.current = now
+      return
+    }
+
     if (key.ctrl && key.name === "r" && reconnectPending) {
       key.preventDefault()
       onAction("reconnect")
@@ -1264,6 +1341,15 @@ export function CodexSessionApp({
         state={state}
         permissions={permissions}
       />
+      {overlay?.kind === "recovery" ? (
+        <RecoveryPanel
+          controller={controller}
+          initial={overlay.tree}
+          palette={palette}
+          onClose={() => setOverlay(undefined)}
+          onDraft={(prompt, revision) => restoreInput(prompt, "recall", revision)}
+        />
+      ) : null}
       {editingInput ? (
         <text fg={palette.accent}>Editing queued input · Enter saves · Esc keeps this draft</text>
       ) : null}
@@ -1302,7 +1388,7 @@ function SessionOverlay({
   state: AppViewState
   permissions?: SessionPermissionsUi
 }) {
-  if (!overlay || overlay.kind === "input") return null
+  if (!overlay || overlay.kind === "input" || overlay.kind === "recovery") return null
 
   const frame = {
     position: "absolute" as const,

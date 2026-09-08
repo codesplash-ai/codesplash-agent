@@ -326,6 +326,60 @@ describe("CodesplashDriver sessions", () => {
     await done
   })
 
+  test("native rewind selects exact context and subsequent turns preserve the displaced branch", async () => {
+    process.env.ANTHROPIC_API_KEY = ANTHROPIC_KEY_VALUE
+    const provider = fakeProvider(
+      "anthropic",
+      ["first response", "abandoned response", "alternate response"].map((text) => [
+        { type: "text_delta" as const, text },
+        { type: "done" as const, stopReason: "end_turn" as const },
+      ]),
+    )
+    const session = await new CodesplashDriver({
+      providers: { anthropic: provider },
+      permissions: fakePermissions(),
+    }).openSession({ cwd, localSessionId: "rewind-native" })
+    const { done } = collectEvents(session)
+    try {
+      await session.send({ text: "first prompt" })
+      await until(
+        () => (session.inputQueue?.snapshot().items[0]?.status === "completed" ? true : undefined),
+        "first completion",
+      )
+      const first = (await session.sessionRecovery?.({ action: "tree" }))
+        ?.data as import("../../../src/core/session/branches.ts").BranchView
+      await session.send({ text: "abandoned prompt" })
+      await until(
+        () => (session.inputQueue?.snapshot().items[1]?.status === "completed" ? true : undefined),
+        "second completion",
+      )
+      const preview = (await session.sessionRecovery?.({ action: "rewind", node: first.head as string }))
+        ?.data as { revision: string }
+      await session.sessionRecovery?.({
+        action: "rewind",
+        node: first.head as string,
+        revision: preview.revision,
+        apply: true,
+      })
+      await session.send({ text: "alternate prompt" })
+      await until(
+        () => (session.inputQueue?.snapshot().items[2]?.status === "completed" ? true : undefined),
+        "alternate completion",
+      )
+      expect(JSON.stringify(provider.requests[2]?.messages)).toContain("first prompt")
+      expect(JSON.stringify(provider.requests[2]?.messages)).not.toContain("abandoned prompt")
+      const after = (await session.sessionRecovery?.({ action: "tree" }))
+        ?.data as import("../../../src/core/session/branches.ts").BranchView
+      expect(after.nodes).toHaveLength(4)
+      expect(after.nodes.at(-1)?.parent).toBe(first.head)
+      expect(after.durable).toBe(false)
+      expect(session.inputQueue?.snapshot().paused).toBe(true)
+    } finally {
+      await session.close()
+      await done
+    }
+  })
+
   test("send drives a full text turn through the loop with monotonic sequences", async () => {
     process.env.ANTHROPIC_API_KEY = ANTHROPIC_KEY_VALUE
     const provider = fakeProvider("anthropic", [

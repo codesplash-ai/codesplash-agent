@@ -67,6 +67,9 @@ export class NativeSandbox implements SandboxRuntime {
     if (!this.#grants.some((g) => JSON.stringify(g) === JSON.stringify(grant))) this.#grants.push(grant)
     this.#log.record("grant", this.profile.hash, grant.resource)
   }
+  resetGrants(): void {
+    this.#grants.length = 0
+  }
   endTurn(): void {
     for (let i = this.#grants.length - 1; i >= 0; i--)
       if (this.#grants[i]?.scope === "turn") this.#grants.splice(i, 1)

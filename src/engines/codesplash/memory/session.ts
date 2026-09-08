@@ -31,6 +31,12 @@ export class MemorySession {
   #identity: MemoryIdentity | undefined
   #selected: { revision: string; mode: string; records: MemoryRecord[] } | undefined
   readonly notes = new Map<string, string>()
+  #selectedBranchNotes = false
+  selectBranchNotes(notes: Record<string, string>): void {
+    this.#selectedBranchNotes = true
+    this.notes.clear()
+    for (const [id, text] of Object.entries(notes)) this.notes.set(id, text)
+  }
   lastSearch: MemorySearch = { mode: "lexical", records: [] }
   constructor(readonly options: MemoryOptions) {
     const sanitize = options.sanitize
@@ -82,7 +88,7 @@ export class MemorySession {
     }
   }
   async restoreNotes(signal: AbortSignal): Promise<void> {
-    if (!this.available) return
+    if (!this.available || this.#selectedBranchNotes) return
     const snapshot = (await this.store(signal))?.snapshot()
     if (this.options.writable()) this.notes.clear()
     for (const record of snapshot?.records ?? []) {

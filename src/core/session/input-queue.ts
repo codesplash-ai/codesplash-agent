@@ -316,6 +316,9 @@ export class InputQueue {
     })
   }
   pause(revision = this.snapshot().revision): InputQueueSnapshot {
+    const before = this.snapshot()
+    if (before.revision !== revision) throw new Error("Session changed; reload before pausing")
+    if (before.paused && !before.reviewedForResume) return before
     return this.#update(revision, "pause", (data) => {
       data.paused = true
       data.reviewedForResume = false

@@ -116,6 +116,7 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<number> 
       nativeTranscriptPath: options.nativeTranscriptPath,
       sessionState: options.sessionState,
       resumeQueuedInput: false,
+      flushSessionEvents: () => options.recorder?.flush() ?? Promise.resolve(),
       promptHistory: options.promptHistory,
       firstSequence: options.firstSequence,
       initialUsage: options.initialUsage,

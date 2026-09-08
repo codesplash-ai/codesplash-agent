@@ -97,6 +97,81 @@ describe("CodexDriver", () => {
     }
   })
 
+  test("rewind forks a completed provider boundary and preserves the old branch", async () => {
+    const session = await openSession("thread-existing")
+    try {
+      const tree = await session.sessionRecovery?.({ action: "tree" })
+      const head = (tree?.data as { head: string }).head
+      const preview = await session.sessionRecovery?.({ action: "rewind", node: head })
+      expect(session.nativeSessionId).toBe("thread-existing")
+      await session.sessionRecovery?.({
+        action: "rewind",
+        node: head,
+        apply: true,
+        revision: (preview?.data as { revision: string }).revision,
+      })
+      expect(session.nativeSessionId).toBe("fork-thread-existing")
+      const result = await session.sessionRecovery?.({ action: "tree" })
+      expect((result?.data as { nodes: unknown[] }).nodes).toHaveLength(2)
+      expect(session.inputQueue?.snapshot().paused).toBe(true)
+    } finally {
+      await session.close()
+    }
+  })
+
+  test("a rejected provider fork preserves the selected thread and requires explicit receipt review", async () => {
+    const session = await openSession("thread-unsupported")
+    try {
+      const before = (await session.sessionRecovery?.({ action: "tree" }))
+        ?.data as import("../../../src/core/session/branches.ts").BranchView
+      const preview = (await session.sessionRecovery?.({ action: "rewind", node: before.head as string }))
+        ?.data as { revision: string }
+      await expect(
+        session.sessionRecovery?.({
+          action: "rewind",
+          node: before.head as string,
+          revision: preview.revision,
+          apply: true,
+        }),
+      ).rejects.toThrow("unsupported")
+      const after = (await session.sessionRecovery?.({ action: "tree" }))
+        ?.data as import("../../../src/core/session/branches.ts").BranchView
+      expect(after.head).toBe(before.head)
+      expect(session.nativeSessionId).toBe("thread-unsupported")
+      expect(after.providerFork?.threadId).toBeUndefined()
+      await expect(session.sessionRecovery?.({ action: "fork" })).rejects.toThrow("requires review")
+      const current = (await session.sessionRecovery?.({ action: "tree" }))
+        ?.data as import("../../../src/core/session/branches.ts").BranchView
+      await session.sessionRecovery?.({
+        action: "acknowledge-fork",
+        id: current.providerFork?.id as string,
+        revision: current.revision,
+      })
+      expect(
+        (
+          (await session.sessionRecovery?.({ action: "tree" }))
+            ?.data as import("../../../src/core/session/branches.ts").BranchView
+        ).providerFork,
+      ).toBeUndefined()
+    } finally {
+      await session.close()
+    }
+  })
+
+  test("an empty provider base cannot accidentally fork later turns", async () => {
+    const session = await openSession()
+    try {
+      const tree = (await session.sessionRecovery?.({ action: "tree" }))
+        ?.data as import("../../../src/core/session/branches.ts").BranchView
+      expect(tree.nodes[0]?.threadId).toBeUndefined()
+      await expect(session.sessionRecovery?.({ action: "fork", node: tree.head })).rejects.toThrow(
+        "completed provider boundary",
+      )
+    } finally {
+      await session.close()
+    }
+  })
+
   test("resumes a provider-native thread", async () => {
     const session = await openSession("thread-existing")
     try {

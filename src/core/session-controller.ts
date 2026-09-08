@@ -139,6 +139,12 @@ export class SessionController {
     return this.#session.createSkill(name, write)
   }
 
+  async sessionRecovery(request: import("./session/recovery-contract.ts").RecoveryRequest) {
+    if (this.#closed || !this.#session.sessionRecovery)
+      throw new Error("Session recovery is unavailable for this engine")
+    return this.#session.sessionRecovery(request)
+  }
+
   async inspectContext(): Promise<ContextInspection> {
     if (this.#closed) throw new Error("Session is closed")
     if (!this.#session.inspectContext) throw new Error("This engine does not support context inspection")

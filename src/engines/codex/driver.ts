@@ -1,3 +1,4 @@
+import type { SessionUsageSnapshot } from "../../core/engine.ts"
 import {
   type AgentEvent,
   type AgentEventInput,
@@ -13,7 +14,11 @@ import {
   type OpenSessionOptions,
   redactSensitiveText,
 } from "../../core/index.ts"
+import { BranchStore } from "../../core/session/branches.ts"
+import { MemorySessionState } from "../../core/session/control.ts"
+import { forkLocalSession } from "../../core/session/fork.ts"
 import { type InputIntent, InputQueue } from "../../core/session/input-queue.ts"
+import type { RecoveryRequest, RecoveryResult } from "../../core/session/recovery-contract.ts"
 import {
   CodexAppServerClient,
   codexVersionCompatibility,
@@ -23,6 +28,8 @@ import {
 import type { CodexAppServerProcessOptions } from "./app-server-process.ts"
 import type { CommandExecutionRequestApprovalParams } from "./generated/v2/CommandExecutionRequestApprovalParams.ts"
 import type { FileChangeRequestApprovalParams } from "./generated/v2/FileChangeRequestApprovalParams.ts"
+import type { ThreadForkParams } from "./generated/v2/ThreadForkParams.ts"
+import type { ThreadForkResponse } from "./generated/v2/ThreadForkResponse.ts"
 import type { ThreadResumeParams } from "./generated/v2/ThreadResumeParams.ts"
 import type { ThreadResumeResponse } from "./generated/v2/ThreadResumeResponse.ts"
 import type { ThreadStartParams } from "./generated/v2/ThreadStartParams.ts"
@@ -130,6 +137,12 @@ class CodexSession implements EngineSession {
   readonly events: AsyncIterable<AgentEvent>
   readonly #eventQueue = new AsyncQueue<AgentEvent>()
   readonly inputQueue: InputQueue
+  readonly #branches: BranchStore
+  #recoveryBusy = false
+  #eventStart = 0
+  #lastPromptId: string | undefined
+  #lastPrompt = "Provider turn"
+  #usage: SessionUsageSnapshot = {}
   readonly #turns: CodexQueuedTurns
   readonly #normalizer: CodexEventNormalizer
   readonly #pendingRequests = new Map<string, PendingServerRequest>()
@@ -146,12 +159,15 @@ class CodexSession implements EngineSession {
   ) {
     this.events = this.#eventQueue
     this.#normalizer = new CodexEventNormalizer(options.localSessionId, options.firstSequence ?? 0)
+    const state = options.sessionState ?? new MemorySessionState()
+    this.#branches = new BranchStore(state)
     this.inputQueue = new InputQueue({
-      state: options.sessionState,
+      state,
       cwd: options.cwd,
       ...options.promptHistory,
     })
     this.#turns = new CodexQueuedTurns(this.inputQueue, {
+      busy: () => this.#recoveryBusy,
       start: (input, id) => this.#start(input, id),
       steer: async (input, id, expectedTurnId) => {
         const params: TurnSteerParams = {
@@ -183,6 +199,37 @@ class CodexSession implements EngineSession {
       if (this.#threadId && notificationThreadId && notificationThreadId !== this.#threadId) return
 
       for (const event of this.#normalizer.normalize(notification)) {
+        if (event.kind === "usage.updated")
+          this.#usage = Object.fromEntries(
+            Object.entries({
+              inputTokens: event.payload.inputTokens,
+              outputTokens: event.payload.outputTokens,
+              cachedInputTokens: event.payload.cachedInputTokens,
+            }).filter(([, value]) => value !== undefined),
+          )
+        if (
+          event.kind === "turn.completed" &&
+          event.native?.turnId &&
+          event.payload.status === "completed" &&
+          !this.#branches
+            .view()
+            .nodes.some((node) => node.threadId === this.#threadId && node.turnId === event.native?.turnId)
+        ) {
+          try {
+            this.#branches.capture({
+              kind: "turn",
+              label: this.#lastPrompt.slice(0, 200),
+              promptId: this.#lastPromptId,
+              threadId: this.#threadId,
+              turnId: event.native.turnId,
+              eventSequence: event.sequence,
+              eventStart: this.#eventStart,
+              usage: this.#usage,
+            })
+          } catch (error) {
+            this.#turns.runner.halt(error)
+          }
+        }
         if (event.kind === "turn.started" && event.native?.turnId) {
           this.#turnId = event.native.turnId
           this.#turns.started(event.native.turnId)
@@ -294,8 +341,9 @@ class CodexSession implements EngineSession {
     }
 
     let resumedThread: ThreadResumeResponse["thread"] | undefined
-    if (this.options.nativeSessionId) {
-      const params: ThreadResumeParams = { threadId: this.options.nativeSessionId, ...common }
+    const selectedThread = this.#branches.view().activeThreadId ?? this.options.nativeSessionId
+    if (selectedThread) {
+      const params: ThreadResumeParams = { threadId: selectedThread, ...common }
       const response = await this.client.process.connection.request<ThreadResumeResponse>(
         "thread/resume",
         params,
@@ -326,6 +374,23 @@ class CodexSession implements EngineSession {
     )
 
     if (resumedThread) this.#reconcileResumedTurns(resumedThread)
+    if (!this.#branches.view().head) {
+      const turns = resumedThread?.turns ?? [],
+        lastCompleted = turns.findLastIndex((turn) => turn.status === "completed")
+      this.#branches.capture({
+        kind: "base",
+        label:
+          lastCompleted < 0
+            ? "No completed provider boundary retained"
+            : "Provider history when recovery opened",
+        threadId: lastCompleted < 0 ? undefined : this.#threadId,
+        turnId: turns[lastCompleted]?.id,
+        evidenceTurnIds: turns.slice(0, lastCompleted + 1).map((turn) => turn.id),
+        eventSequence: this.#normalizer.nextSequence - 1,
+        eventStart: 0,
+        usage: {},
+      })
+    }
     if (this.options.resumeQueuedInput === false) this.inputQueue.pause()
     this.#turns.runner.wake()
   }
@@ -382,7 +447,8 @@ class CodexSession implements EngineSession {
   /** Applies to the next `turn/start`, which Codex carries forward to subsequent turns. */
   async setModel(model: string): Promise<void> {
     this.#requireThread()
-    if (this.#turns.busy) throw new Error("Wait for the current turn before switching models")
+    if (this.#turns.busy || this.#recoveryBusy)
+      throw new Error("Wait for the current turn before switching models")
 
     this.#modelOverride = model
     this.#model = model
@@ -403,6 +469,7 @@ class CodexSession implements EngineSession {
 
   async send(input: CoreUserInput): Promise<void> {
     this.#requireThread()
+    if (this.#recoveryBusy) throw new Error("Wait for session recovery to settle")
     await this.#turns.send(input)
   }
 
@@ -420,6 +487,9 @@ class CodexSession implements EngineSession {
 
   async #start(input: CoreUserInput, id: string): Promise<string> {
     const threadId = this.#requireThread()
+    this.#eventStart = this.#normalizer.nextSequence
+    this.#lastPrompt = input.text
+    this.#lastPromptId = id
     this.#userMessage(input, id)
     const params: TurnStartParams = {
       threadId,
@@ -431,6 +501,93 @@ class CodexSession implements EngineSession {
     const response = await this.client.process.connection.request<TurnStartResponse>("turn/start", params)
     this.#modelOverride = undefined
     return response.turn.id
+  }
+
+  async sessionRecovery(request: RecoveryRequest): Promise<RecoveryResult> {
+    this.#requireThread()
+    if (request.action === "tree") return { title: "Provider branch tree", data: this.#branches.view() }
+    if (request.action === "acknowledge-fork") {
+      if (this.#turns.busy || this.#recoveryBusy) throw new Error("Wait for the current operation")
+      this.#branches.acknowledgeProviderFork(request.id, request.revision)
+      return {
+        title: "Fork uncertainty acknowledged; any remote thread remains with Codex",
+        data: this.#branches.view(),
+      }
+    }
+    if (request.action !== "fork" && request.action !== "rewind")
+      throw new Error("Codex supports conversation fork/rewind here; native file checkpoints are unavailable")
+    if (this.#turns.busy || this.#recoveryBusy) throw new Error("Wait for the current turn before branching")
+    this.#recoveryBusy = true
+    try {
+      this.inputQueue.pause()
+      const node = this.#branches.node(request.node),
+        view = this.#branches.view()
+      if (!node.threadId || !node.turnId)
+        throw new Error("No completed provider boundary is available; select a completed turn from the tree")
+      if (request.action === "rewind" && !request.apply)
+        return {
+          title: "Provider rewind preview",
+          data: {
+            node,
+            revision: view.revision,
+            files: "unchanged",
+            mechanism: "Fork the completed boundary into a new provider thread; preserve the old thread",
+          },
+        }
+      if (request.action === "rewind" && request.revision !== view.revision)
+        throw new Error("Apply requires the current reviewed branch revision")
+      if (!node.threadId) throw new Error("Provider history is unavailable at this boundary")
+      await this.options.flushSessionEvents?.()
+      const pendingFork = view.providerFork
+      if (pendingFork)
+        throw new Error(
+          `Previous fork ${pendingFork.id} requires review; ${pendingFork.threadId ? `provider thread ${pendingFork.threadId} was created` : "the provider may have created a thread"}. Inspect /tree, then /acknowledge-fork ID --apply --revision REV before another attempt.`,
+        )
+      const receipt = this.#branches.beginProviderFork(node.id, request.action)
+      const params: ThreadForkParams = {
+        threadId: node.threadId,
+        lastTurnId: node.turnId,
+        cwd: this.options.cwd,
+        model: this.#model,
+        sandbox: this.options.policy?.sandbox ?? defaultSessionPolicy.sandbox,
+        approvalPolicy: this.options.policy?.approvalPolicy ?? defaultSessionPolicy.approvalPolicy,
+        approvalsReviewer: "user",
+      }
+      const response = await this.client.process.connection.request<ThreadForkResponse>("thread/fork", params)
+      if (!response.thread?.id)
+        throw new Error("Codex returned no forked thread identity; inspect the pending fork receipt")
+      this.#branches.providerForkResponse(receipt, response.thread.id)
+      if (request.action === "fork") {
+        const fork = await forkLocalSession(this.#branches, node.id, response.thread.id)
+        this.#branches.acknowledgeProviderFork(receipt, this.#branches.view().revision)
+        return { title: "Independent Codex fork created", data: fork, fork }
+      }
+      this.#branches.capture({
+        kind: "fork",
+        label: `Rewind: ${node.label}`.slice(0, 200),
+        parent: node.id,
+        threadId: response.thread.id,
+        turnId: node.turnId,
+        eventSequence: this.#normalizer.nextSequence - 1,
+        eventStart: this.#normalizer.nextSequence,
+        usage: this.#usage,
+        activateThread: true,
+      })
+      this.#threadId = response.thread.id
+      this.#branches.acknowledgeProviderFork(receipt, this.#branches.view().revision)
+      this.#eventQueue.push(
+        this.#normalizer.event(
+          "thread/selected",
+          undefined,
+          { threadId: this.#threadId },
+          { kind: "session.status", payload: { status: "ready", model: this.#model } },
+        ),
+      )
+      return { title: "Provider branch selected", data: this.#branches.view() }
+    } finally {
+      this.#recoveryBusy = false
+      this.#turns.runner.wake()
+    }
   }
 
   async resolveRequest(requestId: string, decision: EngineDecision): Promise<void> {

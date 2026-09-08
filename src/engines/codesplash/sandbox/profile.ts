@@ -57,6 +57,7 @@ export function createProfile(
   cwd: string,
   mode: SandboxMode,
   config: NativeSandboxConfig = {},
+  recoveryPaths: readonly string[] = [],
 ): SandboxProfile {
   cwd = physicalPath(cwd)
   const home = physicalPath(homedir())
@@ -81,6 +82,10 @@ export function createProfile(
     if (existsSync(common))
       protectedPaths.push(physicalPath(resolve(gitdir, readFileSync(common, "utf8").trim())))
   }
+  for (const value of recoveryPaths) {
+    const path = absoluteRoot(value)
+    if (!protectedPaths.some((root) => contains(root, path))) protectedPaths.push(path)
+  }
   const readRoots = unique([cwd, ...(config.readRoots ?? []).map(absoluteRoot)])
   const writeRoots = unique([
     ...(mode === "workspace-write" ? [cwd] : []),
@@ -98,6 +103,17 @@ export function createProfile(
       [
         configDirectory(),
         dataDirectory(),
+        ...recoveryPaths.filter(
+          (path) =>
+            ![
+              configDirectory(),
+              dataDirectory(),
+              join(home, ".ssh"),
+              join(home, ".aws"),
+              join(home, ".codex"),
+              join(home, ".claude"),
+            ].some((root) => contains(physicalPath(root), physicalPath(path))),
+        ),
         join(home, ".ssh"),
         join(home, ".aws"),
         join(home, ".codex"),

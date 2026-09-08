@@ -130,8 +130,17 @@ function readSessionMetaSync(directory: string, recoverPrepared = false): Sessio
       )
     resolved = prepared
   }
+  const selectedThread = (state.values.branches as { activeThreadId?: unknown } | undefined)?.activeThreadId
+  if (
+    selectedThread !== undefined &&
+    (typeof selectedThread !== "string" || !selectedThread || selectedThread.length > 256)
+  )
+    throw new Error("Invalid selected provider thread")
   return {
     ...resolved,
+    ...(resolved.engine === "codex" && typeof selectedThread === "string"
+      ? { nativeSessionId: selectedThread }
+      : {}),
     ...(state.title === undefined ? {} : { title: state.title }),
     ...(state.archived === undefined ? {} : { archived: state.archived }),
     ...(state.section === undefined ? {} : { section: state.section }),
@@ -235,6 +244,9 @@ export class SessionHandle {
   #writes: Promise<void> = Promise.resolve()
   readonly state: SessionStateAccess = {
     durable: true,
+    assertOwned: () => {
+      if (!this.#release) throw new Error("Session recovery assets require the writer lease")
+    },
     read: () => control(this.directory),
     update: (expected, operation, change) => {
       if (!this.#release) throw new Error("Session state requires its writer lease")
@@ -270,6 +282,7 @@ export class SessionHandle {
   ) {
     this.#meta = meta
     this.#validByteLength = validByteLength
+    Object.defineProperty(this.state, "directory", { value: directory, enumerable: true })
   }
 
   get meta(): SessionMeta {

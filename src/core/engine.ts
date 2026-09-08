@@ -62,6 +62,7 @@ export type OpenSessionOptions = {
   promptHistory?: import("./session/prompt-history.ts").PromptHistory
   /** Single-prompt headless callers hold previously queued work for interactive review. */
   resumeQueuedInput?: boolean
+  flushSessionEvents?: () => Promise<void>
   cwd: string
   localSessionId: string
   nativeSessionId?: string
@@ -139,6 +140,9 @@ export interface EngineSession {
   readonly capabilities: EngineCapabilities
   readonly events: AsyncIterable<AgentEvent>
   readonly inputQueue?: InputQueue
+  sessionRecovery?(
+    request: import("./session/recovery-contract.ts").RecoveryRequest,
+  ): Promise<import("./session/recovery-contract.ts").RecoveryResult>
   submit?(input: UserInput, intent?: InputIntent, submissionId?: string): Promise<InputAcknowledgment>
   send(input: UserInput): Promise<void>
   resolveRequest(requestId: string, decision: EngineDecision): Promise<void>

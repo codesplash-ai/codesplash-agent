@@ -25,6 +25,10 @@ export class CodexEventNormalizer {
     this.#sequence = startSequence
   }
 
+  get nextSequence(): number {
+    return this.#sequence
+  }
+
   normalize(notification: JsonRpcNotification): AgentEvent[] {
     const raw = notification.params
 
