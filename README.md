@@ -153,6 +153,32 @@ pending inputs wait for review; possibly executing inputs require an explicit re
 Single-prompt headless runs hold previous queued work. History clearing affects recall; independent
 conversation records and older recovery revisions remain until session deletion.
 
+### Branches and file recovery
+
+`/tree` or Esc-Esc opens retained conversation boundaries. Enter previews a rewind; R applies the
+reviewed selection. F creates an independent fork; `/resume` selects it. D recalls the selected
+turn's retained typed prompt into an empty composer without sending it. Native compaction retains
+exact earlier context. Codex uses completed provider boundaries; Claude keeps its own controls.
+
+```sh
+codesplash session tree <id>
+codesplash session fork <id> <node> --apply
+codesplash session rewind <id> <node>
+codesplash session rewind <id> <node> --apply --revision <reviewed-revision>
+codesplash session checkpoints <id>
+codesplash session checkpoint-diff <id> <checkpoint>
+codesplash session restore <id> <checkpoint> "selected file.txt"
+codesplash session restore <id> <checkpoint> "selected file.txt" --apply --revision <reviewed-revision>
+codesplash session recover-restore <id> finish --apply   # or rollback
+```
+
+The same recovery actions are live slash commands. File snapshots require Git, recorded history,
+a trusted writable workspace and current permissions. Preview reports exclusions and conflicts;
+restore preserves newer external edits. Conversation rewind leaves files alone. Interrupted file
+restore pauses work until explicit finish/rollback. Pins (`pin-branch`, `pin-checkpoint`) and
+`prune-branches` / `prune-checkpoints` use `--apply --revision`; `gc-recovery` collects orphan assets.
+Only abandoned, unpinned history can be pruned. At the 1,000-boundary cap, fork into a new session.
+
 ### Find and organize sessions
 
 ```sh
