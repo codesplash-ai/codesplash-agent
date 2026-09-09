@@ -34,7 +34,8 @@ export type HeadlessOutputFormat = "text" | "json" | "stream-json"
 export type HeadlessSink = { write(chunk: string): unknown }
 
 /** Recorder surface the runner needs; a real SessionRecorder satisfies it, and so do test fakes. */
-export type HeadlessRecorder = Pick<SessionRecorder, "record" | "recordNativeSessionId" | "flush">
+export type HeadlessRecorder = Pick<SessionRecorder, "record" | "recordNativeSessionId" | "flush"> &
+  Partial<Pick<SessionRecorder, "failure">>
 
 /** Upper bound on turns per run; the single-prompt cut always ends after turn 1. */
 export const DEFAULT_MAX_TURNS = 40
@@ -116,11 +117,15 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<number> 
       nativeTranscriptPath: options.nativeTranscriptPath,
       sessionState: options.sessionState,
       resumeQueuedInput: false,
-      flushSessionEvents: () => options.recorder?.flush() ?? Promise.resolve(),
+      flushSessionEvents: async () => {
+        await options.recorder?.flush()
+        if (options.recorder?.failure) throw options.recorder.failure
+      },
       promptHistory: options.promptHistory,
       firstSequence: options.firstSequence,
       initialUsage: options.initialUsage,
       workspaceTrusted,
+      trustDataDirectory: options.trustDataDir,
       permissionOverrides: options.permissionOverrides,
       permissionGrantsPath: options.permissionGrantsPath,
     })

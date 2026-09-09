@@ -37,6 +37,7 @@ export type InputItem = AcceptedPrompt & {
   updated: string
   issue?: string
   recovered?: boolean
+  requiresEdit?: boolean
   boundary?: "new-turn" | "within-turn"
 }
 export type DraftStash = AcceptedPrompt & { name: string }
@@ -164,6 +165,7 @@ export class InputQueue {
         !validDate(item.updated) ||
         (item.issue !== undefined && typeof item.issue !== "string") ||
         (item.recovered !== undefined && typeof item.recovered !== "boolean") ||
+        (item.requiresEdit !== undefined && typeof item.requiresEdit !== "boolean") ||
         (item.boundary !== undefined && !["new-turn", "within-turn"].includes(item.boundary))
       )
         throw new Error("Corrupt queued input")
@@ -186,7 +188,7 @@ export class InputQueue {
     const history = [
       ...new Map([...(this.options.history ?? []), ...data.history].map((item) => [item.id, item])).values(),
     ]
-      .filter((item) => !cleared || item.created > cleared)
+      .filter((item) => item.cwd === this.options.cwd && (!cleared || item.created > cleared))
       .sort((a, b) => b.created.localeCompare(a.created))
       .slice(0, 100)
     return { ...structuredClone(data), history: structuredClone(history), revision: record.revision }
@@ -266,6 +268,7 @@ export class InputQueue {
           status: "queued",
           issue: undefined,
           recovered: false,
+          requiresEdit: false,
           updated: new Date().toISOString(),
           ...(intent ? { intent } : {}),
         })
@@ -304,6 +307,8 @@ export class InputQueue {
   retry(id: string, revision: string, acknowledgeUncertain = false): InputQueueSnapshot {
     return this.#update(revision, "retry", (data) => {
       const item = this.#item(data, id)
+      if (item.requiresEdit || item.cwd !== this.options.cwd)
+        throw new Error("Working directory changed; edit this input and reattach files before retrying")
       if (item.status === "execution-uncertain" && !acknowledgeUncertain)
         throw new Error("Retry may repeat external effects; explicitly acknowledge uncertain execution")
       if (!["blocked", "failed", "cancelled", "execution-uncertain"].includes(item.status))
@@ -332,6 +337,7 @@ export class InputQueue {
         if (
           item.status === "blocked" &&
           item.recovered &&
+          !item.requiresEdit &&
           !item.redacted &&
           item.references.every((ref) => ref.kind !== "inline-image")
         ) {
@@ -348,6 +354,21 @@ export class InputQueue {
     })
     this.#pruneRaw()
     return result
+  }
+  holdForDirectoryChange(): void {
+    this.#update(this.snapshot().revision, "directory-review", (data) => {
+      data.paused = true
+      data.reviewedForResume = false
+      for (const item of data.items) {
+        item.requiresEdit = true
+        if (item.status === "queued" || item.status === "blocked") {
+          item.status = "blocked"
+          item.recovered = false
+          item.issue = "Working directory changed; edit this input and reattach files before use"
+        }
+      }
+    })
+    this.#raw.clear()
   }
   clearHistory(revision: string): InputQueueSnapshot {
     const result = this.#update(revision, "clear-history", (data) => {

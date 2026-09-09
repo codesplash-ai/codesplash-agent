@@ -54,7 +54,7 @@ test("branch guards refuse incomplete exchanges, stale head switches and pruning
 })
 
 test("durable forks publish independent context/evidence without copying billable usage or grants", async () => {
-  const { mkdtempSync, rmSync, writeFileSync, existsSync } = await import("node:fs")
+  const { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, readFileSync } = await import("node:fs")
   const { tmpdir } = await import("node:os")
   const { join } = await import("node:path")
   const { SessionStore, readSessionEvents } = await import("../../src/core/sessions.ts")
@@ -84,6 +84,10 @@ test("durable forks publish independent context/evidence without copying billabl
     )
     await handle.appendEventLines([JSON.stringify(event), JSON.stringify(usage)])
     writeFileSync(join(handle.directory, "sandbox-profile.json"), "source policy")
+    mkdirSync(join(handle.directory, "tool-outputs"))
+    const outputId = crypto.randomUUID(),
+      output = "retained output".repeat(100000)
+    writeFileSync(join(handle.directory, "tool-outputs", outputId), output)
     const branches = new BranchStore(handle.state)
     const node = branches.capture({
       ...metadata,
@@ -105,6 +109,7 @@ test("durable forks publish independent context/evidence without copying billabl
     expect(replay.events.map((event) => event.kind)).toEqual(["user.message"])
     expect(replay.events[0]?.localSessionId).toBe(fork.localSessionId)
     expect(existsSync(join(child.directory, "sandbox-profile.json"))).toBe(false)
+    expect(readFileSync(join(child.directory, "tool-outputs", outputId), "utf8")).toBe(output)
     child.acquire()
     graph.capture({ ...metadata, messages: messages("independent child") })
     child.release()

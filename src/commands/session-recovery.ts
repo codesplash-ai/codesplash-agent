@@ -4,6 +4,7 @@ import { BranchStore } from "../core/session/branches.ts"
 import { InputQueue } from "../core/session/input-queue.ts"
 import type { RecoveryRequest, RecoveryResult } from "../core/session/recovery-contract.ts"
 import type { SessionRepository } from "../core/session/repository.ts"
+import { directoryScope } from "../core/session/working-directory.ts"
 import { SessionController } from "../core/session-controller.ts"
 import { SessionRecorder } from "../core/session-recorder.ts"
 import { readSessionEvents, type SessionMeta, SessionStore } from "../core/sessions.ts"
@@ -84,6 +85,7 @@ export async function sessionRecoveryCommand(
       handle.state,
       {
         cwd,
+        scope: directoryScope(handle.state.read().state),
         trusted: () => trusted,
         writable: () => profile.mode === "workspace-write" && permissions.mode !== "plan",
         readable: (path) =>

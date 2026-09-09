@@ -18,10 +18,12 @@ export type BranchNode = {
   eventSequence: number
   eventStart?: number
   usage: SessionUsageSnapshot
+  inheritedUsage?: SessionUsageSnapshot
   notes?: Record<string, string>
   checkpoint?: string
   promptId?: string
   evidenceTurnIds?: string[]
+  cwd?: string
 }
 export type BranchGraph = {
   version: 1
@@ -39,11 +41,20 @@ const hashPattern = /^[a-f0-9]{64}$/
 const uuid = /^[a-f0-9-]{36}$/
 const MAX_CONTEXT_BYTES = 64 * 1024 * 1024
 const MAX_RETAINED_BYTES = 512 * 1024 * 1024
+const memoryAssets = new WeakMap<SessionStateAccess, Map<string, Buffer>>()
 
 /** Immutable model context plus a small canonical ancestry/head record. */
 export class BranchStore {
-  readonly #memory = new Map<string, Buffer>()
-  constructor(readonly state: SessionStateAccess = new MemorySessionState()) {}
+  readonly #memory: Map<string, Buffer>
+  constructor(readonly state: SessionStateAccess = new MemorySessionState()) {
+    this.#memory = memoryAssets.get(state) ?? new Map<string, Buffer>()
+    memoryAssets.set(state, this.#memory)
+  }
+  copyEphemeralAssets(source: BranchStore) {
+    if (this.state.directory) return
+    for (const node of source.view().nodes)
+      if (node.context) this.#write(node.context, source.#read(node.context))
+  }
   view(): BranchView {
     const record = this.state.read()
     const graph = (record.state.values.branches ?? {
@@ -410,6 +421,17 @@ export function validateBranchGraph(graph: BranchGraph): void {
       !Number.isFinite(Date.parse(node.created)) ||
       typeof node.label !== "string" ||
       node.label.length > 200 ||
+      (node.inheritedUsage !== undefined &&
+        (!node.inheritedUsage ||
+          typeof node.inheritedUsage !== "object" ||
+          Array.isArray(node.inheritedUsage) ||
+          Object.values(node.inheritedUsage).some(
+            (value) =>
+              typeof value !== "boolean" &&
+              (typeof value !== "number" || !Number.isFinite(value) || value < 0),
+          ))) ||
+      (node.cwd !== undefined &&
+        (typeof node.cwd !== "string" || !node.cwd.startsWith("/") || node.cwd.length > 4096)) ||
       !Number.isSafeInteger(node.eventSequence) ||
       node.eventSequence < -1 ||
       (node.eventStart !== undefined &&

@@ -179,6 +179,41 @@ restore pauses work until explicit finish/rollback. Pins (`pin-branch`, `pin-che
 `prune-branches` / `prune-checkpoints` use `--apply --revision`; `gc-recovery` collects orphan assets.
 Only abandoned, unpinned history can be pruned. At the 1,000-boundary cap, fork into a new session.
 
+### Export, import and change working directory
+
+`/export` and the session CLI export the current branch ancestry, or all retained branches with
+`--all`. JSON is the portable import format; Markdown and offline HTML are reading formats.
+Exports sanitize credentials and omit reasoning, external tool-output files and images by default.
+`--redact` also removes known workspace paths and identities; `--images` includes bounded inline
+images unless sharing redaction is enabled. Review the omission report before sharing.
+
+```sh
+codesplash session export <id> --output history.json
+codesplash session export <id> --format html --redact --output history.html
+codesplash session import history.json --path /destination
+codesplash session import history.json --path /destination --apply --sha256 <reviewed-checksum>
+codesplash session foreign list codex /explicit/source/root
+codesplash session foreign show claude /explicit/source/root session.jsonl
+codesplash session foreign convert cursor /explicit/source/root conversation.md --path /destination --apply
+codesplash import settings codex /source/config.toml     # preview supported mappings
+codesplash import settings codex /source/config.toml --apply
+```
+
+Import creates a fresh native session with provenance and inherited usage. It installs no grants,
+trust, jobs, queued inputs or checkpoints. Foreign discovery only reads the selected root. Supported
+Codex/Claude UUID sessions in the owning CLI's configured history root can hand off with
+`session foreign resume ... --apply` to that installed CLI; backups elsewhere use conversion.
+its configuration and permissions apply. Cursor Markdown converts as a quoted conversation document,
+without reconstructing native roles or tools; unknown SQLite layouts expose table metadata only.
+Settings migration reports unsupported fields and never imports credentials or permission grants.
+
+`/pwd` reports the execution directory. `/cd PATH` previews a native directory change; apply it with
+`--carry` or `--clear`, `--apply`, and the displayed `--revision`. The CLI equivalents are
+`session pwd <id>` and `session cd <id> PATH ...` for inactive sessions. Session identity stays stable;
+permissions, sandbox, project memory and checkpoint scope are rebuilt for the destination. Retained
+queue entries stay paused and require editing before reuse. Codex/Claude require a new session or
+their own CLI to change directories.
+
 ### Find and organize sessions
 
 ```sh

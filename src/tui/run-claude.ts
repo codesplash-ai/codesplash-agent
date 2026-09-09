@@ -15,8 +15,11 @@ import { ClaudeDriver } from "../engines/claude/index.ts"
 import { renderSessionPicker } from "./session-picker.tsx"
 
 /** Documented-flag argument list for a launch that the app can later resume. */
-export function claudeLaunchArgs(nativeSessionId: string, resume: boolean): string[] {
-  return resume ? ["--resume", nativeSessionId] : ["--session-id", nativeSessionId]
+export function claudeLaunchArgs(nativeSessionId: string, resume: boolean, model?: string): string[] {
+  return [
+    ...(resume ? ["--resume", nativeSessionId] : ["--session-id", nativeSessionId]),
+    ...(model ? ["--model", model] : []),
+  ]
 }
 
 export function claudeStatusForExit(exitCode: number): SessionStatus {
@@ -48,6 +51,7 @@ export type ClaudeHandoffDeps = {
   store: SessionStore
   project: Pick<ProjectPreflight, "cwd">
   resume?: SessionMeta
+  model?: string
 }
 
 /**
@@ -70,7 +74,10 @@ export async function runClaudeHandoffSession(deps: ClaudeHandoffDeps): Promise<
 
   await handle.updateMeta({ lastStatus: "running" })
   try {
-    const result = await driver.handoff(project.cwd, claudeLaunchArgs(nativeSessionId, Boolean(deps.resume)))
+    const result = await driver.handoff(
+      project.cwd,
+      claudeLaunchArgs(nativeSessionId, Boolean(deps.resume), deps.model),
+    )
     await handle.updateMeta({ lastStatus: claudeStatusForExit(result.exitCode) })
     return result.exitCode
   } catch (error) {
@@ -88,7 +95,7 @@ export async function launchClaude(
   const release = deferSignalExit()
   try {
     if (!effectiveHistoryEnabled(config, options)) {
-      await driver.handoff(project.cwd)
+      await driver.handoff(project.cwd, config.models?.claude ? ["--model", config.models.claude] : [])
       return
     }
 
@@ -102,7 +109,13 @@ export async function launchClaude(
       if (choice.type === "resume") resume = choice.meta
     }
 
-    await runClaudeHandoffSession({ driver, store: new SessionStore(), project, resume })
+    await runClaudeHandoffSession({
+      driver,
+      store: new SessionStore(),
+      project,
+      resume,
+      model: config.models?.claude,
+    })
   } finally {
     release()
   }

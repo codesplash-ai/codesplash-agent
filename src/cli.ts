@@ -35,8 +35,11 @@ Usage:
                      [--allow-host HOST:PORT] [--no-history] -- CMD [ARGS...]
   codesplash secrets set NAME | list | delete NAME
   codesplash import <claude|cursor> <source-dir> [--apply] [--destination DIR]
+  codesplash import settings <claude|codex|cursor> FILE [--apply]
+  codesplash import sessions <codesplash|claude|codex|cursor> SOURCE [args]
   codesplash create-skill <name> [--write]
   codesplash session <list|search|show|rename|archive|unarchive|delete|projects|move|section|migrate|compress|recover|reindex> [args]
+  codesplash session <export|import|foreign|cd|pwd|tree|fork|rewind|checkpoints|restore> [args]
   codesplash memory <list|show|search|remember|edit|forget|accept|status|repair|index|link|refresh|extract|consolidate> [args]
                     [--path DIR] [--trust] [--read-only] [--no-history] [--model ID]
   codesplash debug prompt [path] [--model <id[:effort]>] [--sandbox <mode>] [-c <key=value>]
@@ -57,8 +60,8 @@ Commands:
   review         Collect a git diff and run one read-only CodeSplash review turn over it
   stats          Aggregate recorded session usage (tokens, estimated cost) per engine and model
   completions    Print a shell completion script for bash, zsh, fish, or powershell
-  import         Preview or import supported Claude/Cursor rules, commands and skills
-  session        Search, organize and recover local sessions
+  import         Preview/apply supported resources, settings or conversation history
+  session        Search, organize, export/import and recover local sessions; inspect foreign history
   memory         Inspect and manage repository memory; automatic learning is opt-in
   create-skill   Preview a native skill scaffold; --write creates it without overwriting
   debug          Inspect harness internals; "debug prompt" prints the model-visible surface
@@ -633,7 +636,15 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
   applyStoredCredentials(env)
 
   const { inspectProject } = await import("./core/preflight.ts")
-  const project = await inspectProject(command.path ?? process.cwd())
+  let requestedPath = command.path ?? process.cwd()
+  if (command.resume) {
+    const { SessionRepository } = await import("./core/session/repository.ts")
+    const target = await new SessionRepository(overrides.store?.root)
+      .resolve(command.resume)
+      .catch(() => undefined)
+    if (target?.effectiveProjectId) requestedPath = target.projectPath
+  }
+  const project = await inspectProject(requestedPath)
 
   const { configDirectory, configFilePath, loadConfig } = await import("./core/config.ts")
   const config = await loadConfig(configFilePath(configDirectory(env)), command.configOverrides)
@@ -706,7 +717,9 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
       const targetId = command.resume ?? (await latestCodesplashSessionId(store, projectId))
       let handle: Awaited<ReturnType<SessionStore["open"]>>
       try {
-        handle = await store.open(projectId, targetId)
+        const { SessionRepository } = await import("./core/session/repository.ts")
+        const target = await new SessionRepository(store.root).resolve(targetId, projectId)
+        handle = await store.open(target.projectId, targetId)
       } catch {
         throw new UsageError(`No recorded session "${targetId}" for this project`)
       }
@@ -774,7 +787,7 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
   const exitCode = await runHeadless({
     prompt,
     cwd: project.cwd,
-    model: command.model,
+    model: command.model ?? config.models?.codesplash,
     effort: command.effort,
     policy,
     autoApprove: command.auto,
@@ -868,6 +881,10 @@ async function main(): Promise<void> {
 
   const args = process.argv.slice(2)
 
+  if (args[0] === "--internal-session-sqlite") {
+    ;(await import("./core/session/foreign-sqlite-worker.ts")).foreignSqliteMain(args[1])
+    return
+  }
   if (args[0] === "--internal-sandbox-supervisor") {
     await (await import("./engines/codesplash/sandbox/supervisor.ts")).supervisorMain()
     return

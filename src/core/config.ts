@@ -70,6 +70,7 @@ export type CustomProviderConfig = {
 
 export type AgentConfig = {
   schemaVersion: 1
+  models?: Partial<Record<"codesplash" | "codex" | "claude", string>>
   theme: ThemePreference
   history: { enabled: boolean }
   codex: { sandbox: ConfigSandboxMode; approvalPolicy: ApprovalPolicy }
@@ -249,6 +250,22 @@ export function validateConfig(parsed: unknown, path: string): AgentConfig {
   if (parsed.theme !== undefined) {
     if (isThemePreference(parsed.theme)) config.theme = parsed.theme
     else problems.push(`theme: got ${JSON.stringify(parsed.theme)}, expected "system", "dark", or "light"`)
+  }
+
+  if (parsed.models !== undefined) {
+    if (!isRecord(parsed.models)) problems.push("[models]: expected a table")
+    else {
+      config.models = {}
+      for (const [engine, selector] of Object.entries(parsed.models)) {
+        if (
+          !["codesplash", "codex", "claude"].includes(engine) ||
+          typeof selector !== "string" ||
+          !/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(selector)
+        )
+          problems.push("[models]: expected a supported engine and a plain model selector")
+        else config.models[engine as "codesplash" | "codex" | "claude"] = selector
+      }
+    }
   }
 
   if (parsed.history !== undefined) {
@@ -714,6 +731,7 @@ export async function saveConfig(config: AgentConfig, path = configFilePath()): 
     history: { enabled: config.history.enabled },
     codex: { sandbox: config.codex.sandbox, approvalPolicy: config.codex.approvalPolicy },
   }
+  if (config.models) table.models = { ...config.models }
   const permissions = permissionsTable(config.permissions)
   if (permissions) table.permissions = permissions
   if (config.memory)

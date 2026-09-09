@@ -1,7 +1,7 @@
 /** Durable local session metadata and coalesced event history. */
 import { createHash } from "node:crypto"
 import { constants, existsSync } from "node:fs"
-import { mkdir, open, readdir, truncate } from "node:fs/promises"
+import { mkdir, open, truncate } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import type { ApprovalPolicy, SandboxMode } from "./config.ts"
 import { dataDirectory } from "./config.ts"
@@ -10,6 +10,7 @@ import { invalidateSession } from "./session/changes.ts"
 import { logBytes, materialize } from "./session/compression.ts"
 import { control, type SessionStateAccess, updateControl } from "./session/control.ts"
 import { atomic, canonicalRoot, component, digest, hostPath, json, lease } from "./session/files.ts"
+import { workingDirectory } from "./session/working-directory.ts"
 
 export type SessionMeta = {
   schemaVersion: 1 | 2
@@ -18,6 +19,8 @@ export type SessionMeta = {
   nativeSessionId?: string
   projectPath: string
   projectId: string
+  /** Current project association; storage remains under projectId after /cd. */
+  effectiveProjectId?: string
   archived?: boolean
   section?: string
   organization?: string
@@ -77,21 +80,12 @@ export async function listProjectSessions(
   root = sessionsRootDirectory(),
   includeArchived = false,
 ): Promise<SessionMeta[]> {
-  const projectDirectory = join(root, component(projectId))
-  let entries: string[]
-  try {
-    entries = await readdir(projectDirectory)
-  } catch (error) {
-    if (isNodeError(error) && error.code === "ENOENT") return []
-    throw error
-  }
-
-  const metas: SessionMeta[] = []
-  for (const entry of entries) {
-    const meta = await readSessionMeta(join(projectDirectory, entry))
-    if (meta && meta.projectId === projectId && (includeArchived || !meta.archived)) metas.push(meta)
-  }
-  return metas.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+  component(projectId)
+  const { SessionRepository } = await import("./session/repository.ts")
+  return (await new SessionRepository(root).all()).filter(
+    (meta) =>
+      (meta.effectiveProjectId ?? meta.projectId) === projectId && (includeArchived || !meta.archived),
+  )
 }
 
 export async function readSessionMeta(
@@ -131,6 +125,7 @@ function readSessionMetaSync(directory: string, recoverPrepared = false): Sessio
     resolved = prepared
   }
   const selectedThread = (state.values.branches as { activeThreadId?: unknown } | undefined)?.activeThreadId
+  const location = workingDirectory(state)
   if (
     selectedThread !== undefined &&
     (typeof selectedThread !== "string" || !selectedThread || selectedThread.length > 256)
@@ -138,6 +133,7 @@ function readSessionMetaSync(directory: string, recoverPrepared = false): Sessio
     throw new Error("Invalid selected provider thread")
   return {
     ...resolved,
+    ...(location ? { projectPath: location.current, effectiveProjectId: location.projectId } : {}),
     ...(resolved.engine === "codex" && typeof selectedThread === "string"
       ? { nativeSessionId: selectedThread }
       : {}),

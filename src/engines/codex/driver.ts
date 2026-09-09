@@ -503,6 +503,37 @@ class CodexSession implements EngineSession {
     return response.turn.id
   }
 
+  async exportHistory(options: import("../../core/session/portable.ts").ExportOptions) {
+    this.#requireThread()
+    if (this.#turns.busy || this.#recoveryBusy)
+      throw new Error("Wait for the current operation before exporting")
+    this.#recoveryBusy = true
+    try {
+      await this.options.flushSessionEvents?.()
+      const { exportPortable } = await import("../../core/session/portable.ts"),
+        now = new Date().toISOString()
+      return await exportPortable(
+        this.#branches,
+        {
+          engine: "codex",
+          schemaVersion: 2,
+          localSessionId: this.localSessionId,
+          projectId: "live",
+          projectPath: this.options.cwd,
+          title: "Codex session",
+          createdAt: now,
+          updatedAt: now,
+          lastStatus: "ready",
+          lastSequence: this.#normalizer.nextSequence - 1,
+        },
+        options,
+      )
+    } finally {
+      this.#recoveryBusy = false
+      this.#turns.runner.wake()
+    }
+  }
+
   async sessionRecovery(request: RecoveryRequest): Promise<RecoveryResult> {
     this.#requireThread()
     if (request.action === "tree") return { title: "Provider branch tree", data: this.#branches.view() }

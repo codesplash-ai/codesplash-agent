@@ -11,6 +11,20 @@ export async function runSessionCommand(
   const output = options.output ?? ((text) => process.stdout.write(text))
   const repository =
     options.repository ?? new SessionRepository(sessionsRootDirectory(dataDirectory(options.env)))
+  if (args[0] === "export" || args[0] === "import") {
+    const { sessionPortableCommand } = await import("./session-portable.ts")
+    return sessionPortableCommand(repository, args, output)
+  }
+  if (args[0] === "foreign") {
+    return (await import("./session-foreign.ts")).sessionForeignCommand(repository, args.slice(1), output)
+  }
+  if (args[0] === "cd" || args[0] === "pwd")
+    return (await import("./session-directory.ts")).sessionDirectoryCommand(
+      repository,
+      args,
+      output,
+      options.env,
+    )
   const query: SessionQuery = { archived: false },
     positional: string[] = []
   let apply = false,
@@ -70,8 +84,9 @@ export async function runSessionCommand(
       { id: string; path: string; sessions: number; organizations: string[] }
     >()
     for (const meta of await repository.all()) {
-      const item = projects.get(meta.projectId) ?? {
-        id: meta.projectId,
+      const project = meta.effectiveProjectId ?? meta.projectId
+      const item = projects.get(project) ?? {
+        id: project,
         path: meta.projectPath,
         sessions: 0,
         organizations: [],
@@ -79,7 +94,7 @@ export async function runSessionCommand(
       item.sessions++
       if (meta.organization && !item.organizations.includes(meta.organization))
         item.organizations.push(meta.organization)
-      projects.set(meta.projectId, item)
+      projects.set(project, item)
     }
     emit([...projects.values()])
     return 0

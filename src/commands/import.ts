@@ -120,6 +120,26 @@ export async function runImportCommand(
   args: string[],
   output: (text: string) => void = (text) => process.stdout.write(text),
 ): Promise<number> {
+  if (args[0] === "settings")
+    return (await import("./import-settings.ts")).runSettingsImport(args.slice(1), output)
+  if (args[0] === "sessions") {
+    const { SessionRepository } = await import("../core/session/repository.ts")
+    const { sessionForeignCommand } = await import("./session-foreign.ts")
+    const [vendor, root, file, ...flags] = args.slice(1)
+    if (vendor === "codesplash" && root)
+      return (await import("./session-portable.ts")).sessionPortableCommand(
+        new SessionRepository(),
+        ["import", root, ...args.slice(3)],
+        output,
+      )
+    return sessionForeignCommand(
+      new SessionRepository(),
+      file && !file.startsWith("--")
+        ? ["convert", vendor ?? "", root ?? "", file, ...flags]
+        : ["list", vendor ?? "", root ?? "", ...args.slice(3)],
+      output,
+    )
+  }
   const [vendor, source, ...flags] = args
   if ((vendor !== "claude" && vendor !== "cursor") || !source)
     throw new Error("Usage: codesplash import <claude|cursor> <source-dir> [--apply] [--destination DIR]")

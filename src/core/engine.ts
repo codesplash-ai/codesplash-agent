@@ -86,6 +86,8 @@ export type OpenSessionOptions = {
    * and runner always pass the real value).
    */
   workspaceTrusted?: boolean
+  /** Caller-selected local trust store, including isolated headless environments. */
+  trustDataDirectory?: string
   /** CLI-tier permission rules layered above the config's [permissions] rules. */
   permissionOverrides?: PermissionRuleOverrides
   /**
@@ -140,6 +142,13 @@ export interface EngineSession {
   readonly capabilities: EngineCapabilities
   readonly events: AsyncIterable<AgentEvent>
   readonly inputQueue?: InputQueue
+  directoryStatus?(): import("./session/working-directory.ts").DirectoryStatus
+  changeDirectory?(
+    request: import("./session/working-directory.ts").DirectoryRequest,
+  ): Promise<import("./session/working-directory.ts").DirectoryPreview>
+  exportHistory?(
+    options: import("./session/portable.ts").ExportOptions,
+  ): Promise<import("./session/portable.ts").PortableSession>
   sessionRecovery?(
     request: import("./session/recovery-contract.ts").RecoveryRequest,
   ): Promise<import("./session/recovery-contract.ts").RecoveryResult>

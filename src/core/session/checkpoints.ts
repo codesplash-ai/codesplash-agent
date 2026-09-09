@@ -7,6 +7,7 @@ import { SafeParent } from "./secure-path.ts"
 
 export type CheckpointPolicy = {
   cwd: string
+  scope?: string
   trusted(): boolean
   writable(): boolean
   readable(path: string): boolean
@@ -66,11 +67,16 @@ function within(root: string, path: string): boolean {
 export class CheckpointStore {
   readonly root: string | undefined
   readonly gitDirectory: string | undefined
+  readonly key: string
   constructor(
     readonly state: SessionStateAccess,
     readonly policy: CheckpointPolicy,
   ) {
-    this.root = state.directory ? join(state.directory, "checkpoints") : undefined
+    if (policy.scope && !hash.test(policy.scope)) throw new Error("Invalid checkpoint directory scope")
+    this.key = policy.scope ? `checkpoints:${policy.scope}` : "checkpoints"
+    this.root = state.directory
+      ? join(state.directory, "checkpoints", ...(policy.scope ? [policy.scope] : []))
+      : undefined
     this.gitDirectory = this.root ? join(this.root, "objects.git") : undefined
   }
   availability(): string | undefined {
@@ -84,7 +90,7 @@ export class CheckpointStore {
   }
   view(): CheckpointState & { revision: string; unavailable?: string } {
     const record = this.state.read()
-    const data = (record.state.values.checkpoints ?? { version: 1, steps: [], pins: [] }) as CheckpointState
+    const data = (record.state.values[this.key] ?? { version: 1, steps: [], pins: [] }) as CheckpointState
     if (
       data.version !== 1 ||
       !Array.isArray(data.steps) ||
@@ -337,7 +343,8 @@ export class CheckpointStore {
     return { id: snapshot.id, hash: digest(source) }
   }
   diskUsage(): number {
-    if (!this.root || !existsSync(this.root)) return 0
+    const root = this.state.directory ? join(this.state.directory, "checkpoints") : undefined
+    if (!root || !existsSync(root)) return 0
     let count = 0
     const size = (path: string): number => {
       if (++count > 100000) throw new Error("Checkpoint object count exceeds limit")
@@ -348,7 +355,7 @@ export class CheckpointStore {
         ? readdirSync(path).reduce((sum, name) => sum + size(join(path, component(name))), 0)
         : info.size
     }
-    return size(this.root)
+    return size(root)
   }
   async collect(revision: string): Promise<{ snapshots: number; reclaimedBytes: number }> {
     this.#owned()
@@ -456,9 +463,9 @@ export class CheckpointStore {
   update(revision: string, operation: string, change: (state: CheckpointState) => void): void {
     this.#owned()
     this.state.update(revision, `checkpoint/${operation}`, (state) => {
-      const checkpoints = (state.values.checkpoints ?? { version: 1, steps: [], pins: [] }) as CheckpointState
+      const checkpoints = (state.values[this.key] ?? { version: 1, steps: [], pins: [] }) as CheckpointState
       change(checkpoints)
-      state.values.checkpoints = checkpoints
+      state.values[this.key] = checkpoints
     })
   }
   pin(id: string, pinned: boolean, revision: string): void {

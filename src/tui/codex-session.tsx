@@ -37,6 +37,9 @@ import { RecoveryPanel } from "./recovery-panel.tsx"
 export type CodexSessionAction = "home" | "reconnect" | "new" | "resume-picker" | "quit"
 
 export type SlashCommandName =
+  | "cd"
+  | "pwd"
+  | "export"
   | "help"
   | "new"
   | "resume"
@@ -78,6 +81,9 @@ export type ParsedSlashCommand =
   | { name: "unknown"; raw: string }
 
 const slashCommandNames: readonly SlashCommandName[] = [
+  "cd",
+  "pwd",
+  "export",
   "help",
   "new",
   "resume",
@@ -144,6 +150,11 @@ export function engineStatusLabel(engine: EngineId, model: string | undefined): 
 }
 
 export const slashCommandHelp: ReadonlyArray<{ command: string; description: string }> = [
+  { command: "/pwd", description: "Show the effective working directory" },
+  {
+    command: "/cd PATH [--carry|--clear --apply --revision REVISION]",
+    description: "Preview or apply an idle directory change",
+  },
   { command: "/new", description: "Start a fresh session in this project" },
   { command: "/resume", description: "Open the session picker" },
   { command: "/engine", description: "Back to the engine screen (welcome)" },
@@ -161,6 +172,10 @@ export const slashCommandHelp: ReadonlyArray<{ command: string; description: str
   { command: "/skill name [arguments]", description: "Load a skill explicitly" },
   { command: "/personality neutral|concise|explanatory", description: "Set response style" },
   { command: "/create-skill name [--write]", description: "Preview or create a skill scaffold" },
+  {
+    command: "/export --output FILE [--format json|markdown|html] [--redact]",
+    description: "Export sanitized portable history",
+  },
   { command: "/history", description: "Show where this session is stored" },
   { command: "/queue", description: "Inspect, edit, reorder and review acknowledged input" },
   { command: "/steer text", description: "Steer at the next safe provider/tool boundary" },
@@ -505,7 +520,7 @@ type CodexSessionAppProps = {
 export function CodexSessionApp({
   controller,
   palette,
-  project,
+  project: initialProject,
   policy = defaultSessionPolicy,
   historyLocation,
   engine = "codex",
@@ -519,6 +534,7 @@ export function CodexSessionApp({
   const resetCursorBlinkRef = useRef<() => void>(() => {})
   const scrollboxRef = useRef<ScrollBoxRenderable>(null)
   const [state, setState] = useState(controller.state)
+  const [project, setProject] = useState(initialProject)
   const [commandError, setCommandError] = useState<string>()
   const [selectedOutlineId, setSelectedOutlineId] = useState<string>()
   const [outlineVisible, setOutlineVisible] = useState(false)
@@ -843,6 +859,51 @@ export function CodexSessionApp({
         case "compact":
           void runCommand(() => controller.compact(command.argument))
           return
+        case "pwd":
+          setOverlay({
+            kind: "resources",
+            title: "Working directory",
+            text: controller.directoryStatus()?.cwd ?? project.cwd,
+          })
+          return
+        case "cd":
+          void runCommand(async () => {
+            const { directoryCommand } = await import("../core/session/directory-command.ts")
+            const result = await controller.changeDirectory(directoryCommand(command.argument ?? ""))
+            if (result.applied) {
+              const { inspectProject } = await import("../core/preflight.ts")
+              setProject(await inspectProject(result.cwd))
+            }
+            setOverlay({
+              kind: "resources",
+              title: result.applied ? "Working directory changed" : "Working-directory preview",
+              text: JSON.stringify(result, null, 2),
+            })
+          })
+          return
+        case "export":
+          void runCommand(async () => {
+            const { parse } = await import("shell-quote")
+            const args = parse(command.argument ?? "", (key) => `$${key}`)
+            if (args.some((arg) => typeof arg !== "string"))
+              throw new Error("Export accepts literal arguments only")
+            const { exportArguments } = await import("../commands/session-portable.ts")
+            const { renderPortable, writePortable } = await import("../core/session/portable.ts")
+            const { options, format, path } = exportArguments(
+              args as string[],
+              controller.directoryStatus()?.cwd ?? project.cwd,
+            )
+            const bundle = await controller.exportHistory(options)
+            if (path) writePortable(path, renderPortable(bundle, format))
+            setOverlay({
+              kind: "resources",
+              title: "Session export",
+              text: path
+                ? `Saved ${path}\n${bundle.payload.omissions.join("\n")}`
+                : renderPortable(bundle, format),
+            })
+          })
+          return
         case "tree":
           void runCommand(async () => {
             const result = await controller.sessionRecovery({ action: "tree" })
@@ -930,6 +991,7 @@ export function CodexSessionApp({
       runCommand,
       restoreInput,
       permissions,
+      project.cwd,
     ],
   )
 

@@ -15,7 +15,7 @@ export async function projectPromptHistory(
     warnings: string[] = []
   let historyClearedAt: string | undefined
   const sessions = (await repository.all())
-    .filter((meta) => meta.projectId === project && meta.engine === engine)
+    .filter((meta) => (meta.effectiveProjectId ?? meta.projectId) === project && meta.engine === engine)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     .slice(0, 1000)
   for (const meta of sessions) {
@@ -27,7 +27,7 @@ export async function projectPromptHistory(
         value.values.inputQueue = record.state.values.inputQueue
       })
       const snapshot = new InputQueue({ state, cwd: meta.projectPath, recover: false }).snapshot()
-      history.push(...snapshot.history)
+      history.push(...snapshot.history.filter((item) => item.cwd === meta.projectPath))
       if (snapshot.historyClearedAt && (!historyClearedAt || snapshot.historyClearedAt > historyClearedAt))
         historyClearedAt = snapshot.historyClearedAt
     } catch {

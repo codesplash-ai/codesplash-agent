@@ -22,6 +22,7 @@ import {
   type SessionPolicy,
   type UserInput,
 } from "../../core/index.ts"
+import { BranchStore, validNativeContext } from "../../core/session/branches.ts"
 import { MemorySessionState } from "../../core/session/control.ts"
 import { bytes, digest } from "../../core/session/files.ts"
 import {
@@ -30,8 +31,19 @@ import {
   type InputIntent,
   InputQueue,
 } from "../../core/session/input-queue.ts"
+import { projectPromptHistory } from "../../core/session/prompt-history.ts"
 import { type InputCompletion, QueueRunner } from "../../core/session/queue-runner.ts"
 import type { RecoveryRequest, RecoveryResult } from "../../core/session/recovery-contract.ts"
+import { RoutedSession } from "../../core/session/routed-session.ts"
+import {
+  type DirectoryRequest,
+  destinationDirectory,
+  directoryScope,
+  PreparedSessionState,
+  workingDirectory,
+} from "../../core/session/working-directory.ts"
+import { projectIdFor } from "../../core/sessions.ts"
+import { readTrustDecision } from "../../core/trust.ts"
 import { APP_VERSION } from "../../version.ts"
 import { PROVIDER_ENV_VARS, resolveApiKey } from "./auth.ts"
 import {
@@ -170,7 +182,146 @@ export class CodesplashDriver implements EngineDriver {
   }
 
   async openSession(options: OpenSessionOptions): Promise<EngineSession> {
+    options = { ...options, sessionState: options.sessionState ?? new MemorySessionState() }
+    const state = options.sessionState as import("../../core/session/control.ts").SessionStateAccess
+    const location = workingDirectory(state.read().state)
+    let history: ChatMessage[] | undefined
+    if (location) {
+      const cwd = destinationDirectory(location.current, ".")
+      if (cwd !== location.current)
+        throw new Error("Working directory moved; inspect its transition record before resuming")
+      options = {
+        ...options,
+        cwd,
+        workspaceTrusted: (await readTrustDecision(cwd, options.trustDataDirectory))?.trusted === true,
+        permissionOverrides: options.cwd === cwd ? options.permissionOverrides : undefined,
+        permissionGrantsPath: options.cwd === cwd ? options.permissionGrantsPath : undefined,
+      }
+      if (location.pending) {
+        history = new BranchStore(state).context(location.node)
+        if (options.nativeTranscriptPath) await writeTranscriptSnapshot(options.nativeTranscriptPath, history)
+        state.update(state.read().revision, "directory/recover", (value) => {
+          const record = workingDirectory(value)
+          if (record) record.pending = false
+        })
+      }
+    }
+    const session = await this.#openNative(options, history)
+    const routed = new RoutedSession(session)
+    const attach = (runtime: CodesplashSession) => {
+      runtime.changeDirectory = async (request) => {
+        routed.begin()
+        let next: CodesplashSession | undefined
+        try {
+          const result = await runtime.withIdle(async () => {
+            runtime.assertRecoveryReady()
+            const state = runtime.options
+              .sessionState as import("../../core/session/control.ts").SessionStateAccess
+            const from = runtime.options.cwd,
+              cwd = destinationDirectory(from, request.path)
+            const trusted =
+              (await readTrustDecision(cwd, runtime.options.trustDataDirectory))?.trusted === true
+            const revision = digest(JSON.stringify([state.read().revision, cwd, trusted]))
+            const preview = {
+              from,
+              cwd,
+              trusted,
+              revision,
+              context: request.context,
+              applied: false,
+              pending: runtime.inputQueue
+                .snapshot()
+                .items.filter((item) => ["queued", "blocked", "execution-uncertain"].includes(item.status))
+                .length,
+            }
+            if (!request.apply) return preview
+            if (request.revision !== revision) throw new Error("Directory preview is stale; review it again")
+            if (request.context !== "carry" && request.context !== "clear")
+              throw new Error("Choose --carry or --clear before applying a directory change")
+            if (cwd === from) throw new Error("Already in this working directory")
+            const history = request.context === "carry" ? runtime.historyForDirectory() : []
+            if (!validNativeContext(history))
+              throw new Error(
+                "Current exchange is incomplete; choose clear context or recover it before changing directory",
+              )
+            await runtime.options.flushSessionEvents?.()
+            const prepared = new PreparedSessionState(state),
+              prior = workingDirectory(prepared.read().state)
+            const scope = digest(cwd)
+            prepared.update(prepared.read().revision, "directory/prepare-location", (value) => {
+              value.values.workingDirectory = {
+                version: 1,
+                original: prior?.original ?? from,
+                from,
+                current: cwd,
+                projectId: projectIdFor(cwd),
+                scope,
+                context: request.context,
+                node: crypto.randomUUID(),
+                pending: true,
+              }
+            })
+            const promptHistory = state.directory
+              ? await projectPromptHistory(dirname(dirname(state.directory)), projectIdFor(cwd), "codesplash")
+              : undefined
+            next = await this.#openNative(
+              {
+                ...runtime.options,
+                cwd,
+                sessionState: prepared,
+                promptHistory,
+                initialUsage: runtime.usageForDirectory(),
+                firstSequence: runtime.nextSequenceForDirectory(),
+                model: runtime.modelForDirectory(),
+                workspaceTrusted: trusted,
+                permissionOverrides: undefined,
+                permissionGrantsPath: undefined,
+                policy: {
+                  ...(runtime.options.policy ?? defaultSessionPolicy),
+                  permissionMode: runtime.directoryPermissionMode(),
+                },
+                resumeQueuedInput: false,
+              },
+              history,
+              true,
+            )
+            next.prepareDirectoryBoundary(runtime, request.context)
+            await next.initializeRecovery()
+            // Trust and physical identity are admission inputs, not facts captured indefinitely by preview.
+            if (
+              destinationDirectory(from, request.path) !== cwd ||
+              ((await readTrustDecision(cwd, runtime.options.trustDataDirectory))?.trusted === true) !==
+                trusted
+            )
+              throw new Error("Destination or trust changed during preparation; preview again")
+            prepared.publish()
+            return { ...preview, applied: true }
+          })
+          if (next) {
+            const replacement = next
+            next = undefined
+            attach(replacement)
+            await routed.replace(replacement)
+            await replacement.finishDirectoryPublication()
+          }
+          return result
+        } finally {
+          if (next) await next.close()
+          routed.end()
+        }
+      }
+    }
+    attach(session)
+    return routed.session
+  }
+
+  async #openNative(
+    options: OpenSessionOptions,
+    history?: ChatMessage[],
+    prepared = false,
+  ): Promise<CodesplashSession> {
     const config = await this.#config()
+    options = { ...options, model: options.model ?? config.models?.codesplash }
     const registry = buildProviderRegistry(config)
     if (registry.providers.length === 0) {
       throw new Error(`${NO_KEYS_DETAIL} to use the CodeSplash engine`)
@@ -181,9 +332,8 @@ export class CodesplashDriver implements EngineDriver {
     }
     // Resume: reload the provider-native history the transcript persisted. An empty or missing
     // file is simply a fresh session.
-    const seededHistory = options.nativeTranscriptPath
-      ? await loadTranscript(options.nativeTranscriptPath)
-      : []
+    const seededHistory =
+      history ?? (options.nativeTranscriptPath ? await loadTranscript(options.nativeTranscriptPath) : [])
     // The permission runtime is built before the session object exists, so its creation-time
     // warnings (unknown rule tools, corrupt grants files) buffer in the bridge and flush as
     // warning events once the session can emit them.
@@ -200,6 +350,12 @@ export class CodesplashDriver implements EngineDriver {
       onModeChange: (mode) => bridge.modeChanged(mode),
     })
     const directory = options.nativeTranscriptPath ? dirname(options.nativeTranscriptPath) : undefined
+    const scope = options.sessionState ? directoryScope(options.sessionState.read().state) : undefined
+    const profilePath = directory
+      ? scope
+        ? join(directory, "cwd-profiles", `${scope}.json`)
+        : join(directory, "sandbox-profile.json")
+      : undefined
     if (
       directory &&
       seededHistory.length &&
@@ -219,7 +375,7 @@ export class CodesplashDriver implements EngineDriver {
               config.sandbox,
               options.sessionState?.directory ? [dirname(dirname(options.sessionState.directory))] : [],
             ),
-            directory ? join(directory, "sandbox-profile.json") : undefined,
+            profilePath,
           ),
           directory ? join(directory, "sandbox-events.jsonl") : undefined,
         )
@@ -234,7 +390,7 @@ export class CodesplashDriver implements EngineDriver {
       sandbox,
     )
     try {
-      await session.initializeRecovery()
+      if (!prepared) await session.initializeRecovery()
       return session
     } catch (error) {
       await session.close()
@@ -270,6 +426,9 @@ class PermissionEventBridge {
 }
 
 class CodesplashSession implements EngineSession {
+  changeDirectory?: (
+    request: DirectoryRequest,
+  ) => Promise<import("../../core/session/working-directory.ts").DirectoryPreview>
   readonly capabilities = CODESPLASH_CAPABILITIES
   readonly events: AsyncIterable<AgentEvent>
   readonly #queue = new AsyncQueue<AgentEvent>()
@@ -432,6 +591,7 @@ class CodesplashSession implements EngineSession {
       state,
       {
         cwd: this.#cwd,
+        scope: directoryScope(state.read().state),
         trusted: () => options.workspaceTrusted ?? true,
         writable: () => sandbox.profile.mode === "workspace-write" && permissions.mode !== "plan",
         readable: (path) =>
@@ -541,6 +701,53 @@ class CodesplashSession implements EngineSession {
   async initializeRecovery(): Promise<void> {
     await this.#recovery.initialize()
     this.#inputRunner.wake()
+  }
+  directoryStatus() {
+    return { cwd: this.#cwd, trusted: this.options.workspaceTrusted ?? true }
+  }
+  withIdle<T>(operation: () => Promise<T>) {
+    return this.#inputOperation(operation)
+  }
+  assertRecoveryReady() {
+    this.#recovery.assertReady()
+  }
+  historyForDirectory() {
+    return this.#loop.historySnapshot()
+  }
+  usageForDirectory() {
+    return this.#loop.usageSnapshot()
+  }
+  nextSequenceForDirectory() {
+    return this.#factory.nextSequence
+  }
+  modelForDirectory() {
+    return formatModelSelector(this.#model, this.#reasoningEffort)
+  }
+  directoryPermissionMode() {
+    return this.#permissions.mode === "plan" ? ("plan" as const) : ("default" as const)
+  }
+  prepareDirectoryBoundary(previous: CodesplashSession, context: "carry" | "clear") {
+    this.#recovery.branches.copyEphemeralAssets(previous.#recovery.branches)
+    this.inputQueue.holdForDirectoryChange()
+    this.#memory.selectBranchNotes({})
+    const node = this.#recovery.capture("base", `Working directory changed (${context} context)`)
+    if (!node) throw new Error("Could not retain directory transition context")
+    const state = this.options.sessionState as import("../../core/session/control.ts").SessionStateAccess
+    state.update(state.read().revision, "directory/prepared-boundary", (value) => {
+      const location = workingDirectory(value)
+      if (!location) throw new Error("Missing prepared working directory")
+      location.node = node.id
+    })
+  }
+  async finishDirectoryPublication() {
+    const state = this.options.sessionState as import("../../core/session/control.ts").SessionStateAccess
+    if (this.options.nativeTranscriptPath)
+      await writeTranscriptSnapshot(this.options.nativeTranscriptPath, this.#loop.historySnapshot())
+    state.update(state.read().revision, "directory/complete", (value) => {
+      const location = workingDirectory(value)
+      if (location) location.pending = false
+    })
+    this.#memoryNotice(`Working directory: ${this.#cwd}. Queue paused; edit retained inputs before resuming.`)
   }
 
   get localSessionId(): string {
@@ -713,6 +920,30 @@ class CodesplashSession implements EngineSession {
       settleAdmission()
       this.#inputRunner.wake()
     }
+  }
+
+  async exportHistory(options: import("../../core/session/portable.ts").ExportOptions) {
+    return this.#inputOperation(async () => {
+      await this.options.flushSessionEvents?.()
+      const { exportPortable } = await import("../../core/session/portable.ts")
+      const now = new Date().toISOString()
+      return exportPortable(
+        this.#recovery.branches,
+        {
+          engine: "codesplash",
+          schemaVersion: 2,
+          localSessionId: this.localSessionId,
+          projectId: "live",
+          projectPath: this.#cwd,
+          title: "CodeSplash session",
+          createdAt: now,
+          updatedAt: now,
+          lastStatus: "ready",
+          lastSequence: this.#factory.nextSequence - 1,
+        },
+        options,
+      )
+    })
   }
 
   async sessionRecovery(request: RecoveryRequest): Promise<RecoveryResult> {
@@ -997,9 +1228,12 @@ class CodesplashSession implements EngineSession {
     await this.#inputPromise?.catch(() => {})
     await this.#cancelLearning()
     await this.#inputRunner.settled()
-    await this.#sandbox.close()
-    this.#ended = true
-    this.#queue.end()
+    try {
+      await this.#sandbox.close()
+    } finally {
+      this.#ended = true
+      this.#queue.end()
+    }
   }
 
   async listModels(): Promise<EngineModel[]> {

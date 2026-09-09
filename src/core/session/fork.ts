@@ -1,10 +1,17 @@
 import { closeSync, existsSync, fsyncSync, openSync, readdirSync, renameSync, rmSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { writeTranscriptSnapshot } from "../../engines/codesplash/transcript.ts"
-import { readSessionEvents, readSessionMeta, type SessionMeta, SessionStore } from "../sessions.ts"
+import {
+  projectIdFor,
+  readSessionEvents,
+  readSessionMeta,
+  type SessionMeta,
+  SessionStore,
+} from "../sessions.ts"
 import { BranchStore } from "./branches.ts"
 import { invalidateSession } from "./changes.ts"
 import { atomic, bytes, component, directory } from "./files.ts"
+import { workingDirectory } from "./working-directory.ts"
 
 /** Publish a complete independent local fork; staging is invisible to repository queries. */
 export async function forkLocalSession(
@@ -27,8 +34,13 @@ export async function forkLocalSession(
     id = crypto.randomUUID(),
     stage = join(root, ".fork-staging", id)
   const now = new Date().toISOString()
+  const location = workingDirectory(branches.state.read().state)
+  const cwd = node.cwd ?? location?.original ?? parent.projectPath
   const meta: SessionMeta = {
     ...parent,
+    projectPath: cwd,
+    projectId: location ? projectIdFor(cwd) : parent.projectId,
+    effectiveProjectId: undefined,
     schemaVersion: 2,
     localSessionId: id,
     nativeSessionId: parent.engine === "codesplash" ? id : nativeThreadId,
@@ -75,6 +87,7 @@ export async function forkLocalSession(
     const child = new BranchStore(handle.state)
     child.capture({
       kind: "fork",
+      cwd,
       label: node.label,
       messages,
       threadId: meta.nativeSessionId,
@@ -86,23 +99,29 @@ export async function forkLocalSession(
       origin: {
         sessionId: parent.localSessionId,
         nodeId: node.id,
-        inheritedUsage: inheritedUsage(branches.view().origin?.inheritedUsage ?? {}, node.usage),
+        inheritedUsage: inheritedUsage(
+          node.inheritedUsage ?? branches.view().origin?.inheritedUsage ?? {},
+          node.usage,
+        ),
       },
     })
     // Retained tool output ids are local opaque references. Preserve bounded files, never symlinks.
-    const outputs = join(source, "tool-output")
-    if (existsSync(outputs)) {
+    let total = 0,
+      count = 0
+    for (const folder of ["tool-outputs", "tool-output"]) {
+      const outputs = join(source, folder)
+      if (!existsSync(outputs)) continue
       directory(outputs)
-      let total = 0
       for (const name of readdirSync(outputs)) {
+        if (++count > 512) throw new Error("Fork retained output file limit exceeded")
         component(name)
-        const content = bytes(join(outputs, name), 1024 * 1024)
+        const content = bytes(join(outputs, name), 16 * 1024 * 1024)
         total += content.length
         if (total > 64 * 1024 * 1024) throw new Error("Fork retained output exceeds 64 MiB")
-        atomic(join(handle.directory, "tool-output", name), content)
+        atomic(join(handle.directory, folder, name), content)
       }
     }
-    const targetParent = join(root, parent.projectId),
+    const targetParent = join(root, meta.projectId),
       target = join(targetParent, id)
     directory(targetParent, true)
     if (existsSync(target)) throw new Error("Fork id collision")
@@ -123,7 +142,7 @@ export async function forkLocalSession(
   }
 }
 
-function inheritedUsage(
+export function inheritedUsage(
   parent: import("../engine.ts").SessionUsageSnapshot,
   local: import("../engine.ts").SessionUsageSnapshot,
 ) {

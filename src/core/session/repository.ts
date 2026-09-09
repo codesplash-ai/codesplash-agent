@@ -96,7 +96,9 @@ export class SessionRepository {
   }
   async resolve(id: string, project?: string, recoverPrepared = false): Promise<SessionMeta> {
     const matches = (await this.all(recoverPrepared)).filter(
-      (m) => (!project || m.projectId === project) && (m.localSessionId === id || m.title === id),
+      (m) =>
+        (!project || (m.effectiveProjectId ?? m.projectId) === project) &&
+        (m.localSessionId === id || m.title === id),
     )
     if (matches.length !== 1)
       throw new Error(
@@ -183,7 +185,7 @@ export class SessionRepository {
     try {
       for (const meta of view ?? (await this.all())) {
         if (
-          (options.project && meta.projectId !== options.project) ||
+          (options.project && (meta.effectiveProjectId ?? meta.projectId) !== options.project) ||
           (options.engine && meta.engine !== options.engine) ||
           (options.archived !== undefined && Boolean(meta.archived) !== options.archived) ||
           (options.section !== undefined && meta.section !== options.section) ||
@@ -303,7 +305,7 @@ export class SessionRepository {
     return {
       action,
       id: meta.localSessionId,
-      project: meta.projectId,
+      project: meta.effectiveProjectId ?? meta.projectId,
       revision: control(this.path(meta)).revision,
       owner: owner(join(this.path(meta), "writer.lease")),
       legacyRecoveryRequired: meta.schemaVersion === 1 && !["closed", "failed"].includes(meta.lastStatus),

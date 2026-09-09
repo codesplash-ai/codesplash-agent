@@ -6,6 +6,7 @@ import type { SessionStateAccess } from "../../core/session/control.ts"
 import { digest, hostPath } from "../../core/session/files.ts"
 import { forkLocalSession } from "../../core/session/fork.ts"
 import { type RestorePreview, RestoreService } from "../../core/session/restore.ts"
+import { workingDirectory } from "../../core/session/working-directory.ts"
 import type { ChatMessage } from "./contracts.ts"
 import { writeTranscriptSnapshot } from "./transcript.ts"
 
@@ -15,7 +16,7 @@ export class NativeRecovery {
   readonly restore: RestoreService
   constructor(
     readonly state: SessionStateAccess,
-    policy: CheckpointPolicy,
+    readonly policy: CheckpointPolicy,
     readonly host: {
       history(): ChatMessage[]
       replace(messages: ChatMessage[]): void
@@ -60,6 +61,8 @@ export class NativeRecovery {
     }
   }
   assertReady(): void {
+    if (workingDirectory(this.state.read().state)?.pending)
+      throw new Error("Working-directory publication needs transcript recovery; reconnect before sending")
     if (this.restore.journal() || this.branches.view().switch)
       throw new Error("Finish session recovery before starting another turn")
   }
@@ -75,12 +78,14 @@ export class NativeRecovery {
     }
     const node = this.branches.capture({
       kind,
+      cwd: this.policy.cwd,
       label,
       promptId,
       messages,
       eventSequence: this.host.sequence(),
       eventStart: kind === "base" ? 0 : this.host.startSequence(),
       usage: this.host.usage(),
+      inheritedUsage: this.branches.view().head ? this.branches.node().inheritedUsage : undefined,
       notes: this.host.notes(),
     })
     if (
@@ -98,6 +103,11 @@ export class NativeRecovery {
   rewindPreview(id: string) {
     const view = this.branches.view(),
       node = this.branches.node(id)
+    const cwd = node.cwd ?? workingDirectory(this.state.read().state)?.original ?? this.policy.cwd
+    if (hostPath(cwd) !== hostPath(this.policy.cwd))
+      throw new Error(
+        "This boundary belongs to a different working directory; change to that directory before rewinding",
+      )
     this.branches.context(node.id)
     return {
       node,
@@ -109,6 +119,7 @@ export class NativeRecovery {
   }
   async rewind(id: string, revision: string): Promise<void> {
     this.assertReady()
+    this.rewindPreview(id)
     if (this.branches.view().revision !== revision)
       throw new Error("Session changed; review the boundary again")
     this.host.pause()

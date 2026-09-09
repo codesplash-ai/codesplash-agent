@@ -139,6 +139,22 @@ export class SessionController {
     return this.#session.createSkill(name, write)
   }
 
+  async exportHistory(options: import("./session/portable.ts").ExportOptions) {
+    if (this.#closed || !this.#session.exportHistory)
+      throw new Error("Portable export is unavailable for this engine")
+    return this.#session.exportHistory(options)
+  }
+  directoryStatus() {
+    return this.#session.directoryStatus?.()
+  }
+  async changeDirectory(request: import("./session/working-directory.ts").DirectoryRequest) {
+    if (this.#closed) throw new Error("Session is closed")
+    if (!this.#session.changeDirectory)
+      throw new Error(
+        "This engine cannot change a live working directory; use /new and select the destination for a new session, or resume through its owning CLI",
+      )
+    return this.#session.changeDirectory(request)
+  }
   async sessionRecovery(request: import("./session/recovery-contract.ts").RecoveryRequest) {
     if (this.#closed || !this.#session.sessionRecovery)
       throw new Error("Session recovery is unavailable for this engine")

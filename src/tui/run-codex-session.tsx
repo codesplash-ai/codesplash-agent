@@ -170,6 +170,10 @@ export async function runCodexSession(
   const isCodesplash = engine === "codesplash"
   let policy = options.policy ?? defaultSessionPolicy
   const historyEnabled = options.historyEnabled ?? true
+  if (options.resume?.effectiveProjectId) {
+    const { inspectProject } = await import("../core/preflight.ts")
+    project = await inspectProject(options.resume.projectPath)
+  }
 
   // Full access is never sticky: every session open re-confirms, resume included.
   if (policy.sandbox === "danger-full-access") {
@@ -225,7 +229,7 @@ export async function runCodexSession(
     promptHistory = await projectPromptHistory(store.root, projectId, engine)
     let handle: SessionHandle
     if (options.resume) {
-      handle = await store.open(projectId, localSessionId)
+      handle = await store.open(options.resume.projectId, localSessionId)
       recorder = new SessionRecorder(handle)
       const { events } = await readSessionEvents(handle.directory)
       recorder.seedFromHistory(events)
@@ -305,6 +309,7 @@ export async function runCodexSession(
         const openOptions: OpenSessionOptions = {
           cwd: project.cwd,
           localSessionId,
+          model: options.config?.models?.[engine],
           nativeSessionId: usesProviderThread ? withNativeSessionId : undefined,
           policy,
           firstSequence,
@@ -356,10 +361,17 @@ export async function runCodexSession(
       // live session; overlay rules are rebuilt from the same inputs the session was opened
       // with (config rules + CLI overrides + grants path), so what it shows is what applies.
       const liveSession = session
+      const effective = liveSession.directoryStatus?.()
+      if (effective && effective.cwd !== project.cwd) {
+        const { inspectProject } = await import("../core/preflight.ts")
+        project = await inspectProject(effective.cwd)
+      }
       const permissionsUi: SessionPermissionsUi | undefined = permissionLayer
         ? {
             bypassAllowed,
-            workspaceTrusted,
+            get workspaceTrusted() {
+              return liveSession.directoryStatus?.().trusted ?? workspaceTrusted
+            },
             sandboxStatus: liveSession.sandboxStatus
               ? () => liveSession.sandboxStatus?.() ?? "unavailable"
               : undefined,
