@@ -1,6 +1,8 @@
 /** Persists coalesced session events: full text instead of per-token deltas, never raw payloads. */
 import type { AgentEvent, SessionStatus } from "./events.ts"
-import type { SessionHandle } from "./sessions.ts"
+import { persistOutcomes } from "./session/outcome-log.ts"
+import { emptyOutcomes, projectOutcomes, reduceOutcome } from "./session/outcomes.ts"
+import { readSessionEvents, type SessionHandle } from "./sessions.ts"
 
 const MAX_PERSISTED_LINE_BYTES = 256 * 1024
 const TRUNCATION_MARKER = "…[truncated]"
@@ -12,6 +14,8 @@ export class SessionRecorder {
   readonly #knownTurnIds: string[] = []
   #chain: Promise<void> = Promise.resolve()
   #failure: Error | undefined
+  #outcomes = emptyOutcomes()
+  #outcomeFailure: Error | undefined
   #closed = false
   #lastSequence: number
   #lastStatus: SessionStatus
@@ -21,6 +25,9 @@ export class SessionRecorder {
     this.#handle = handle
     this.#lastSequence = handle.meta.lastSequence
     this.#lastStatus = handle.meta.lastStatus
+    this.#enqueue(async () => {
+      this.#outcomes = projectOutcomes((await readSessionEvents(handle.directory)).events)
+    })
   }
 
   /** Turn IDs seen in this session's persisted history plus the live stream. */
@@ -116,7 +123,12 @@ export class SessionRecorder {
     this.#enqueue(() => this.#handle.updateMeta({ permissionMode }))
   }
 
+  get outcomeFailure(): Error | undefined {
+    return this.#outcomeFailure
+  }
+
   flush(): Promise<void> {
+    if (!this.#closed) this.#enqueueOutcomeSync()
     return this.#chain
   }
 
@@ -124,6 +136,7 @@ export class SessionRecorder {
     if (this.#closed) return this.#chain
     if (finalStatus) this.#lastStatus = finalStatus
     this.#enqueueMetaSync()
+    this.#enqueueOutcomeSync()
     this.#closed = true
     try {
       await this.#chain
@@ -134,7 +147,26 @@ export class SessionRecorder {
 
   #append(event: AgentEvent): void {
     const line = serializeEvent(event)
-    this.#enqueue(() => this.#handle.appendEventLines([line]))
+    this.#enqueue(async () => {
+      await this.#handle.appendEventLines([line])
+      this.#outcomes = reduceOutcome(this.#outcomes, event)
+    })
+    if (event.kind === "turn.completed") this.#enqueueOutcomeSync()
+  }
+
+  #enqueueOutcomeSync(): void {
+    this.#enqueue(async () => {
+      try {
+        persistOutcomes(this.#handle.state, this.#outcomes)
+        this.#outcomeFailure = undefined
+      } catch (error) {
+        if (!this.#outcomeFailure)
+          process.stderr.write(
+            "codesplash: outcome cache unavailable; recaps will rebuild from session events\n",
+          )
+        this.#outcomeFailure = error instanceof Error ? error : new Error("Outcome cache write failed")
+      }
+    })
   }
 
   #enqueueMetaSync(): void {

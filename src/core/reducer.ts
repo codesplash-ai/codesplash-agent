@@ -1,5 +1,7 @@
 /** Pure projection from the ordered engine event stream to renderable application state. */
+
 import type { AgentEvent, EngineId, ItemStatus, RateLimitUsage, SessionStatus, TurnStatus } from "./events.ts"
+import { emptyOutcomes, type OutcomeState, reduceOutcome } from "./session/outcomes.ts"
 
 export type TranscriptItem = {
   id: string
@@ -20,6 +22,7 @@ export type PendingRequest = {
 }
 
 export type AppViewState = {
+  outcomes?: OutcomeState
   inputQueue?: import("./session/input-queue.ts").InputQueueSnapshot
   engine?: EngineId
   model?: string
@@ -73,7 +76,12 @@ function upsertTranscriptItem(
 export function reduceAgentEvent(state: AppViewState, event: AgentEvent): AppViewState {
   if (event.sequence <= state.lastSequence) return state
 
-  const next = { ...state, engine: event.engine, lastSequence: event.sequence }
+  const next = {
+    ...state,
+    engine: event.engine,
+    lastSequence: event.sequence,
+    outcomes: reduceOutcome(state.outcomes ?? emptyOutcomes(), event),
+  }
 
   switch (event.kind) {
     case "session.status":

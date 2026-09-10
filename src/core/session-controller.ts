@@ -3,6 +3,8 @@ import type { AgentEvent } from "./events.ts"
 import type { AppViewState } from "./reducer.ts"
 import { initialAppViewState, reduceAgentEvent } from "./reducer.ts"
 import type { InputAcknowledgment, InputIntent } from "./session/input-queue.ts"
+import { emptyOutcomes, localRecap } from "./session/outcomes.ts"
+import type { PresentationRequest } from "./session/presentation.ts"
 
 export type SessionStateListener = (state: AppViewState) => void
 
@@ -137,6 +139,21 @@ export class SessionController {
     if (this.#closed || !this.#session.createSkill)
       throw new Error("Skill creation is unavailable for this engine")
     return this.#session.createSkill(name, write)
+  }
+
+  async sessionPresentation(request: PresentationRequest): Promise<unknown> {
+    if (this.#closed) throw new Error("Session is closed")
+    const outcomes = this.#state.outcomes ?? emptyOutcomes()
+    if (request.action === "recap" && !request.generate) return localRecap(outcomes, request.since)
+    if (request.action === "outcomes")
+      return {
+        cursor: outcomes.cursor,
+        dropped: outcomes.dropped,
+        rows: outcomes.rows.filter((row) => row.lastSequence > (request.since ?? -1)),
+      }
+    if (!this.#session.sessionPresentation)
+      throw new Error("Session presentation controls are unavailable for this engine")
+    return this.#session.sessionPresentation(request)
   }
 
   async exportHistory(options: import("./session/portable.ts").ExportOptions) {

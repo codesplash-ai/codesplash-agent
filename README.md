@@ -214,6 +214,32 @@ permissions, sandbox, project memory and checkpoint scope are rebuilt for the de
 queue entries stay paused and require editing before reuse. Codex/Claude require a new session or
 their own CLI to change directories.
 
+### Session information and summaries
+
+`/session-info` shows the live identity, working directory, policy, branch, recovery, queue,
+checkpoints and cumulative versus inherited usage. Add `--copy` to explicitly copy this information
+in terminals supporting OSC52. `codesplash session info <id> --json` inspects recorded information
+without opening a provider; recorded policy is labelled separately from live policy.
+
+`/recap` summarizes local turn outcomes, and `/outcomes` shows their typed records. Add
+`--since SEQUENCE` to select newer activity. Completed turns also show a short summary; returning
+after five idle minutes offers `/recap` without taking focus from the composer or an approval.
+The derived outcome log contains counts, status, timing and observed usage, excludes conversation
+text and tool bodies, and retains up to 1,000 turns. Canonical events repair a missing or damaged
+cache. No-history sessions keep these records only in memory.
+
+`/rename TEXT` sets a manual title; `/rename --auto` refreshes it from visible user conversation.
+Native `/rename --generate` and `/recap --generate` explicitly request a potentially paid summary
+using the current model, with no tools, bounded evidence, a 512-token output limit and a 30-second
+deadline. Foreground work and close cancel pending generation; late results cannot overwrite a
+manual title. Observed usage is accounted, and missing usage reports make the estimate incomplete.
+Codex uses deterministic controls; Claude handoff retains its owning application's presentation.
+
+CLI equivalents are `session recap <id>`, `session outcomes <id>` and
+`session rename <id> --auto|--generate`. Native `session recap <id> --generate` uses the recorded
+model. `session outcomes <id> --repair --apply` repairs the local cache under an inactive-session
+writer lease. Local recaps make no model call and describe incomplete recorded turns as uncertain.
+
 ### Find and organize sessions
 
 ```sh

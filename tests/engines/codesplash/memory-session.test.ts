@@ -176,3 +176,41 @@ test("foreground model change cancels and settles a noncooperative idle learner;
   await session.close()
   expect(await readdir(join(f.cwd, "data", "memory")).catch(() => [])).toEqual([])
 })
+
+test("generated title shares learner ownership; manual rename cancels it and close settles without late writes", async () => {
+  let generating: AbortSignal | undefined
+  const f = await fixture((request, signal) => {
+    if (request.system.includes("Summarize the reference")) {
+      generating = signal
+      return { [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => {}) }) }
+    }
+    return (async function* () {
+      yield { type: "text_delta", text: "Parser fixed" } as const
+      yield { type: "usage", usage: { inputTokens: 10, outputTokens: 2 } } as const
+      yield { type: "done", stopReason: "end_turn" } as const
+    })()
+  })
+  const session = await f.open(true)
+  await settled(f, session, "Fix the parser")
+  if (!session.sessionPresentation) throw new Error("Missing presentation controls")
+  const pending = session.sessionPresentation({ action: "rename", generate: true })
+  const failed = pending.catch((error) => error)
+  for (let n = 0; n < 100 && !generating; n++) await Bun.sleep(2)
+  expect(generating).toBeDefined()
+  expect(await session.sessionPresentation({ action: "rename", title: "My title" })).toBe("My title")
+  expect(((await failed) as Error).message).toContain("interrupted")
+  expect(generating?.aborted).toBe(true)
+  expect(await session.sessionPresentation({ action: "info" })).toMatchObject({
+    title: "My title",
+    manualTitle: true,
+    persistence: "memory only",
+    usage: { cumulative: { hasUnpricedUsage: true } },
+  })
+  generating = undefined
+  const closing = session.sessionPresentation({ action: "recap", generate: true })
+  const closed = closing.catch((error) => error)
+  for (let n = 0; n < 100 && !generating; n++) await Bun.sleep(2)
+  await session.close()
+  expect(await closed).toBeInstanceOf(Error)
+  expect((generating as AbortSignal | undefined)?.aborted).toBe(true)
+})

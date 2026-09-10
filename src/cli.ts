@@ -39,6 +39,8 @@ Usage:
   codesplash import sessions <codesplash|claude|codex|cursor> SOURCE [args]
   codesplash create-skill <name> [--write]
   codesplash session <list|search|show|rename|archive|unarchive|delete|projects|move|section|migrate|compress|recover|reindex> [args]
+  codesplash session <info|recap|outcomes> <id> [--json]
+  codesplash session rename <id> <title|--auto|--generate>
   codesplash session <export|import|foreign|cd|pwd|tree|fork|rewind|checkpoints|restore> [args]
   codesplash memory <list|show|search|remember|edit|forget|accept|status|repair|index|link|refresh|extract|consolidate> [args]
                     [--path DIR] [--trust] [--read-only] [--no-history] [--model ID]

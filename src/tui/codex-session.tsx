@@ -27,6 +27,8 @@ import type {
 import { defaultSessionPolicy, isPermissionMode, suspendToShell } from "../core/index.ts"
 import type { BranchView } from "../core/session/branches.ts"
 import type { AcceptedPrompt, InputIntent, InputItem } from "../core/session/input-queue.ts"
+import { emptyOutcomes, outcomeSummary } from "../core/session/outcomes.ts"
+import { awayRecap, presentationArguments } from "../core/session/presentation.ts"
 import { recoveryCommand } from "../core/session/recovery-command.ts"
 import { extractImageAttachments } from "./attachments.ts"
 import type { BrandPalette } from "./brand.ts"
@@ -38,6 +40,10 @@ export type CodexSessionAction = "home" | "reconnect" | "new" | "resume-picker" 
 
 export type SlashCommandName =
   | "cd"
+  | "session-info"
+  | "recap"
+  | "rename"
+  | "outcomes"
   | "pwd"
   | "export"
   | "help"
@@ -82,6 +88,10 @@ export type ParsedSlashCommand =
 
 const slashCommandNames: readonly SlashCommandName[] = [
   "cd",
+  "session-info",
+  "recap",
+  "rename",
+  "outcomes",
   "pwd",
   "export",
   "help",
@@ -150,6 +160,13 @@ export function engineStatusLabel(engine: EngineId, model: string | undefined): 
 }
 
 export const slashCommandHelp: ReadonlyArray<{ command: string; description: string }> = [
+  { command: "/session-info [--copy]", description: "Inspect session identity, policy, recovery and usage" },
+  {
+    command: "/recap [--since SEQUENCE] [--generate]",
+    description: "Local outcome recap; generation is explicit",
+  },
+  { command: "/rename TEXT|--auto|--generate", description: "Set or refresh the session title" },
+  { command: "/outcomes", description: "Inspect typed local turn outcomes" },
   { command: "/pwd", description: "Show the effective working directory" },
   {
     command: "/cd PATH [--carry|--clear --apply --revision REVISION]",
@@ -530,6 +547,8 @@ export function CodexSessionApp({
   const renderer = useRenderer()
   const { width: terminalWidth, height: terminalHeight } = useTerminalDimensions()
   const textareaRef = useRef<TextareaRenderable>(null)
+  const activity = useRef({ time: Date.now(), sequence: controller.state.lastSequence })
+  const [awayNotice, setAwayNotice] = useState(false)
   const draftRevision = useRef(0)
   const resetCursorBlinkRef = useRef<() => void>(() => {})
   const scrollboxRef = useRef<ScrollBoxRenderable>(null)
@@ -859,6 +878,31 @@ export function CodexSessionApp({
         case "compact":
           void runCommand(() => controller.compact(command.argument))
           return
+        case "session-info":
+        case "recap":
+        case "rename":
+        case "outcomes":
+          void runCommand(async () => {
+            const args = (command.argument ?? "").split(/\s+/).filter(Boolean)
+            const copy = args.includes("--copy")
+            if (copy && command.name !== "session-info")
+              throw new Error("--copy is available on /session-info")
+            const request = presentationArguments(
+              command.name === "session-info" ? "info" : (command.name as "recap" | "rename" | "outcomes"),
+              args.filter((arg) => arg !== "--copy"),
+            )
+            const result = await controller.sessionPresentation(request)
+            const text = typeof result === "string" ? result : JSON.stringify(result, null, 2)
+            if (Buffer.byteLength(text) > 65536)
+              throw new Error(
+                "Presentation exceeds the 64 KiB display/copy limit; select a smaller outcome range",
+              )
+            if (copy && !renderer.copyToClipboardOSC52(text))
+              throw new Error("This terminal does not support clipboard copying")
+            setAwayNotice(false)
+            setOverlay({ kind: "resources", title: `${command.name}${copy ? " · copied" : ""}`, text })
+          })
+          break
         case "pwd":
           setOverlay({
             kind: "resources",
@@ -992,10 +1036,16 @@ export function CodexSessionApp({
       restoreInput,
       permissions,
       project.cwd,
+      renderer,
     ],
   )
 
   useKeyboard((key) => {
+    const now = Date.now(),
+      previous = activity.current
+    if (awayRecap(previous.time, now, !!state.pendingRequest, previous.sequence, state.lastSequence))
+      setAwayNotice(true)
+    activity.current = { time: now, sequence: state.lastSequence }
     if (key.ctrl && (key.name === "c" || key.name === "q")) {
       key.preventDefault()
       onAction("home")
@@ -1284,6 +1334,17 @@ export function CodexSessionApp({
         </box>
       ) : null}
 
+      {awayNotice && (
+        <text fg={palette.muted}>
+          While away, session activity was recorded. /recap shows the local summary.
+        </text>
+      )}
+      {(state.outcomes ?? emptyOutcomes()).rows.at(-1)?.status !== "running" &&
+        state.outcomes?.rows.at(-1) && (
+          <text fg={palette.muted}>
+            {outcomeSummary(state.outcomes.rows.at(-1) as import("../core/session/outcomes.ts").TurnOutcome)}
+          </text>
+        )}
       <box
         style={{
           width: "100%",

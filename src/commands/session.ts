@@ -11,6 +11,16 @@ export async function runSessionCommand(
   const output = options.output ?? ((text) => process.stdout.write(text))
   const repository =
     options.repository ?? new SessionRepository(sessionsRootDirectory(dataDirectory(options.env)))
+  if (
+    ["info", "recap", "outcomes"].includes(args[0] ?? "") ||
+    (args[0] === "rename" && (args.includes("--auto") || args.includes("--generate")))
+  )
+    return (await import("./session-presentation.ts")).sessionPresentationCommand(
+      repository,
+      args,
+      output,
+      options.env,
+    )
   if (args[0] === "export" || args[0] === "import") {
     const { sessionPortableCommand } = await import("./session-portable.ts")
     return sessionPortableCommand(repository, args, output)

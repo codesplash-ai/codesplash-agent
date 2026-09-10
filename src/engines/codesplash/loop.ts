@@ -910,6 +910,10 @@ export class CodesplashLoop {
     this.#commitRequestUsage(usage, model)
     this.#emitAuxiliaryTotals()
   }
+  recordUnknownAuxiliaryUsage(): void {
+    this.#hasUnpricedUsage = true
+    this.#emitAuxiliaryTotals()
+  }
   recordEmbeddingUsage(tokens: number, cost: number | undefined): void {
     this.#embeddingTokens += tokens
     if (cost === undefined) this.#hasUnpricedUsage = true

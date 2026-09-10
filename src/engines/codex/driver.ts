@@ -18,6 +18,12 @@ import { BranchStore } from "../../core/session/branches.ts"
 import { MemorySessionState } from "../../core/session/control.ts"
 import { forkLocalSession } from "../../core/session/fork.ts"
 import { type InputIntent, InputQueue } from "../../core/session/input-queue.ts"
+import {
+  automaticTitle,
+  type PresentationRequest,
+  renameSession,
+  sessionInfo,
+} from "../../core/session/presentation.ts"
 import type { RecoveryRequest, RecoveryResult } from "../../core/session/recovery-contract.ts"
 import {
   CodexAppServerClient,
@@ -501,6 +507,50 @@ class CodexSession implements EngineSession {
     const response = await this.client.process.connection.request<TurnStartResponse>("turn/start", params)
     this.#modelOverride = undefined
     return response.turn.id
+  }
+
+  async sessionPresentation(request: PresentationRequest): Promise<unknown> {
+    this.#requireThread()
+    if (request.generate)
+      throw new Error("Codex has no bounded no-tool summary contract; use the local recap or --auto title")
+    if (request.action === "info")
+      return sessionInfo({
+        state: this.#branches.state,
+        id: this.localSessionId,
+        nativeId: this.nativeSessionId,
+        engine: "codex",
+        cwd: this.options.cwd,
+        model: this.#model,
+        usage: this.#usage,
+        status: this.#turns.busy ? "running" : "ready",
+        policy: {
+          source: "live",
+          sandbox: this.options.policy?.sandbox,
+          approval: this.options.policy?.approvalPolicy,
+          permission: "provider owned",
+          trusted: this.options.workspaceTrusted,
+        },
+        checkpointAvailability: "Provider-owned execution has no native file checkpoints",
+      })
+    if (request.action !== "rename") throw new Error("Use the local session outcome projection")
+    if (this.#turns.busy || this.#recoveryBusy)
+      throw new Error("Wait for the current operation before renaming")
+    this.#recoveryBusy = true
+    try {
+      await this.options.flushSessionEvents?.()
+      const directory = this.#branches.state.directory
+      const events = directory
+        ? (await (await import("../../core/sessions.ts")).readSessionEvents(directory)).events
+        : []
+      return renameSession(
+        this.#branches.state,
+        request.auto ? (events.length ? automaticTitle(events) : this.#lastPrompt) : (request.title ?? ""),
+        !request.auto,
+      )
+    } finally {
+      this.#recoveryBusy = false
+      this.#turns.runner.wake()
+    }
   }
 
   async exportHistory(options: import("../../core/session/portable.ts").ExportOptions) {

@@ -31,6 +31,14 @@ import {
   type InputIntent,
   InputQueue,
 } from "../../core/session/input-queue.ts"
+import { OwnedMaintenance } from "../../core/session/maintenance.ts"
+import {
+  type PresentationRequest,
+  renameSession,
+  sessionInfo,
+  titleText,
+  titleToken,
+} from "../../core/session/presentation.ts"
 import { projectPromptHistory } from "../../core/session/prompt-history.ts"
 import { type InputCompletion, QueueRunner } from "../../core/session/queue-runner.ts"
 import type { RecoveryRequest, RecoveryResult } from "../../core/session/recovery-contract.ts"
@@ -83,6 +91,7 @@ import {
   describePermissionRules,
   type PermissionRuntimeOptions,
 } from "./permissions.ts"
+import { generatePresentation } from "./presentation.ts"
 import { buildSystemPrompt } from "./prompt.ts"
 import { NativeRecovery } from "./recovery.ts"
 import type { SandboxRuntime } from "./sandbox/contracts.ts"
@@ -437,9 +446,7 @@ class CodesplashSession implements EngineSession {
   readonly #memory: MemorySession
   #memoryText = ""
   #memoryEpoch = 0
-  #learningTimer: ReturnType<typeof setTimeout> | undefined
-  #learningAbort: AbortController | undefined
-  #learningPromise: Promise<void> | undefined
+  #ownedMaintenance = new OwnedMaintenance()
   #lastTurnSucceeded = false
   readonly #inputs: ContextInputs
   #inputPromise: Promise<unknown> | undefined
@@ -705,6 +712,87 @@ class CodesplashSession implements EngineSession {
   directoryStatus() {
     return { cwd: this.#cwd, trusted: this.options.workspaceTrusted ?? true }
   }
+  async sessionPresentation(request: PresentationRequest): Promise<unknown> {
+    this.#requireOpen()
+    const state = this.#recovery.branches.state
+    if (request.action === "info")
+      return sessionInfo({
+        state,
+        id: this.localSessionId,
+        nativeId: this.nativeSessionId,
+        engine: "codesplash",
+        cwd: this.#cwd,
+        model: this.modelForDirectory(),
+        sequence: this.#factory.nextSequence - 1,
+        usage: this.#loop.usageSnapshot(),
+        status: this.#loop.isTurnActive ? "running" : "ready",
+        policy: {
+          source: "live",
+          sandbox: this.#policy.sandbox,
+          approval: this.#policy.approvalPolicy,
+          permission: this.#permissions.mode,
+          trusted: this.options.workspaceTrusted ?? true,
+          profile: this.#sandbox.profile.hash,
+        },
+        checkpointAvailability: this.#recovery.checkpoints.availability(),
+      })
+    if (request.generate) {
+      // Reserve only preparation. Foreground work can cancel the owned request while it awaits I/O.
+      const prepared = await this.#inputOperation(async () => {
+        const model = this.#model,
+          provider = this.#providers[model.provider]
+        if (!provider) throw new Error("No provider for session summary")
+        return {
+          model,
+          provider,
+          messages: this.#loop.historySnapshot(),
+          token: titleToken(state, this.modelForDirectory()),
+        }
+      })
+      this.#requireOpen()
+      if (this.#turnReserved || this.#loop.isTurnActive || this.inputQueue.next())
+        throw new Error("Foreground input takes priority over session summaries")
+      return this.#ownedMaintenance.run(`session-${request.action}`, async (signal) => {
+        const text = await generatePresentation({
+          ...prepared,
+          kind: request.action === "rename" ? "title" : "recap",
+          signal,
+          sanitize: (text) => this.#sandbox.sanitize?.(text) ?? text,
+          onUsage: (usage) =>
+            usage
+              ? this.#loop.recordAuxiliaryUsage(usage, prepared.model)
+              : this.#loop.recordUnknownAuxiliaryUsage(),
+        })
+        signal.throwIfAborted()
+        if (titleToken(state, this.modelForDirectory()) !== prepared.token)
+          throw new Error("Session context changed; generated summary discarded")
+        return request.action === "rename"
+          ? renameSession(state, text, false, prepared.token, this.modelForDirectory())
+          : text
+      })
+    }
+    if (request.action === "rename")
+      return this.#inputOperation(async () => {
+        const user = [...this.#loop.historySnapshot()]
+          .reverse()
+          .find(
+            (message) =>
+              message.role === "user" &&
+              message.content.some((block) => block.type === "text" && block.text.trim()),
+          )
+        const automatic =
+          user?.content
+            .filter((block) => block.type === "text")
+            .map((block) => (block.type === "text" ? block.text : ""))
+            .join(" ") ?? "Untitled session"
+        return renameSession(
+          state,
+          request.auto ? titleText(automatic) : (request.title ?? ""),
+          !request.auto,
+        )
+      })
+    throw new Error("Local recaps and outcomes are projected by the session controller")
+  }
   withIdle<T>(operation: () => Promise<T>) {
     return this.#inputOperation(operation)
   }
@@ -969,13 +1057,10 @@ class CodesplashSession implements EngineSession {
   }
   async #interruptAndSettle(): Promise<void> {
     this.#admissionAbort?.abort(new Error("Input interrupted before provider admission"))
-    this.#learningAbort?.abort()
-    if (this.#learningTimer) {
-      clearTimeout(this.#learningTimer)
-      this.#learningTimer = undefined
-    }
+    this.#ownedMaintenance.cancel()
     this.#maintenanceAbort?.abort()
     this.#loop.interrupt()
+    await this.#ownedMaintenance.settle()
     await this.#admissionSettled
     await this.#turnPromise?.catch(() => {})
     await this.#inputPromise?.catch(() => {})
@@ -1216,17 +1301,13 @@ class CodesplashSession implements EngineSession {
     this.#closed = true
     this.#inputRunner.stop()
     this.#admissionAbort?.abort(new Error("Session closed"))
-    this.#learningAbort?.abort()
-    if (this.#learningTimer) {
-      clearTimeout(this.#learningTimer)
-      this.#learningTimer = undefined
-    }
+    this.#ownedMaintenance.cancel()
     this.#maintenanceAbort?.abort()
     this.#loop.interrupt()
     await this.#admissionSettled?.catch(() => {})
     await this.#turnPromise?.catch(() => {})
     await this.#inputPromise?.catch(() => {})
-    await this.#cancelLearning()
+    await this.#ownedMaintenance.close()
     await this.#inputRunner.settled()
     try {
       await this.#sandbox.close()
@@ -1461,7 +1542,7 @@ class CodesplashSession implements EngineSession {
       !this.#config.memory?.autoLearn ||
       !this.#memory.available ||
       !this.#memory.options.writable() ||
-      this.#learningPromise
+      this.#ownedMaintenance.busy
     )
       return
     if (
@@ -1470,47 +1551,43 @@ class CodesplashSession implements EngineSession {
       )
     )
       return
-    this.#learningTimer = setTimeout(() => {
-      this.#learningTimer = undefined
-      if (this.#closed || this.#turnReserved || this.#loop.isTurnActive) return
-      const abort = new AbortController()
-      this.#learningAbort = abort
-      this.#learningPromise = (async () => {
-        const timer = setTimeout(
-          () => abort.abort(new Error("Automatic memory maintenance reached its 60-second limit")),
-          60000,
-        )
-        try {
-          const extracted = await this.#maintain("extract", abort.signal)
-          this.#memoryNotice(extracted)
-          if (/^[1-9][0-9]* memory candidates saved/.test(extracted)) {
-            const snapshot = (await this.#memory.store(abort.signal))?.snapshot()
-            if ((snapshot?.records.filter((r) => r.kind === "candidate").length ?? 0) > 1)
-              this.#memoryNotice(await this.#maintain("consolidate", abort.signal))
+    void this.#ownedMaintenance
+      .run(
+        "memory-learning",
+        async (signal) => {
+          if (this.#closed || this.#turnReserved || this.#loop.isTurnActive) return
+          const abort = new AbortController()
+          const cancel = () => abort.abort(signal.reason)
+          signal.addEventListener("abort", cancel, { once: true })
+          const timer = setTimeout(
+            () => abort.abort(new Error("Automatic memory maintenance reached its 60-second limit")),
+            60000,
+          )
+          try {
+            const extracted = await this.#maintain("extract", abort.signal)
+            abort.signal.throwIfAborted()
+            this.#memoryNotice(extracted)
+            if (/^[1-9][0-9]* memory candidates saved/.test(extracted)) {
+              const snapshot = (await this.#memory.store(abort.signal))?.snapshot()
+              if ((snapshot?.records.filter((r) => r.kind === "candidate").length ?? 0) > 1)
+                this.#memoryNotice(await this.#maintain("consolidate", abort.signal))
+            }
+          } catch (error) {
+            if (!signal.aborted)
+              this.#memoryNotice(
+                `Memory learning stopped: ${error instanceof Error ? error.message : String(error)}`,
+              )
+          } finally {
+            clearTimeout(timer)
+            signal.removeEventListener("abort", cancel)
           }
-        } finally {
-          clearTimeout(timer)
-        }
-      })()
-        .catch((error) => {
-          if (!abort.signal.aborted)
-            this.#memoryNotice(
-              `Memory learning stopped: ${error instanceof Error ? error.message : String(error)}`,
-            )
-        })
-        .finally(() => {
-          this.#learningAbort = undefined
-          this.#learningPromise = undefined
-        })
-    }, 100)
+        },
+        100,
+      )
+      .catch(() => {})
   }
   async #cancelLearning(): Promise<void> {
-    if (this.#learningTimer) {
-      clearTimeout(this.#learningTimer)
-      this.#learningTimer = undefined
-    }
-    this.#learningAbort?.abort(new Error("Foreground work or shutdown interrupted memory learning"))
-    await this.#learningPromise
+    await this.#ownedMaintenance.cancelAndSettle()
   }
 
   #push(event: AgentEvent): void {
