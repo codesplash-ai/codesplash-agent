@@ -36,6 +36,18 @@ export type ExecutionResult = {
 }
 
 export interface SandboxRuntime {
+  /** Reviewed external handlers use fixed grants and literal JSON stdin, never temporary grants. */
+  executeFixed?(
+    argv: string[],
+    input: string,
+    signal: AbortSignal,
+    options: {
+      mode: PermissionMode
+      environment: readonly string[]
+      timeoutMs: number
+      writeWorkspace: boolean
+    },
+  ): Promise<ExecutionResult>
   openDuplex?(
     argv: string[],
     signal: AbortSignal,

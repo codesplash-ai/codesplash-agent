@@ -177,6 +177,47 @@ export class NativeSandbox implements SandboxRuntime {
         `Sandbox network denied: ${target}. Request network access with request_permissions; no request was sent.`,
       )
   }
+  async executeFixed(
+    argv: string[],
+    input: string,
+    signal: AbortSignal,
+    options: {
+      mode: PermissionMode
+      environment: readonly string[]
+      timeoutMs: number
+      writeWorkspace: boolean
+    },
+  ): Promise<ExecutionResult> {
+    if (this.profile.mode === "danger-full-access")
+      throw new Error("Hook commands require an enforced OS sandbox")
+    if (
+      !argv[0] ||
+      argv.length > 129 ||
+      argv.some((arg) => typeof arg !== "string" || arg.includes("\0") || arg.length > 8192)
+    )
+      throw new Error("Invalid fixed command argv")
+    if (
+      Buffer.byteLength(input) > 128 * 1024 ||
+      !Number.isInteger(options.timeoutMs) ||
+      options.timeoutMs < 100 ||
+      options.timeoutMs > 30000
+    )
+      throw new Error("Fixed command input or timeout exceeds its limit")
+    if (options.environment.some((name) => !this.profile.environment.includes(name)))
+      throw new Error("Hook environment variable has no fixed sandbox grant")
+    return this.#invoke(
+      {
+        argv,
+        input,
+        timeoutMs: options.timeoutMs,
+        fixed: true,
+        environment: [...options.environment],
+        structured: true,
+      },
+      signal,
+      options.mode === "plan" || !options.writeWorkspace ? "plan" : options.mode,
+    )
+  }
   async execute(argv: string[], signal: AbortSignal, mode?: PermissionMode): Promise<ExecutionResult> {
     return this.#invoke({ argv, timeoutMs: 120_000 }, signal, mode)
   }
@@ -200,6 +241,8 @@ export class NativeSandbox implements SandboxRuntime {
       secrets?: Record<string, string>
       structured?: boolean
       redactions?: string[]
+      fixed?: boolean
+      environment?: string[]
     },
     signal: AbortSignal,
     mode?: PermissionMode,
@@ -209,8 +252,15 @@ export class NativeSandbox implements SandboxRuntime {
     let reaper: Awaited<ReturnType<typeof createMacReaper>> | undefined
     let unregister: (() => void) | undefined
     try {
-      const env = childEnvironment(temp, this.profile.environment)
-      const profile = this.#effective(mode)
+      const profile = command.fixed
+        ? {
+            ...this.profile,
+            environment: command.environment ?? [],
+            writeRoots: this.profile.writeRoots.filter((root) => contains(this.profile.cwd, root)),
+            ...(mode === "plan" ? { mode: "read-only" as const, writeRoots: [] } : {}),
+          }
+        : this.#effective(mode)
+      const env = childEnvironment(temp, profile.environment)
       let result: ExecutionResult
       if (profile.mode === "danger-full-access" && mode !== "plan") {
         result = await runProcess(command.argv, {
@@ -304,6 +354,16 @@ export class NativeSandbox implements SandboxRuntime {
   }
   async runTool(tool: HarnessTool, input: unknown, context: ToolContext): Promise<ToolOutcome> {
     const mode = context.permissions?.mode ?? "default"
+    // Trusted in-process extensions retain loop policy/checkpoints. A built-in name override
+    // must execute its reviewed callback instead of accidentally invoking the built-in worker.
+    if (tool.source?.id.startsWith("extension:"))
+      return tool.run(input, {
+        ...context,
+        policy:
+          this.profile.mode === "read-only" ? { ...context.policy, sandbox: "read-only" } : context.policy,
+        checkNetwork: this.checkNetwork,
+        sanitizeOutput: this.sanitize.bind(this),
+      })
     if (!FILE_TOOLS.has(tool.name)) {
       if (
         !["web_fetch", "web_search"].includes(tool.permissionName ?? tool.name) ||

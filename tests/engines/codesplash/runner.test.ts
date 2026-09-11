@@ -651,7 +651,7 @@ describe("runHeadless wiring", () => {
 
     const recorded: AgentEvent[] = []
     const nativeIds: string[] = []
-    let flushes = 0
+    const flushes: Array<{ nativeIds: number; events: number }> = []
     const recorder = {
       record: (event: AgentEvent) => {
         recorded.push(event)
@@ -660,7 +660,7 @@ describe("runHeadless wiring", () => {
         nativeIds.push(id)
       },
       flush: async () => {
-        flushes += 1
+        flushes.push({ nativeIds: nativeIds.length, events: recorded.length })
       },
     }
 
@@ -675,7 +675,10 @@ describe("runHeadless wiring", () => {
       "turn.completed",
     ])
     expect(nativeIds).toEqual([LOCAL_SESSION_ID])
-    expect(flushes).toBe(1)
+    expect(flushes).toEqual([
+      { nativeIds: 1, events: 0 },
+      { nativeIds: 1, events: 4 },
+    ])
   })
 })
 

@@ -57,11 +57,15 @@ export type PermissionRuleOverrides = {
 }
 
 export type OpenSessionOptions = {
+  disableExtensions?: boolean
+  interactiveExtensions?: boolean
   /** Owned canonical state, or an in-memory equivalent; no inferred file authority. */
   sessionState?: SessionStateAccess
   promptHistory?: import("./session/prompt-history.ts").PromptHistory
   /** Single-prompt headless callers hold previously queued work for interactive review. */
   resumeQueuedInput?: boolean
+  /** Live hook lifecycle identity; replayed history never dispatches lifecycle events. */
+  resuming?: boolean
   flushSessionEvents?: () => Promise<void>
   cwd: string
   localSessionId: string
@@ -176,6 +180,10 @@ export interface EngineSession {
   /** User-invoked rule edits only; engines reject these while tools/turns are active. */
   editPermissionRule?(command: string): Promise<void>
   mcpCommand?(command: string): Promise<unknown>
+  hooksCommand?(command: string): Promise<unknown>
+  pluginsCommand?(command: string): Promise<unknown>
+  extensionsCommand?(command: string): Promise<unknown>
+  setExtensionComposer?(callback?: (text: string) => boolean): void
   sandboxStatus?(): string
   permissionRules?(): Array<{
     tool: string

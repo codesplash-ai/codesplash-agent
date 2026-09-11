@@ -69,6 +69,7 @@ export function createToolRegistry(tools: HarnessTool[], generation = "builtin")
         throw new Error("Tool selection belongs to a stale runtime generation")
       return byName.get(name)
     },
-    source: (name) => (byName.has(name) ? { id: "builtin", generation } : undefined),
+    source: (name) =>
+      byName.get(name)?.source ?? (byName.has(name) ? { id: "builtin", generation } : undefined),
   }
 }

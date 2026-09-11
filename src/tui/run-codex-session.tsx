@@ -1,3 +1,8 @@
+import { openEngineSession } from "../core/session/open.ts"
+import { clearTransientState, usageSnapshotOf } from "../core/session/replay.ts"
+
+export { usageSnapshotOf } from "../core/session/replay.ts"
+
 import { createCliRenderer, type KittyKeyboardOptions, type ThemeMode } from "@opentui/core"
 import { createRoot } from "@opentui/react"
 import { assertManagedPolicy } from "../core/config/policy.ts"
@@ -123,6 +128,7 @@ export function replayedPermissionMode(state: AppViewState): PermissionMode | un
 }
 
 export type CodexSessionRunOptions = {
+  disableExtensions?: boolean
   /** Engine to run through the shared controller/recorder/session-screen flow. */
   engine?: HarnessEngineId
   /** Loaded harness config (with `-c` overrides applied); handed to the engine driver. */
@@ -329,6 +335,9 @@ export async function runCodexSession(
       const driver = createEngineDriver(engine, options.config)
       const open = (withNativeSessionId: string | undefined) => {
         const openOptions: OpenSessionOptions = {
+          disableExtensions: options.disableExtensions,
+          interactiveExtensions: true,
+          resuming: !!options.resume || firstSequence > 0,
           cwd: project.cwd,
           localSessionId,
           model: options.config?.models?.[engine],
@@ -348,7 +357,7 @@ export async function runCodexSession(
           permissionOverrides: isCodesplash ? options.permissions?.overrides : undefined,
           permissionGrantsPath,
         }
-        return driver.openSession(openOptions)
+        return openEngineSession(driver, openOptions, recorder)
       }
 
       let session: Awaited<ReturnType<typeof open>>
@@ -376,7 +385,6 @@ export async function runCodexSession(
 
       if (session.nativeSessionId && session.nativeSessionId !== nativeSessionId) {
         nativeSessionId = session.nativeSessionId
-        recorder?.recordNativeSessionId(session.nativeSessionId)
       }
 
       // The permission-layer surface the session screen renders: mode switching goes to the
@@ -484,31 +492,6 @@ export async function runCodexSession(
 
 function freshState(): AppViewState {
   return { ...initialAppViewState, transcript: [], plan: [], usage: {}, warnings: [] }
-}
-
-/** Cumulative usage from replayed state, or undefined when the session recorded none. */
-export function usageSnapshotOf(state: AppViewState): SessionUsageSnapshot | undefined {
-  const { inputTokens, cachedInputTokens, outputTokens, estimatedCostUsd, hasUnpricedUsage } = state.usage
-  const snapshot: SessionUsageSnapshot = {}
-  if (inputTokens !== undefined) snapshot.inputTokens = inputTokens
-  if (cachedInputTokens !== undefined) snapshot.cachedInputTokens = cachedInputTokens
-  if (outputTokens !== undefined) snapshot.outputTokens = outputTokens
-  if (estimatedCostUsd !== undefined) snapshot.estimatedCostUsd = estimatedCostUsd
-  if (state.usage.embeddingInputTokens !== undefined)
-    snapshot.embeddingInputTokens = state.usage.embeddingInputTokens
-  if (hasUnpricedUsage !== undefined) snapshot.hasUnpricedUsage = hasUnpricedUsage
-  return Object.keys(snapshot).length > 0 ? snapshot : undefined
-}
-
-/** Replayed state describes a past run; pending requests and turn state do not carry over. */
-function clearTransientState(state: AppViewState): AppViewState {
-  return {
-    ...state,
-    sessionStatus: "starting",
-    turnStatus: "idle",
-    pendingRequest: undefined,
-    error: undefined,
-  }
 }
 
 function describeError(error: unknown): string {

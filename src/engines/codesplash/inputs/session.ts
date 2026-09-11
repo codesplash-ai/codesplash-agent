@@ -2,6 +2,8 @@ import { lstat } from "node:fs/promises"
 import { dirname, relative, resolve } from "node:path"
 import type { UserInput } from "../../../core/engine.ts"
 import type { ContentBlock, HarnessTool } from "../contracts.ts"
+import type { PluginResourceRoot } from "../plugins/resolve.ts"
+import { verifySelection } from "../plugins/store.ts"
 import { projectRuleDirectories } from "../prompt.ts"
 import { contains } from "../sandbox/profile.ts"
 import { catalogSources, resourceMetadata } from "./catalog.ts"
@@ -43,6 +45,7 @@ export class ContextInputs {
     readonly trusted: boolean,
     readonly config: ContextInputConfig = {},
     readonly sanitize: (text: string) => string = (text) => text,
+    readonly plugins: PluginResourceRoot[] = [],
   ) {}
 
   async #read(run: ContextToolRunner, root: string, path: string, user: boolean): Promise<string> {
@@ -57,7 +60,7 @@ export class ContextInputs {
 
   async discover(run: ContextToolRunner, signal: AbortSignal): Promise<ResourceCatalog> {
     this.catalog = { resources: [], diagnostics: [] }
-    const sources: Array<{ root: string; user: boolean; paths: string[] }> = []
+    const sources: Array<{ root: string; user: boolean; paths: string[]; plugin?: string }> = []
     if (this.trusted) {
       // Only metadata for fixed ancestor rule names is checked on the host. Their bodies
       // still require read_file approval and exact sandbox access, never an implicit grant.
@@ -97,6 +100,10 @@ export class ContextInputs {
         user: true,
         paths: await resourcePaths(this.userRoot, signal, ["commands", "skills"]),
       })
+    for (const plugin of this.plugins) {
+      await verifySelection(plugin, "plugin", signal)
+      sources.push({ root: plugin.root, user: true, paths: plugin.paths, plugin: plugin.id })
+    }
     if (sources.reduce((sum, source) => sum + source.paths.length, 0) > 128)
       throw new Error("Context catalog exceeds 128 files")
     this.catalog = await catalogSources(sources, this.config, (root, path, user) =>
@@ -107,14 +114,21 @@ export class ContextInputs {
 
   async #body(resource: Resource, run: ContextToolRunner): Promise<string> {
     const root =
-      resource.source === "user"
-        ? this.userRoot
-        : contains(this.cwd, resource.path)
-          ? this.cwd
-          : dirname(resource.path)
+      resource.source === "plugin"
+        ? resource.root!
+        : resource.source === "user"
+          ? this.userRoot
+          : contains(this.cwd, resource.path)
+            ? this.cwd
+            : dirname(resource.path)
     const text =
       this.#preparedBodies?.get(resource.path) ??
-      (await this.#read(run, root, relative(root, resource.path), resource.source === "user"))
+      (await this.#read(
+        run,
+        root,
+        relative(root, resource.path),
+        ["user", "plugin"].includes(resource.source),
+      ))
     const fresh = resourceMetadata(resource, text)
     if (!fresh) throw new Error(`Resource is no longer active: ${resource.path}`)
     if (fresh.fork) throw new Error("Forked skills require M7 subagents; use an inline skill")
@@ -124,13 +138,15 @@ export class ContextInputs {
   async #imports(text: string, resource: Resource, run: ContextToolRunner): Promise<string> {
     let bytes = 0
     const base =
-      resource.source === "user"
-        ? this.userRoot
-        : contains(this.cwd, resource.path)
-          ? this.cwd
-          : dirname(resource.path)
+      resource.source === "plugin"
+        ? resource.root!
+        : resource.source === "user"
+          ? this.userRoot
+          : contains(this.cwd, resource.path)
+            ? this.cwd
+            : dirname(resource.path)
     const roots =
-      resource.source !== "user" && this.config.includeRoots?.length
+      !["user", "plugin"].includes(resource.source) && this.config.includeRoots?.length
         ? this.config.includeRoots.map((r) => resolve(this.cwd, r))
         : [base]
     const expand = async (source: string, path: string, ancestors: Set<string>): Promise<string> => {
@@ -156,7 +172,12 @@ export class ContextInputs {
           throw new Error("Context import depth/file limit exceeded")
         const approval = await run("context_confirm", { path: target })
         if (approval.isError) throw new Error(approval.text)
-        const included = await this.#read(run, root, relative(root, target), resource.source === "user")
+        const included = await this.#read(
+          run,
+          root,
+          relative(root, target),
+          ["user", "plugin"].includes(resource.source),
+        )
         result.push(
           `\n[Included instructions from ${target}]\n${await expand(included, target, new Set([...ancestors, target]))}\n[End included instructions]`,
         )
@@ -172,12 +193,19 @@ export class ContextInputs {
     if (!resource) throw new Error(`Unknown skill: ${name}`)
     // Recheck frontmatter, including the invocation flag, after the read permission check.
     const root =
-      resource.source === "user"
-        ? this.userRoot
-        : contains(this.cwd, resource.path)
-          ? this.cwd
-          : dirname(resource.path)
-    const text = await this.#read(run, root, relative(root, resource.path), resource.source === "user")
+      resource.source === "plugin"
+        ? resource.root!
+        : resource.source === "user"
+          ? this.userRoot
+          : contains(this.cwd, resource.path)
+            ? this.cwd
+            : dirname(resource.path)
+    const text = await this.#read(
+      run,
+      root,
+      relative(root, resource.path),
+      ["user", "plugin"].includes(resource.source),
+    )
     const fresh = resourceMetadata(resource, text)
     if (model && fresh?.disabled) throw new Error(`Skill ${name} allows explicit user invocation only`)
     if (fresh?.fork) throw new Error("Forked skills require M7 subagents; use an inline skill")

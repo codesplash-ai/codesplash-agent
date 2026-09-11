@@ -70,6 +70,7 @@ export async function sessionDirectoryCommand(
     recorder.seedFromHistory(history.events)
     const usage = [...history.events].reverse().find((event) => event.kind === "usage.updated")
     const session = await new CodesplashDriver({ config }).openSession({
+      resuming: true,
       cwd: meta.projectPath,
       localSessionId: meta.localSessionId,
       sessionState: handle.state,

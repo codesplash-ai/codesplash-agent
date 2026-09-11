@@ -53,6 +53,9 @@ export type SlashCommandName =
   | "engine"
   | "model"
   | "mcp"
+  | "hooks"
+  | "plugins"
+  | "extensions"
   | "permissions"
   | "usage"
   | "context"
@@ -102,6 +105,9 @@ const slashCommandNames: readonly SlashCommandName[] = [
   "engine",
   "model",
   "mcp",
+  "hooks",
+  "plugins",
+  "extensions",
   "permissions",
   "usage",
   "context",
@@ -184,6 +190,18 @@ export const slashCommandHelp: ReadonlyArray<{ command: string; description: str
     description: "Inspect MCP clients or change active connections while idle",
   },
   { command: "/permissions", description: "Show permission mode, rules, sandbox, and trust" },
+  {
+    command: "/plugins [status|reload]",
+    description: "Inspect pinned plugins and activate a reviewed generation",
+  },
+  {
+    command: "/extensions [status|reload|disable ID|run ID/COMMAND ARGUMENT]",
+    description: "Inspect trusted extensions and run their commands; Tab completes arguments",
+  },
+  {
+    command: "/hooks [status|show ID|reload|disable ID|receipts|acknowledge KEY]",
+    description: "Review lifecycle handlers, sharing, source trust and uncertain execution",
+  },
   { command: "/usage", description: "Show token usage, context left, and estimated cost" },
   { command: "/context", description: "Inspect model context and available input budget (CodeSplash)" },
   { command: "/compact [instructions]", description: "Compact older model context (CodeSplash)" },
@@ -632,6 +650,22 @@ export function CodexSessionApp({
     }
   }, [])
 
+  useEffect(() => {
+    controller.setExtensionComposer((text) => {
+      if (
+        overlay ||
+        controller.state.pendingRequest ||
+        controller.state.turnStatus === "running" ||
+        !textareaRef.current ||
+        textareaRef.current.plainText.trim()
+      )
+        return false
+      textareaRef.current.setText(text)
+      return true
+    })
+    return () => controller.setExtensionComposer(undefined)
+  }, [controller, overlay])
+
   const lastEscape = useRef(0)
   const restoreInput = useCallback(
     (prompt: AcceptedPrompt, mode: "edit" | "recall" | "pop", revision: string) => {
@@ -823,6 +857,36 @@ export function CodexSessionApp({
           void runCommand(async () => {
             const result = await controller.mcpCommand(command.argument ?? "status")
             setOverlay({ kind: "resources", title: "MCP servers", text: JSON.stringify(result, null, 2) })
+          })
+          return
+        case "plugins":
+          void runCommand(async () => {
+            const result = await controller.pluginsCommand(command.argument ?? "status")
+            setOverlay({
+              kind: "resources",
+              title: "Installed plugins",
+              text: JSON.stringify(result, null, 2),
+            })
+          })
+          return
+        case "extensions":
+          void runCommand(async () => {
+            const result = await controller.extensionsCommand(command.argument ?? "status")
+            setOverlay({
+              kind: "resources",
+              title: "Trusted extensions",
+              text: JSON.stringify(result, null, 2),
+            })
+          })
+          return
+        case "hooks":
+          void runCommand(async () => {
+            const result = await controller.hooksCommand(command.argument ?? "status")
+            setOverlay({
+              kind: "resources",
+              title: "Lifecycle hooks",
+              text: JSON.stringify({ review: result, recentActivity: state.hookActivities ?? [] }, null, 2),
+            })
           })
           return
         case "permissions":
@@ -1052,6 +1116,7 @@ export function CodexSessionApp({
       permissions,
       project.cwd,
       renderer,
+      state.hookActivities,
     ],
   )
 
@@ -1121,6 +1186,32 @@ export function CodexSessionApp({
         cursor: textareaRef.current?.cursorOffset ?? 0,
         revision: draftRevision.current,
       })
+      const extensionDraft = /^\/extensions run (\S+)(?: (.*))?$/.exec(readDraft().text)
+      if (extensionDraft) {
+        key.preventDefault()
+        const before = readDraft()
+        void runCommand(async () => {
+          const result = (await controller.extensionsCommand(
+            `complete ${extensionDraft[1]} ${extensionDraft[2] ?? ""}`,
+          )) as { completions: string[] }
+          const current = readDraft()
+          if (
+            current.text !== before.text ||
+            current.revision !== before.revision ||
+            controller.state.pendingRequest
+          )
+            return
+          if (result.completions.length === 1)
+            textareaRef.current?.setText(`/extensions run ${extensionDraft[1]} ${result.completions[0]}`)
+          else
+            setOverlay({
+              kind: "resources",
+              title: "Extension completions",
+              text: result.completions.join("\n") || "No completions",
+            })
+        })
+        return
+      }
       if (trailingMention(readDraft())) {
         key.preventDefault()
         void runCommand(() =>
@@ -1349,6 +1440,21 @@ export function CodexSessionApp({
         </box>
       ) : null}
 
+      {(state.extensionUi ?? [])
+        .filter((item) => item.operation === "status" || item.operation === "widget")
+        .slice(-8)
+        .map((item) => (
+          <text
+            key={`${item.owner}:${item.generation}:${item.operation}:${item.key}`}
+            fg={palette.muted}
+            style={{ flexShrink: 0 }}
+          >
+            {`[${item.owner}] ${item.text
+              .split("\n")
+              .slice(0, item.operation === "status" ? 1 : 4)
+              .join("\n")}`}
+          </text>
+        ))}
       {awayNotice && (
         <text fg={palette.muted}>
           While away, session activity was recorded. /recap shows the local summary.

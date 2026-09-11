@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { loadConfig, saveConfig } from "../../../src/core/config.ts"
+import type { HookEvent, HookResult } from "../../../src/core/hooks.ts"
 import { type AgentEvent, defaultConfig, type EngineSession } from "../../../src/core/index.ts"
 import { BranchStore } from "../../../src/core/session/branches.ts"
 import { MemorySessionState } from "../../../src/core/session/control.ts"
@@ -16,11 +17,77 @@ import {
   CodesplashDriver,
   type PermissionRuntimeFactoryOptions,
 } from "../../../src/engines/codesplash/engine.ts"
+import { validateHookConfig } from "../../../src/engines/codesplash/hooks/config.ts"
+import { reviewHook, trustHook } from "../../../src/engines/codesplash/hooks/trust.ts"
 import { createPermissionRuntime } from "../../../src/engines/codesplash/permissions.ts"
 import { createProfile } from "../../../src/engines/codesplash/sandbox/profile.ts"
 import { appendTranscriptMessages, loadTranscript } from "../../../src/engines/codesplash/transcript.ts"
 
-async function fixture(durable = false, layered = false) {
+test("hook gates precede directory and branch publication; resume and retirement do not replay lifecycle", async () => {
+  const seen: HookEvent[] = []
+  let block = true
+  const f = await fixture(false, false, (event) => {
+    seen.push(event)
+    return event.name === "cwd.before" && block
+      ? { version: 1, decision: "deny", reason: "fixture gate" }
+      : { version: 1 }
+  })
+  try {
+    const original = await f.controller.changeDirectory({ path: f.to })
+    expect(seen.map((event) => event.name)).toEqual(["session.start"])
+    await expect(
+      f.controller.changeDirectory({
+        path: f.to,
+        context: "clear",
+        apply: true,
+        revision: original.revision,
+      }),
+    ).rejects.toThrow("fixture gate")
+    expect(f.session.directoryStatus?.().cwd).toBe(f.from)
+    block = false
+    const current = await f.controller.changeDirectory({ path: f.to })
+    await f.controller.changeDirectory({
+      path: f.to,
+      context: "clear",
+      apply: true,
+      revision: current.revision,
+    })
+    expect(f.session.directoryStatus?.().cwd).toBe(f.to)
+    expect(seen.filter((event) => event.name === "session.start")).toHaveLength(1)
+    expect(seen.filter((event) => event.name === "session.end")).toHaveLength(0)
+    expect(seen.find((event) => event.name === "cwd.after")?.fields.cwd).toBe(f.to)
+    const branches = new BranchStore(f.state)
+    const first = branches.view().head
+    if (!first) throw new Error("missing branch fixture")
+    branches.capture({
+      kind: "turn",
+      label: "second",
+      messages: [{ role: "user", content: [{ type: "text", text: "second" }] }],
+      eventSequence: 1,
+      usage: {},
+    })
+    const preview = await f.session.sessionRecovery?.({ action: "rewind", node: first })
+    expect(seen.filter((event) => event.name === "branch.before")).toHaveLength(0)
+    if (!preview || !("revision" in preview.data) || typeof preview.data.revision !== "string")
+      throw new Error("missing preview")
+    await f.session.sessionRecovery?.({
+      action: "rewind",
+      node: first,
+      apply: true,
+      revision: preview.data.revision,
+    })
+    expect(branches.view().head).toBe(first)
+    expect(seen.filter((event) => event.name === "branch.before")).toHaveLength(1)
+    expect(seen.filter((event) => event.name === "branch.after")).toHaveLength(1)
+    await f.reopen()
+    expect(seen.filter((event) => event.name === "session.resume")).toHaveLength(1)
+    expect(seen.filter((event) => event.name === "session.start")).toHaveLength(1)
+  } finally {
+    await f.close()
+  }
+})
+
+async function fixture(durable = false, layered = false, hook?: (event: HookEvent) => HookResult) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "codesplash-cwd-"))),
     from = join(root, "old"),
     to = join(root, "new")
@@ -80,6 +147,33 @@ async function fixture(durable = false, layered = false) {
     : undefined
   handle?.acquire()
   const state = handle?.state ?? new MemorySessionState()
+  if (hook) {
+    config.hooks = validateHookConfig({
+      handlers: {
+        fixture: {
+          kind: "command",
+          command: "/bin/cat",
+          enabled: true,
+          events: [
+            "session.start",
+            "session.resume",
+            "session.end",
+            "cwd.before",
+            "cwd.after",
+            "branch.before",
+            "branch.after",
+            "config.before",
+            "config.after",
+          ],
+          share: ["transition", "cwd"],
+        },
+      },
+    })
+    for (const cwd of [from, to]) {
+      const review = await reviewHook(config, "fixture", cwd)
+      trustHook(join(root, "data"), review, review.fingerprint)
+    }
+  }
   const driver = new CodesplashDriver({
     config,
     permissions: async (options) => {
@@ -109,6 +203,12 @@ async function fixture(durable = false, layered = false) {
       }
       return {
         profile: createProfile(options.cwd, "read-only", config.sandbox),
+        executeFixed: async (_argv: string[], input: string) => ({
+          kind: "success" as const,
+          exitCode: 0,
+          stdout: JSON.stringify(hook?.(JSON.parse(input)) ?? { version: 1 }),
+          stderr: "",
+        }),
         runTool: async () => {
           throw new Error("Unexpected tool")
         },
@@ -167,6 +267,7 @@ async function fixture(durable = false, layered = false) {
     async reopen() {
       await controller.close()
       session = await driver.openSession({
+        resuming: true,
         cwd: from,
         sessionState: state,
         localSessionId: session.localSessionId,

@@ -7,3 +7,6 @@ coverage/
 
 # Startup/company material never enters git
 docs/private/
+
+# Bun transient standalone-build executable
+.*.bun-build

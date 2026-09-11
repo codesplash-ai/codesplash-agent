@@ -8,6 +8,8 @@ import { safeSessionText } from "../core/session/repository.ts"
 import { stringifyToml, type TomlTable, type TomlValue } from "../core/toml.ts"
 import { findModel } from "../engines/codesplash/catalog.ts"
 import { MCP_SERVER_ID, validateMcpConfig } from "../engines/codesplash/mcp/config.ts"
+import { previewHookSettings } from "./import-hooks.ts"
+import { previewPluginSettings } from "./import-plugins.ts"
 
 export type SettingsPreview = {
   vendor: ForeignVendor
@@ -41,7 +43,23 @@ export function previewSettings(
   for (const [key, value] of Object.entries(parsed)) {
     const report = (reason: string) =>
       preview.unsupported.push({ key: safeSessionText(key).slice(0, 128), reason })
-    if ((key === "mcp_servers" && vendor === "codex") || (key === "mcpServers" && vendor !== "codex")) {
+    if (["plugins", "enabledPlugins"].includes(key)) {
+      previewPluginSettings(
+        preview,
+        key,
+        value,
+        existsSync(destination) ? Bun.TOML.parse(bytes(destination).toString()) : {},
+      )
+    } else if (key === "hooks") {
+      previewHookSettings(
+        preview,
+        value,
+        existsSync(destination) ? Bun.TOML.parse(bytes(destination).toString()) : {},
+      )
+    } else if (
+      (key === "mcp_servers" && vendor === "codex") ||
+      (key === "mcpServers" && vendor !== "codex")
+    ) {
       if (!object(value) || Object.keys(value).length > 32) {
         report("Invalid or oversized MCP server table")
         continue

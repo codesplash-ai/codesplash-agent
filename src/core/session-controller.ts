@@ -117,6 +117,23 @@ export class SessionController {
       throw new Error("MCP management is unavailable for this engine")
     return this.#session.mcpCommand(command)
   }
+  async pluginsCommand(command: string): Promise<unknown> {
+    if (this.#closed || !this.#session.pluginsCommand) throw new Error("Plugin management is unavailable")
+    return this.#session.pluginsCommand(command)
+  }
+  async extensionsCommand(command: string): Promise<unknown> {
+    if (this.#closed || !this.#session.extensionsCommand)
+      throw new Error("Extensions are unavailable for this engine")
+    return this.#session.extensionsCommand(command)
+  }
+  setExtensionComposer(callback?: (text: string) => boolean): void {
+    this.#session.setExtensionComposer?.(callback)
+  }
+  async hooksCommand(command: string): Promise<unknown> {
+    if (this.#closed || !this.#session.hooksCommand)
+      throw new Error("Hook management is unavailable for this engine")
+    return this.#session.hooksCommand(command)
+  }
 
   async contextResources(kind: "skill" | "command") {
     if (this.#closed || !this.#session.contextResources)

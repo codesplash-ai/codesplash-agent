@@ -623,6 +623,120 @@
             }
           },
           "additionalProperties": false
+        },
+        "extensions": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "disabled": {
+              "type": "boolean"
+            },
+            "entries": {
+              "type": "object",
+              "maxProperties": 32,
+              "propertyNames": {
+                "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+              },
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["root", "entry"],
+                "properties": {
+                  "root": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  },
+                  "entry": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  },
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "overrides": {
+                    "type": "array",
+                    "maxItems": 16,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "flags": {
+                    "type": "object",
+                    "maxProperties": 32,
+                    "additionalProperties": {
+                      "type": ["string", "boolean", "number"]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "plugins": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "entries": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "root": {
+                    "type": "string"
+                  },
+                  "integrity": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "type": "string"
+                  },
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                },
+                "required": ["root", "integrity", "source"]
+              }
+            },
+            "marketplaces": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "root": {
+                    "type": "string"
+                  },
+                  "integrity": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "type": "string"
+                  }
+                },
+                "required": ["root", "integrity", "source"]
+              }
+            },
+            "pending": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "source": {
+                    "type": "string"
+                  },
+                  "enabled": {
+                    "const": false
+                  }
+                },
+                "required": ["source", "enabled"]
+              }
+            }
+          }
         }
       },
       "additionalProperties": false
@@ -683,6 +797,32 @@
     },
     "hooksManagedOnly": {
       "type": "boolean"
+    },
+    "extensionIds": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+      }
+    },
+    "pluginIds": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "marketplaceIds": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "pluginPins": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
     }
   },
   "additionalProperties": false

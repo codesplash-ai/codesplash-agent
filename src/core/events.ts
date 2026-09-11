@@ -89,6 +89,8 @@ export type AgentEvent =
       }
     >
   | EventOf<"warning", { message: string }>
+  | EventOf<"extension.ui", import("../engines/codesplash/extensions/api.ts").ExtensionUiUpdate>
+  | EventOf<"hook.activity", import("./hooks.ts").HookActivity>
   | EventOf<"error", { message: string; recoverable: boolean }>
 
 export type AgentEventInput = AgentEvent extends infer Event

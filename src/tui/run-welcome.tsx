@@ -108,6 +108,7 @@ async function openEngine(
     // The loaded config (with -c overrides applied) travels along so the codesplash engine sees
     // the same providers/fallback settings as run/review/debug do.
     const outcome = await runCodexSession(project, config.theme, {
+      disableExtensions: options.disableExtensions,
       engine,
       config,
       policy,

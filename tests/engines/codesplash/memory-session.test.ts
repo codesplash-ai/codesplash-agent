@@ -105,9 +105,16 @@ async function fixture(
 async function settled(f: { events: AgentEvent[] }, session: EngineSession, text: string) {
   const count = f.events.filter((e) => e.kind === "turn.completed").length
   await session.send({ text })
+  const id = session.inputQueue?.snapshot().items.at(-1)?.id
+  if (!id) throw new Error("Missing native input identity")
   for (let i = 0; i < 1000; i++) {
-    if (f.events.filter((e) => e.kind === "turn.completed").length > count) {
-      await Bun.sleep(5)
+    const input = session.inputQueue?.snapshot().items.find((item) => item.id === id)
+    if (
+      f.events.filter((e) => e.kind === "turn.completed").length > count &&
+      input &&
+      ["completed", "failed", "cancelled", "execution-uncertain"].includes(input.status)
+    ) {
+      if (input.status !== "completed") throw new Error(input.issue ?? `Input ${input.status}`)
       const error = f.events.findLast((e) => e.kind === "error")
       if (error) throw new Error(JSON.stringify(error.payload))
       return

@@ -11,6 +11,7 @@ export class RoutedSession<T extends EngineSession> {
   #unsubscribe?: () => void
   #pump: Promise<void>
   #closed = false
+  #extensionComposer?: (text: string) => boolean
   #changing = false
   #transition?: Promise<void>
   #settle?: () => void
@@ -52,6 +53,11 @@ export class RoutedSession<T extends EngineSession> {
         if (key === "events") return this.events
         if (key === "inputQueue") return queue
         if (key === "close") return () => this.close()
+        if (key === "setExtensionComposer")
+          return (callback?: (text: string) => boolean) => {
+            this.#extensionComposer = callback
+            if (!this.#closed) this.active.setExtensionComposer?.(callback)
+          }
         const value = Reflect.get(this.active, key, this.active)
         if (typeof value !== "function") return value
         const bound = (...args: unknown[]) => {
@@ -103,6 +109,7 @@ export class RoutedSession<T extends EngineSession> {
     }
     await this.#pump
     this.active = next
+    next.setExtensionComposer?.(this.#extensionComposer)
     this.#pump = this.#attach(next)
     for (const listener of this.#listeners) listener()
     if (failure) throw failure

@@ -234,21 +234,43 @@ export function createMcpToolRegistry(base: ToolRegistry, manager: McpManager): 
         if (!["list", "templates", "read"].includes(input.action as string))
           throw new ToolInputError("Invalid MCP resource action")
         const action = input.action as "list" | "templates" | "read"
-        const uri = action === "read" ? string(input.uri, "resource URI") : undefined
+        if (action === "read") string(input.uri, "resource URI")
         if (action !== "read" && input.uri !== undefined)
           throw new ToolInputError("URI applies only to resource reads")
         const target = manager.resourceTarget(server, generation, action)
         const tool: HarnessTool = {
           ...adapter(target),
+          source: { id: `mcp:${server}/${target.originalName}`, generation },
+          inputSchema: {
+            type: "object",
+            properties: {
+              server: { const: server },
+              generation: { const: generation },
+              action: { const: action },
+              ...(action === "read" ? { uri: { type: "string", minLength: 1, maxLength: 8192 } } : {}),
+            },
+            required: ["server", "generation", "action", ...(action === "read" ? ["uri"] : [])],
+            additionalProperties: false,
+          },
           isReadOnly: () => {
             manager.resourceTarget(server, generation, action)
             return true
           },
-          run: async (_, context) => {
+          run: async (effective, context) => {
+            const next = object(effective, ["server", "generation", "action", "uri"])
+            if (next.server !== server || next.generation !== generation || next.action !== action)
+              throw new ToolInputError("MCP resource rewrite changed the reviewed operation")
+            if (action !== "read" && next.uri !== undefined)
+              throw new ToolInputError("URI applies only to resource reads")
             manager.resourceTarget(server, generation, action)
             const result =
               action === "read"
-                ? await manager.readResource(server, generation, uri ?? "", context.signal)
+                ? await manager.readResource(
+                    server,
+                    generation,
+                    string(next.uri, "resource URI"),
+                    context.signal,
+                  )
                 : {
                     content: [
                       {

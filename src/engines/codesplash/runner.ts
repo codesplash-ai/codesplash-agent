@@ -24,6 +24,7 @@ import {
   type TurnStatus,
   writeTrustDecision,
 } from "../../core/index.ts"
+import { openEngineSession } from "../../core/session/open.ts"
 import { defaultModelFor, defaultProvider, formatModelSelector } from "./catalog.ts"
 import type { ReasoningEffort } from "./contracts.ts"
 import { CodesplashDriver } from "./engine.ts"
@@ -41,6 +42,8 @@ export type HeadlessRecorder = Pick<SessionRecorder, "record" | "recordNativeSes
 export const DEFAULT_MAX_TURNS = 40
 
 export type HeadlessRunOptions = {
+  resuming?: boolean
+  disableExtensions?: boolean
   sessionState?: import("../../core/session/control.ts").SessionStateAccess
   promptHistory?: import("../../core/session/prompt-history.ts").PromptHistory
   prompt: string
@@ -109,31 +112,36 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<number> 
 
   let session: EngineSession
   try {
-    session = await driver.openSession({
-      cwd: options.cwd,
-      localSessionId,
-      model: headlessModelSelector(options.model, options.effort),
-      policy: { ...options.policy, permissionMode },
-      nativeTranscriptPath: options.nativeTranscriptPath,
-      sessionState: options.sessionState,
-      resumeQueuedInput: false,
-      flushSessionEvents: async () => {
-        await options.recorder?.flush()
-        if (options.recorder?.failure) throw options.recorder.failure
+    session = await openEngineSession(
+      driver,
+      {
+        cwd: options.cwd,
+        localSessionId,
+        model: headlessModelSelector(options.model, options.effort),
+        policy: { ...options.policy, permissionMode },
+        nativeTranscriptPath: options.nativeTranscriptPath,
+        sessionState: options.sessionState,
+        resumeQueuedInput: false,
+        resuming: options.resuming,
+        disableExtensions: options.disableExtensions,
+        flushSessionEvents: async () => {
+          await options.recorder?.flush()
+          if (options.recorder?.failure) throw options.recorder.failure
+        },
+        promptHistory: options.promptHistory,
+        firstSequence: options.firstSequence,
+        initialUsage: options.initialUsage,
+        workspaceTrusted,
+        trustDataDirectory: options.trustDataDir,
+        permissionOverrides: options.permissionOverrides,
+        permissionGrantsPath: options.permissionGrantsPath,
       },
-      promptHistory: options.promptHistory,
-      firstSequence: options.firstSequence,
-      initialUsage: options.initialUsage,
-      workspaceTrusted,
-      trustDataDirectory: options.trustDataDir,
-      permissionOverrides: options.permissionOverrides,
-      permissionGrantsPath: options.permissionGrantsPath,
-    })
+      recorder,
+    )
   } catch (error) {
     stderr.write(`codesplash: ${describeError(error)}\n`)
     return 1
   }
-  if (session.nativeSessionId) recorder?.recordNativeSessionId(session.nativeSessionId)
   options.recordPermissionMode?.(permissionMode)
 
   const resolvedRequests = new Set<string>()
@@ -201,7 +209,7 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<number> 
           turnStatus = event.payload.status
           // One prompt, one turn: the first completed turn ends the run. maxTurns stays the outer
           // bound so a future multi-turn cut inherits the same guard.
-          if (turns >= 1 || turns >= maxTurns) break
+          if (turns >= 1 || turns >= maxTurns) requestClose()
         }
         if (event.kind === "error") {
           stderr.write(`error: ${event.payload.message}\n`)

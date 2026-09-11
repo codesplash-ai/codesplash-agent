@@ -67,6 +67,9 @@ Commands:
   memory         Inspect and manage repository memory; automatic learning is opt-in
   create-skill   Preview a native skill scaffold; --write creates it without overwriting
   mcp            Manage native MCP servers, trust, connection checks and OAuth login
+  hooks          Review native lifecycle handlers, trust and execution receipts
+  plugin         Install, inspect and activate pinned plugins/marketplaces
+  extensions     Review and trust native TS/JS extensions
   config         Explain/validate effective configuration and select named profiles
   debug          Inspect harness internals; "debug prompt" prints the model-visible surface
                  (model, system prompt, tool specs) as JSON without opening a session
@@ -189,8 +192,11 @@ export function extractConfigControls(args: string[]): {
   args: string[]
   profile?: string
   strictConfig?: boolean
+  disableExtensions?: boolean
 } {
-  const result: { args: string[]; profile?: string; strictConfig?: boolean } = { args: [] }
+  const result: { args: string[]; profile?: string; strictConfig?: boolean; disableExtensions?: boolean } = {
+    args: [],
+  }
   for (let index = 0; index < args.length; index++) {
     const arg = args[index]!
     if (arg === "--") {
@@ -221,7 +227,8 @@ export function extractConfigControls(args: string[]): {
       if (value !== undefined) result.args.push(value)
       continue
     }
-    if (arg === "--strict-config") result.strictConfig = true
+    if (arg === "--no-extensions") result.disableExtensions = true
+    else if (arg === "--strict-config") result.strictConfig = true
     else if (arg === "--profile" || arg.startsWith("--profile=")) {
       const value = arg.startsWith("--profile=") ? arg.slice(10) : args[++index]
       if (!value || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(value))
@@ -237,6 +244,7 @@ export function extractConfigOverrides(args: string[]): {
   configOverrides: string[]
   profile?: string
   strictConfig?: boolean
+  disableExtensions?: boolean
 } {
   const { args: remaining, ...controls } = extractConfigControls(args)
   args = remaining
@@ -479,6 +487,7 @@ function readSecretFromTty(prompt: string, stderr: HeadlessSink): Promise<string
 export type RunCommand = {
   profile?: string
   strictConfig?: boolean
+  disableExtensions?: boolean
   path?: string
   /** Prompt from --prompt or positional text; undefined defers to piped stdin. */
   prompt?: string
@@ -726,7 +735,7 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
     strict: command.strictConfig,
   })
 
-  if (command.model !== undefined) {
+  if (command.model !== undefined && !command.model.startsWith("ext_")) {
     // Validate against the static built-in catalog first (availability-agnostic, like always),
     // then against the config-driven registry so custom-provider models pass too.
     const selector = command.effort ? `${command.model}:${command.effort}` : command.model
@@ -753,6 +762,7 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
     askRules: command.askRules,
     denyRules: command.denyRules,
     trustWorkspace: command.trust,
+    disableExtensions: command.disableExtensions,
   }
   let policy = effectiveSessionPolicy(config, appOptions)
   let localSessionId: string = crypto.randomUUID()
@@ -862,6 +872,7 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
 
   const { runHeadless } = await import("./engines/codesplash/runner.ts")
   const exitCode = await runHeadless({
+    resuming,
     prompt,
     cwd: project.cwd,
     model: command.model ?? config.models?.codesplash,
@@ -883,6 +894,7 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
     permissionOverrides,
     permissionGrantsPath,
     trustWorkspace: command.trust,
+    disableExtensions: command.disableExtensions,
     trustDataDir,
     recordPermissionMode,
     stdout: overrides.stdout,
@@ -992,6 +1004,18 @@ async function main(): Promise<void> {
 
   if (args[0] === "mcp") {
     process.exitCode = await (await import("./commands/mcp.ts")).runMcpCommand(args.slice(1))
+    return
+  }
+  if (args[0] === "plugin") {
+    process.exitCode = await (await import("./commands/plugin.ts")).runPluginCommand(args.slice(1))
+    return
+  }
+  if (args[0] === "extensions") {
+    process.exitCode = await (await import("./commands/extensions.ts")).runExtensionsCommand(args.slice(1))
+    return
+  }
+  if (args[0] === "hooks") {
+    process.exitCode = await (await import("./commands/hooks.ts")).runHooksCommand(args.slice(1))
     return
   }
 

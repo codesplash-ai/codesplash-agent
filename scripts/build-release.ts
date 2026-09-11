@@ -137,6 +137,10 @@ async function main(): Promise<void> {
     await run([process.execPath, "scripts/config-smoke.ts", binaryPath])
     await run([process.execPath, "scripts/mcp-smoke.ts", binaryPath])
     await run([process.execPath, "scripts/mcp-session-smoke.ts", binaryPath])
+    await run([process.execPath, "scripts/hooks-smoke.ts", binaryPath])
+    await run([process.execPath, "scripts/extensions-smoke.ts", binaryPath])
+    await run([process.execPath, "scripts/plugins-smoke.ts", binaryPath])
+    await run([process.execPath, "scripts/sdk-smoke.ts"])
   }
 
   await Bun.write(join(outDirectory, "LICENSE"), Bun.file(join(projectRoot, "LICENSE")))

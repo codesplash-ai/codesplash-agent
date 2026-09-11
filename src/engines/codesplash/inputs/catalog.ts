@@ -81,13 +81,13 @@ export function resourceMetadata(
 }
 
 export async function catalogSources(
-  sources: Array<{ root: string; user: boolean; paths: string[] }>,
+  sources: Array<{ root: string; user: boolean; paths: string[]; plugin?: string }>,
   config: ContextInputConfig,
   read: (root: string, path: string, user: boolean) => Promise<string>,
 ): Promise<ResourceCatalog> {
   const resources: Resource[] = [],
     diagnostics: string[] = []
-  for (const { root, user, paths } of sources) {
+  for (const { root, user, paths, plugin } of sources) {
     for (const path of paths) {
       if (path === "CLAUDE.md" && paths.includes("AGENTS.md")) continue
       const candidate = resourceCandidate(path, user, config)
@@ -96,7 +96,12 @@ export async function catalogSources(
       const text = await read(root, path, user)
       try {
         const resource = resourceMetadata(candidate, text)
-        if (resource) resources.push({ ...resource, path: resolve(root, path) })
+        if (resource)
+          resources.push({
+            ...resource,
+            path: resolve(root, path),
+            ...(plugin ? { source: "plugin", plugin, root } : {}),
+          })
         else diagnostics.push(`Inactive resource: ${resolve(root, path)}`)
       } catch (error) {
         diagnostics.push(`${resolve(root, path)}: ${error instanceof Error ? error.message : String(error)}`)

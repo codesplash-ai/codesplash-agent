@@ -46,7 +46,11 @@ function array(value: unknown, name: string, max: number): string[] {
     !Array.isArray(value) ||
     value.length > max ||
     value.some(
-      (entry) => typeof entry !== "string" || !entry || entry.length > 256 || /[\x00-\x1f\x7f]/.test(entry),
+      (entry) =>
+        typeof entry !== "string" ||
+        !entry ||
+        entry.length > 256 ||
+        Array.from(entry).some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127),
     )
   )
     throw new Error(`Hooks ${name}: expected at most ${max} bounded strings`)
@@ -100,7 +104,9 @@ export function validateHookConfig(raw: unknown): HookConfig {
       matchSources = array(value.matchSources ?? [], "matchSources", 16)
     if (
       [...matchTools, ...matchSources].some(
-        (pattern) => (pattern.match(/\*/g)?.length ?? 0) > 1 || /[?[\]{}|\\]/.test(pattern),
+        (pattern) =>
+          (pattern.match(/\*/g)?.length ?? 0) > 1 ||
+          Array.from(pattern).some((char) => "?[]{}|\\()^+$".includes(char)),
       )
     )
       throw new Error("Hook matchers support exact names or one * only")

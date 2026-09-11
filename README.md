@@ -619,6 +619,73 @@ Form elicitation uses a separate validated editor. Headless runs decline forms, 
 forms are refused. OAuth requires protected OS storage; systems without a credential service
 refuse durable login. Logout removes local credentials and does not revoke remote tokens.
 
+### Native lifecycle hooks
+
+Hooks run reviewed command or HTTP handlers at live session, input, turn, tool, permission,
+compaction and resource/config/directory/branch boundaries. History replay never runs handlers.
+Declare handlers in user or trusted project configuration; they are disabled by default:
+
+```toml
+[hooks.handlers.check]
+kind = "command"
+command = "/bin/sh"
+args = ["/absolute/path/check.sh"]
+events = ["tool.before"]
+matchTools = ["bash"]
+share = ["input"]
+timeoutMs = 10000
+once = "never"
+```
+
+```sh
+codesplash hooks list
+codesplash hooks enable check
+codesplash hooks show check
+codesplash hooks trust check --fingerprint HASH_FROM_SHOW
+```
+
+`show` reviews the program, dependency files, source configuration, sharing and policy without
+execution. Add non-argument dependencies to `trustFiles`. Changed executable/configuration content
+requires another review. Project trust alone does not authorize a handler. `--scope project` selects
+the project file for edits; `--path`, `--profile`, `-c` and `--strict-config` support inspection.
+
+Commands receive one version-1 JSON document on stdin and return a version-1 JSON object, or empty
+stdout. For example, `{"version":1,"decision":"deny","reason":"Explain the required change"}` refuses
+a gate; exit 2 also refuses command gates. A failed/timed-out gate blocks its operation. Observational
+failures produce diagnostics; post-tool processing preserves the already-recorded actual outcome.
+Inputs and outputs are capped at 128 KiB each, with retained context previews and session quotas.
+
+Only declared `share` fields are supplied: `text`, `input`, `result`, `cwd`, `reason`, `transition`.
+Metadata carries event/operation ids and actual tool/source identity. Credentials and provider
+reasoning are not implicit payloads. Exact tool/source matchers or one `*` glob are supported.
+Handlers use a fixed OS sandbox and declared non-secret `environment` grants. `writeWorkspace = true`
+requests writes inside the workspace, still restricted by the active mode; temporary tool grants
+never carry over. Command hooks require enforced sandboxing, including when the session otherwise
+uses full access. HTTP handlers use `kind = "http"`, `url` and optional `bearerEnv`; fixed network
+grants and DNS checks apply. POST redirects/retries are refused, and HTTP hooks cannot run in
+plan/read-only mode because their remote effects are unknown.
+
+Rewrites require reviewed capabilities: `allowTextRewrite` for `input.admit`, `allowInputRewrite`
+for `tool.before`, and `allowResultRewrite` for post-tool events. Rewritten inputs are validated
+before final permissions, target extraction, checkpoints and execution. `allowDefaultApproval`
+applies only to an ordinary default prompt; explicit ask/deny and dangerous floors remain binding.
+`allowContinuation` enables `turn.stop` requests within `[hooks.continuation]`: at most eight,
+120 seconds, and a token allowance (default 32768). Foreground input, interruption, provider failures
+and harness limits take precedence. No prompt/agent hook engines or M7 subagent events are enabled.
+
+`async = true` supports observation only, with at most four owned async handlers. `once = "turn"`
+or `"session"` applies per handler fingerprint and event. Intent receipts prevent replay of uncertain
+execution; a once denial remains a denial. `/hooks` shows status/review and recent activity;
+`/hooks reload` stages reviewed sources, and `/hooks disable ID` stops a session handler. Use
+`/hooks receipts` and `/hooks acknowledge KEY` to inspect/consume uncertainty. If startup itself is
+blocked, use `codesplash hooks receipts --session ID` and `codesplash hooks acknowledge KEY --session ID`.
+Acknowledgment does not retry an effect. No-history receipts and retained outputs stay in memory.
+
+Foreign settings import maps supported command/HTTP declarations to disabled handlers. It reports
+unsupported shell expansion, regex matchers, credentials, async/prompt/subagent behavior and collisions.
+Adapt handlers to the native version-1 input/output protocol before enabling: foreign permission,
+stop-blocking, `hookSpecificOutput` and rewrite semantics are not translated automatically.
+
 ### Permissions
 
 The native CodeSplash engine runs every tool call through a policy layer: permission modes,
@@ -768,3 +835,172 @@ channel, e.g. `npm i -g codesplash-agent@<previous>` or download the earlier rel
 
 [Business Source License 1.1](./LICENSE) — free for personal and non-production use; commercial
 offering of the work requires a license from CodeSplash. Converts to Apache-2.0 on 2030-08-16.
+
+### Trusted native extensions
+
+Native TS/JS extensions use API v1 to register tools, streaming providers/models,
+auth callbacks, live lifecycle observers, commands, typed flags and UI contributions.
+They run **inside the harness process with its privileges**. Only load code you
+trust. The subprocess sandbox does not confine extension imports or direct I/O;
+JavaScript cannot forcibly terminate a synchronous infinite loop.
+
+Give each extension a dedicated directory containing its entry, dependencies and
+assets. Package dependencies must already be installed; review never installs or
+imports code. All files are fingerprinted, with limits of 4096 entries / 512 MiB;
+symlinks and ordinary imports outside that directory are refused.
+
+```toml
+[extensions.entries.example]
+root = "/absolute/path/to/my-extension"
+entry = "index.ts"
+enabled = false
+
+[extensions.entries.example.flags]
+greeting = "Hello"
+```
+
+```js
+export default (api) => {
+  const greeting = api.registerFlag("greeting", { type: "string", default: "Hello" });
+  api.registerTool({
+    name: "greet", description: "Return a greeting", readOnly: true,
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    async run(_input, context) {
+      context.progress("Preparing greeting");
+      return { text: greeting, label: "Greeting" };
+    },
+  });
+  api.registerCommand({
+    name: "hello", description: "Prepare a greeting draft",
+    async run() { return api.ui.composer(greeting) ? "Draft prepared" : "Composer unavailable or occupied"; },
+  });
+  api.on("turn.end", () => { api.ui.status("greeting", "Greeting extension ready"); });
+}
+```
+
+Enable, inspect the complete review, then explicitly trust that fingerprint:
+
+```bash
+codesplash extensions enable example
+codesplash extensions show example
+codesplash extensions trust example --fingerprint <reviewed-hash>
+```
+
+`--scope project` selects the project configuration for edits. Changes to code,
+dependencies, configuration sources or policy invalidate trust. Tool identities
+are `ext_ID_24hex`; inspection with `/extensions status` lists the actual names.
+Calls use ordinary permissions, C hooks, output limits and workspace checkpoints.
+Direct extension I/O and remote effects cannot be rolled back by those checkpoints.
+Overrides require explicit `overrides = ["read_file"]` selection, preserve the
+original schema and policy floor, and cannot replace protected intrinsics.
+
+Per-invocation flags use the existing `-c extensions.entries.example.flags.greeting=Hello` override.
+Use `/extensions run example/hello`, `/extensions status`, `/extensions disable
+example` or `/extensions reload`. Tab completes arguments when a command supplies
+completions. Reload stages registrations before replacing the current tools;
+provider registration changes require a new session. Different sessions and
+activations load separate snapshots of ordinary module/dependency state. Process
+globals and direct effects cannot be unloaded or reversed. Callback failures
+quarantine their owner. Session transitions cancel owned work and timers.
+
+UI v1 supports attributed status/widget text, correlated form dialogs and replacing
+an empty idle composer. Headless dialogs return `unsupported`; they do not invent
+answers. Auxiliary `api.complete(model, prompt)` calls are tool-free, accounted,
+cancellable and limited to eight requests per turn/command budget with at most
+8192 output tokens per request. Providers register namespaced models and may supply
+an auth callback for their own credential; no API exposes other providers' keys.
+Unknown pricing remains explicitly unpriced.
+
+For recovery, launch with `codesplash --no-extensions` or
+`codesplash run --no-extensions ...`. This skips extension imports even if enabled
+by configuration. C command hooks remain the option for OS-enforced external code.
+The public embedding package is described separately from this extension API.
+Plugin distribution and activation are described below.
+
+### Plugins and marketplaces
+
+A native plugin is a dedicated directory with one `codesplash-plugin.json`:
+
+```json
+{
+  "schemaVersion": 1,
+  "api": 1,
+  "id": "example",
+  "version": "1.0.0",
+  "description": "Example resources and extension",
+  "skills": ["skills/example/SKILL.md"],
+  "commands": ["commands/example.md"],
+  "extensions": { "main": { "entry": "extension.ts" } }
+}
+```
+
+`hooks` and `mcp` are named native handler/server tables. Use `${PLUGIN_ROOT}/file`
+for package paths in process arguments; command names such as `bun` resolve normally.
+`agents` may list `agents/name.md` metadata, which remains inactive until M7.
+LSP declarations are rejected explicitly. Native manifests are required; foreign
+plugin APIs are not automatically converted.
+
+```sh
+codesplash plugin install ./example
+codesplash plugin install 'git:https://example.org/team/plugin.git#FULL_40_CHARACTER_COMMIT'
+codesplash plugin install npm:example-plugin@1.2.3
+codesplash plugin list
+codesplash plugin show example
+codesplash plugin enable example
+```
+
+Installation copies verified files into a private immutable version directory and
+records source, dependencies and integrity. Packages start disabled. Enabling does
+not grant executable trust: `plugin show` lists the generated component IDs; use
+`extensions show/trust`, `hooks show/trust` or `mcp show/trust` with each current
+fingerprint before activation. Trust receipts distinguish immutable plugin versions,
+so reviewing an update does not revoke the version still in use by another session.
+Native extensions have full harness-process privileges.
+Plugin skills/commands enter normal resource discovery with plugin attribution and
+existing permissions, collision handling and context limits.
+
+Use `/plugins status` and `/plugins reload` in a native session. Reload requires idle
+admission and stages all contributions before publication. Failed staging preserves
+the old version; queued inputs discover resources again after publication. Provider
+registration changes require a new session. Versions remain pinned until explicit
+reload or a working-directory replacement; modified installed files fail integrity
+checks. Use `plugin disable ID` or reinstall to recover a damaged installed tree;
+management remains available without loading package contributions. `--no-extensions` remains the recovery path for faulty extension code.
+
+`plugin update ID [SOURCE]` installs a new disabled version. `plugin rollback ID HASH`
+selects a retained version, also disabled. `plugin disable ID` or `plugin remove ID`
+detaches configuration; old immutable versions, credentials and recorded sessions
+remain available to existing owners. Use `--scope project --path DIR` to edit a
+project source; trusted project configuration is required for its activation.
+
+Dependencies use Bun on PATH, an isolated registry configuration and `--ignore-scripts`.
+Only npm semantic version dependencies pass the bounded registry proxy; Git/file
+transitive dependencies are rejected. The default registry is `https://registry.npmjs.org`;
+`--registry URL` selects another HTTPS origin. `--allow-loopback` is an explicit local
+fixture option. Downloads require SHA-512 integrity. Packages are limited to 4096
+entries, 16 MiB per file and 128 MiB expanded, with 32 MiB archives, 64 resolved
+dependencies and 120-second acquisition deadlines. Links and archive traversal are
+rejected. Generated install caches and executable links are excluded from versions.
+
+Installation does not run lifecycle or build scripts. To execute a reviewed build,
+use `plugin build ID --fingerprint HASH -- COMMAND ARGUMENT...`. This runs literal
+argv against a private copy with host privileges, bounded time/output and owned process
+cleanup. Its external effects cannot be rolled back. Success publishes a new disabled
+version; failure preserves the selection. Review and trust the resulting executable
+fingerprints again. Build tools can be invoked by their explicit package file paths.
+
+A marketplace uses `codesplash-marketplace.json` with `schemaVersion: 1`, an `id`,
+and `plugins: { "name": { "source": "npm:package@1.2.3", "description": "..." } }`.
+Sources may also be pinned Git URLs or `./relative-package` directories inside the
+marketplace snapshot. Manage it with `plugin marketplace add SOURCE`, `list`,
+`show ID`, `update ID [SOURCE]` and `remove ID`; install via `plugin install name@market`.
+Browsing never executes package code. Managed `pluginIds`, `marketplaceIds` and
+`pluginPins` (`ID/SHA256`) constrain local distribution alongside existing component
+allowlists. Imported foreign plugin settings remain under `plugins.pending` as
+inactive source references until explicit review and installation.
+
+### Embedding SDK
+
+The package exports `createAgentSession` for Bun applications, with native tools/providers,
+approvals, events, explicit recording/resume and session controls. Imports are inert; session
+execution requires Bun >=1.3.14 on macOS/Linux. See the [SDK guide and eight runnable local examples](examples/sdk/README.md).

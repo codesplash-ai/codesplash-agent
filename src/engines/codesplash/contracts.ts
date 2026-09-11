@@ -191,6 +191,7 @@ export interface PermissionRuntime {
 /* ------------------------------------ tools ------------------------------------ */
 
 export type ToolContext = {
+  progress?: (text: string) => void
   cwd: string
   policy: SessionPolicy
   signal: AbortSignal
@@ -237,6 +238,10 @@ export type ToolOutcome = {
  * never silently skipped) and enforce their own output truncation.
  */
 export interface HarnessTool {
+  /** Original built-in policy remains an additional floor for an explicit trusted override. */
+  readonly permissionFloor?: HarnessTool
+  /** Effective external identity, including virtual operations such as MCP resource reads. */
+  readonly source?: { id: string; generation: string }
   /** Internal preparation operations are never exposed to the model. */
   readonly hidden?: boolean
   readonly permissionName?: string

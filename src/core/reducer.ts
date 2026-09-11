@@ -23,6 +23,8 @@ export type PendingRequest = {
 }
 
 export type AppViewState = {
+  extensionUi?: import("../engines/codesplash/extensions/api.ts").ExtensionUiUpdate[]
+  hookActivities?: import("./hooks.ts").HookActivity[]
   outcomes?: OutcomeState
   inputQueue?: import("./session/input-queue.ts").InputQueueSnapshot
   engine?: EngineId
@@ -85,6 +87,23 @@ export function reduceAgentEvent(state: AppViewState, event: AgentEvent): AppVie
   }
 
   switch (event.kind) {
+    case "extension.ui": {
+      const update = event.payload
+      const previous = (state.extensionUi ?? []).filter(
+        (item) =>
+          item.owner !== update.owner ||
+          (item.generation === update.generation &&
+            update.operation !== "clear" &&
+            (item.operation !== update.operation || item.key !== update.key)),
+      )
+      return {
+        ...next,
+        extensionUi:
+          update.operation === "clear" || !update.text ? previous : [...previous, update].slice(-1024),
+      }
+    }
+    case "hook.activity":
+      return { ...next, hookActivities: [...(state.hookActivities ?? []), event.payload].slice(-64) }
     case "session.status":
       // Optional payload fields are sticky: a later status that omits them must not clobber
       // the previously known value (same semantics as model).

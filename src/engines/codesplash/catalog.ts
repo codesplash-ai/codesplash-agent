@@ -84,6 +84,7 @@ export type ProviderRegistry = {
 export function buildProviderRegistry(
   config: AgentConfig,
   env: NodeJS.ProcessEnv = process.env,
+  extensions: ProviderRuntime[] = [],
 ): ProviderRegistry {
   const providers: ProviderRuntime[] = []
 
@@ -104,7 +105,16 @@ export function buildProviderRegistry(
     providers.push(customRuntime(custom))
   }
 
+  for (const runtime of extensions) {
+    if (providers.some((provider) => provider.id === runtime.id))
+      throw new Error("Extension provider collision")
+    providers.push(runtime)
+  }
   const models = providers.flatMap((runtime) => runtime.client.models)
+  for (const runtime of extensions)
+    for (const model of runtime.client.models)
+      if (models.filter((entry) => entry.id === model.id).length !== 1)
+        throw new Error("Extension model identity collision")
   const runtimesById = new Map(providers.map((runtime) => [runtime.id, runtime]))
   const find = (id: string): ModelInfo | undefined => models.find((model) => model.id === id)
 

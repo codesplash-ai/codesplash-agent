@@ -14,7 +14,9 @@ export type Resource = {
   kind: "rule" | "command" | "skill"
   name: string
   path: string
-  source: "project" | "user" | "claude" | "cursor" | "shared"
+  source: "project" | "user" | "claude" | "cursor" | "shared" | "plugin"
+  plugin?: string
+  root?: string
   description: string
   disabled?: boolean
   fork?: boolean

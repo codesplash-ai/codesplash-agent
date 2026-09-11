@@ -1,5 +1,7 @@
 import { realpathSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
+import { validatePlugins } from "../../engines/codesplash/plugins/config.ts"
+import { pluginLayers } from "../../engines/codesplash/plugins/resolve.ts"
 import { validateEnvironmentName } from "../../engines/codesplash/sandbox/env-policy.ts"
 import { canonicalHost } from "../../engines/codesplash/sandbox/profile.ts"
 import {
@@ -20,7 +22,7 @@ import schema from "./schema.json"
 import { checkConfigBounds, isTable, readConfigSource, stableValue } from "./source.ts"
 
 type Schema = {
-  type?: string
+  type?: string | string[]
   enum?: unknown[]
   const?: unknown
   properties?: Record<string, Schema>
@@ -33,13 +35,15 @@ function validateLayerShape(value: unknown, shape: Schema = schema as Schema, pa
   if (shape.enum && !shape.enum.includes(value)) throw new Error(`${path}: unsupported value`)
   if (
     shape.type &&
-    (shape.type === "object"
-      ? !isTable(value)
-      : shape.type === "array"
-        ? !Array.isArray(value)
-        : shape.type === "integer"
-          ? !Number.isInteger(value)
-          : typeof value !== shape.type)
+    !(Array.isArray(shape.type) ? shape.type : [shape.type]).some((type) =>
+      type === "object"
+        ? isTable(value)
+        : type === "array"
+          ? Array.isArray(value)
+          : type === "integer"
+            ? Number.isInteger(value)
+            : typeof value === type,
+    )
   )
     throw new Error(`${path}: expected ${shape.type}`)
   if (Array.isArray(value) && shape.items)
@@ -72,6 +76,12 @@ function merge(target: Record<string, unknown>, layer: Record<string, unknown>, 
   for (const [key, value] of Object.entries(layer)) {
     const name = path ? `${path}.${key}` : key
     if (
+      /^hooks\.continuation\.(maxCount|maxDurationMs|maxTokens)$/.test(name) &&
+      typeof value === "number" &&
+      typeof target[key] === "number"
+    ) {
+      target[key] = Math.min(value, target[key] as number)
+    } else if (
       (["permissions.deny", "permissions.ask"].includes(name) ||
         /^mcp\.servers\.[^.]+\.denyTools$/.test(name)) &&
       Array.isArray(value) &&
@@ -117,6 +127,10 @@ function managed(raw: Record<string, unknown>): ManagedConstraints {
         "allowedHosts",
         "environment",
         "mcpServers",
+        "extensionIds",
+        "pluginIds",
+        "marketplaceIds",
+        "pluginPins",
         "mcpTools",
         "hookHandlers",
         "hookEvents",
@@ -142,6 +156,15 @@ function managed(raw: Record<string, unknown>): ManagedConstraints {
       if (key === "deny" && value.some((v) => !isValidPermissionRule(v)))
         throw new Error("Invalid managed deny rules")
       if (key === "environment") for (const name of value) validateEnvironmentName(name)
+      if (
+        ["pluginIds", "marketplaceIds"].includes(key) &&
+        value.some((name) => !/^[a-z][a-z0-9_-]{0,31}$/.test(name))
+      )
+        throw new Error("Invalid managed plugin/marketplace id")
+      if (key === "pluginPins" && value.some((name) => !/^[a-z][a-z0-9_-]{0,31}\/[a-f0-9]{64}$/.test(name)))
+        throw new Error("Invalid managed plugin pin")
+      if (key === "extensionIds" && value.some((name) => !/^[a-z][a-z0-9_-]{0,31}$/.test(name)))
+        throw new Error("Invalid managed extension id")
       if (key === "mcpServers" && value.some((name) => !/^[a-z][a-z0-9_-]{0,31}$/.test(name)))
         throw new Error("Invalid managed MCP server id")
       if (key === "hookHandlers" && value.some((name) => !/^[a-z][a-z0-9_-]{0,31}$/.test(name)))
@@ -333,6 +356,23 @@ export async function resolveConfig(
   const policySource = readConfigSource(managedPath)
   const constraints = managed(policySource.raw)
   add("managed", constraints.required ?? {}, managedPath, policySource.fingerprint)
+  if (options.pluginSnapshot) effective.plugins = structuredClone(options.pluginSnapshot)
+  if (isTable(constraints.required?.plugins) && isTable(effective.plugins))
+    merge(effective.plugins, constraints.required.plugins)
+  const plugins = effective.plugins === undefined ? undefined : validatePlugins(effective.plugins)
+  const contributed = options.inspectPlugins
+    ? { sources: [], resources: [] }
+    : await pluginLayers(plugins, constraints)
+  for (const { source, raw } of contributed.sources) {
+    for (const [section, table] of Object.entries(raw)) {
+      const entries = section === "hooks" ? "handlers" : section === "mcp" ? "servers" : "entries"
+      const existing = effective[section] as Record<string, Record<string, unknown>> | undefined
+      for (const id of Object.keys((table as Record<string, Record<string, unknown>>)[entries]!))
+        if (existing?.[entries]?.[id])
+          throw new Error(`Plugin component collides with ordinary configuration: ${id}`)
+    }
+    add("plugin", raw, source.path, source.fingerprint, source.id)
+  }
   checkConfigBounds(effective)
   let config: AgentConfig
   try {
@@ -357,6 +397,7 @@ export async function resolveConfig(
       }
     }
   }
+  config.pluginResources = contributed.resources
   config.resolution = {
     generation: digest(stableValue({ sources, effective: config, cwd, selection })),
     cwd,
@@ -371,6 +412,7 @@ export async function resolveConfig(
       overrides: [...overrides],
       options: {
         ...options,
+        pluginSnapshot: plugins,
         dataDir: options.dataDir ?? dataDirectory(env),
         env: Object.fromEntries(
           Object.entries(env).filter(([name]) =>
@@ -395,8 +437,20 @@ export async function resolveConfigForWorkspace(
   config: AgentConfig,
   cwd: string,
   workspaceTrusted?: boolean,
+  refreshPlugins = false,
 ): Promise<AgentConfig> {
   const request = config.resolution?.request
   if (!request) return config
-  return resolveConfig(request.userPath, request.overrides, { ...request.options, cwd, workspaceTrusted })
+  return resolveConfig(request.userPath, request.overrides, {
+    ...request.options,
+    pluginSnapshot:
+      refreshPlugins ||
+      resolve(cwd) !== config.resolution?.cwd ||
+      (workspaceTrusted === false &&
+        config.resolution?.sources.some((source) => source.scope === "project" && !source.disabledReason))
+        ? undefined
+        : request.options.pluginSnapshot,
+    cwd,
+    workspaceTrusted,
+  })
 }

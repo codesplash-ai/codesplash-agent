@@ -15,6 +15,7 @@ export type AppOptions = {
   configOverrides?: readonly string[]
   profile?: string
   strictConfig?: boolean
+  disableExtensions?: boolean
   /** `--permission-mode <mode>`: overrides `[permissions].mode`; "bypass" is never a flag value. */
   permissionModeOverride?: PermissionMode
   /** `--bypass-approvals`: the only route to bypass mode; per session, never persisted. */

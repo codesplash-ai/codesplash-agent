@@ -32,6 +32,35 @@ function fixture(user = "", project = "", managed = "") {
 }
 
 describe("layered configuration", () => {
+  test("extension flags merge through profiles while managed execution remains a ceiling", async () => {
+    const f = fixture(
+      '[extensions.entries.fixture]\nroot="/unused"\nentry="entry.ts"\nenabled=true\n[profiles.work.extensions.entries.fixture.flags]\nmode="review"\n',
+      "",
+      "extensionIds=[]\n",
+    )
+    const config = await resolveConfig(f.path, ["extensions.entries.fixture.flags.count=2"], {
+      ...f.options,
+      profile: "work",
+      strict: true,
+    })
+    expect(config.extensions?.entries.fixture).toMatchObject({
+      root: "/unused",
+      entry: "entry.ts",
+      enabled: true,
+      flags: { mode: "review", count: 2 },
+    })
+    expect(config.resolution?.constraints.extensionIds).toEqual([])
+    const { ExtensionRuntime } = await import("../../src/engines/codesplash/extensions/runtime.ts")
+    const runtime = new ExtensionRuntime({ config, cwd: f.cwd, dataDir: f.root })
+    await expect(runtime.stage()).rejects.toThrow("prohibited by managed policy")
+    const disabled = new ExtensionRuntime({ config, cwd: f.cwd, dataDir: f.root, disabled: true })
+    await disabled.stage()
+    expect(disabled.status().entries).toEqual([])
+    await disabled.close()
+    await expect(
+      resolveConfig(f.path, ["extensions.entries.fixture.flags.count=[]"], f.options),
+    ).rejects.toThrow()
+  })
   test("inline JSON/TOML environment overlays obey a closed field allowlist", async () => {
     const f = fixture()
     for (const inline of [

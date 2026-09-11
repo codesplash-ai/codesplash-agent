@@ -5,7 +5,9 @@
 import { dirname, join, resolve } from "node:path"
 import { assertManagedMode, assertManagedPolicy } from "../../core/config/policy.ts"
 import { resolveConfigForWorkspace } from "../../core/config/resolver.ts"
+import { stableValue } from "../../core/config/source.ts"
 import { configDirectory, dataDirectory } from "../../core/config.ts"
+import { type HookEventName, type HookFields, hookIsGate } from "../../core/hooks.ts"
 import {
   type AgentConfig,
   type AgentEvent,
@@ -76,6 +78,9 @@ import type {
   ProviderId,
   ReasoningEffort,
 } from "./contracts.ts"
+import { type ExtensionHost, ExtensionRuntime } from "./extensions/runtime.ts"
+import { HookManager } from "./hooks/manager.ts"
+import { hookTrusted, reviewHook } from "./hooks/trust.ts"
 import { createSkill as writeSkill } from "./inputs/authoring.ts"
 import type { ContextToolRunner } from "./inputs/contracts.ts"
 import { readAttachedImage } from "./inputs/images.ts"
@@ -95,6 +100,8 @@ import {
   describePermissionRules,
   type PermissionRuntimeOptions,
 } from "./permissions.ts"
+import { readPluginManifest } from "./plugins/manifest.ts"
+import { verifySelection } from "./plugins/store.ts"
 import { generatePresentation } from "./presentation.ts"
 import { buildSystemPrompt } from "./prompt.ts"
 import { NativeRecovery } from "./recovery.ts"
@@ -117,6 +124,7 @@ export const CODESPLASH_CAPABILITIES: EngineCapabilities = {
 const NO_KEYS_DETAIL = "No API keys found — set ANTHROPIC_API_KEY or OPENAI_API_KEY"
 
 export type CodesplashDriverOptions = {
+  hostExtensions?: readonly import("./extensions/api.ts").HostExtension[]
   /** Provider client overrides keyed by runtime id, e.g. scripted fakes in tests. */
   providers?: Partial<Record<string, ProviderClient>>
   /** Harness config; when absent it is loaded lazily the first time probe/openSession needs it. */
@@ -191,7 +199,10 @@ export class CodesplashDriver implements EngineDriver {
     })
     const anyCustomAvailable = config.providers.some((provider) => customProviderAvailable(provider))
 
-    if (resolved.length === 0 && !anyCustomAvailable) {
+    const possibleExtensionProvider =
+      !config.extensions?.disabled &&
+      Object.values(config.extensions?.entries ?? {}).some((entry) => entry.enabled)
+    if (resolved.length === 0 && !anyCustomAvailable && !possibleExtensionProvider) {
       return {
         available: false,
         authenticated: false,
@@ -203,7 +214,13 @@ export class CodesplashDriver implements EngineDriver {
       available: true,
       authenticated: true,
       version: APP_VERSION,
-      detail: [...builtinDetails, ...customDetails].join(" · "),
+      detail: [
+        ...builtinDetails,
+        ...customDetails,
+        ...(possibleExtensionProvider
+          ? ["Configured extensions; provider availability is checked after explicit source trust"]
+          : []),
+      ].join(" · "),
     }
   }
 
@@ -271,6 +288,10 @@ export class CodesplashDriver implements EngineDriver {
             if (request.context !== "carry" && request.context !== "clear")
               throw new Error("Choose --carry or --clear before applying a directory change")
             if (cwd === from) throw new Error("Already in this working directory")
+            await runtime.lifecycleHook("cwd.before", {
+              transition: { from, to: cwd, context: request.context },
+            })
+            await runtime.suspendHooks()
             const history = request.context === "carry" ? runtime.historyForDirectory() : []
             if (!validNativeContext(history))
               throw new Error(
@@ -318,7 +339,7 @@ export class CodesplashDriver implements EngineDriver {
               true,
             )
             next.prepareDirectoryBoundary(runtime, request.context)
-            await next.initializeRecovery()
+            await next.initializeRecovery(false)
             // Trust and physical identity are admission inputs, not facts captured indefinitely by preview.
             if (
               destinationDirectory(from, request.path) !== cwd ||
@@ -335,8 +356,12 @@ export class CodesplashDriver implements EngineDriver {
             const replacement = next
             next = undefined
             attach(replacement)
+            runtime.retireDirectoryHooks()
             await routed.replace(replacement)
             await replacement.finishDirectoryPublication()
+            await replacement.lifecycleHook("cwd.after", {
+              transition: { from: result.from, to: result.cwd, context: result.context ?? "clear" },
+            })
           }
           return result
         } finally {
@@ -355,86 +380,102 @@ export class CodesplashDriver implements EngineDriver {
     prepared = false,
   ): Promise<CodesplashSession> {
     const config = await this.#config(options)
+    // Lifecycle gates are initialized before the session is published.
     assertManagedPolicy(
       config,
       options.policy ?? { ...config.codex, permissionMode: config.permissions.mode },
     )
     options = { ...options, model: options.model ?? config.models?.codesplash }
-    const registry = buildProviderRegistry(config)
-    if (registry.providers.length === 0) {
-      throw new Error(`${NO_KEYS_DETAIL} to use the CodeSplash engine`)
-    }
-    const providers: Record<string, ProviderClient> = {}
-    for (const runtime of registry.providers) {
-      providers[runtime.id] = this.options.providers?.[runtime.id] ?? runtime.client
-    }
-    // Resume: reload the provider-native history the transcript persisted. An empty or missing
-    // file is simply a fresh session.
-    const seededHistory =
-      history ?? (options.nativeTranscriptPath ? await loadTranscript(options.nativeTranscriptPath) : [])
-    // The permission runtime is built before the session object exists, so its creation-time
-    // warnings (unknown rule tools, corrupt grants files) buffer in the bridge and flush as
-    // warning events once the session can emit them.
-    const bridge = new PermissionEventBridge()
-    const factory = this.options.permissions ?? createPermissionRuntime
-    const permissions = await factory({
-      cwd: options.cwd,
-      mode: options.policy?.permissionMode ?? "default",
-      workspaceTrusted: options.workspaceTrusted ?? true,
-      configRules: config.permissions,
-      constraints: config.resolution?.constraints,
-      overrides: options.permissionOverrides,
-      grantsPath: options.permissionGrantsPath,
-      onWarning: (message) => bridge.warning(message),
-      onModeChange: (mode) => bridge.modeChanged(mode),
-    })
-    const directory = options.nativeTranscriptPath ? dirname(options.nativeTranscriptPath) : undefined
-    const scope = options.sessionState ? directoryScope(options.sessionState.read().state) : undefined
-    const profilePath = directory
-      ? scope
-        ? join(directory, "cwd-profiles", `${scope}.json`)
-        : join(directory, "sandbox-profile.json")
-      : undefined
-    if (
-      directory &&
-      seededHistory.length &&
-      !(await Bun.file(join(directory, "sandbox-profile.json")).exists())
-    ) {
-      bridge.warning(
-        "This older session has no pinned execution profile. Pinning the current execution policy before tools can run; previous temporary access grants are not restored.",
-      )
-    }
-    const sandbox = this.options.sandbox
-      ? await this.options.sandbox(options, config)
-      : new NativeSandbox(
-          await pinProfile(
-            createProfile(
-              options.cwd,
-              options.policy?.sandbox ?? defaultSessionPolicy.sandbox,
-              config.sandbox,
-              options.sessionState?.directory ? [dirname(dirname(options.sessionState.directory))] : [],
-            ),
-            profilePath,
-          ),
-          directory ? join(directory, "sandbox-events.jsonl") : undefined,
-          undefined,
-          config.resolution?.constraints,
-        )
-    const session = new CodesplashSession(
-      options,
+    const extensions = new ExtensionRuntime({
       config,
-      registry,
-      providers,
-      seededHistory,
-      permissions,
-      bridge,
-      sandbox,
-    )
+      cwd: options.cwd,
+      dataDir: options.trustDataDirectory ?? dataDirectory(),
+      disabled: options.disableExtensions,
+      hostExtensions: this.options.hostExtensions,
+      resolveConfig: () => resolveConfigForWorkspace(config, options.cwd, options.workspaceTrusted),
+    })
+    await extensions.stage()
     try {
-      if (!prepared) await session.initializeRecovery()
-      return session
+      const registry = buildProviderRegistry(config, process.env, extensions.providers())
+      if (registry.providers.length === 0) {
+        throw new Error(`${NO_KEYS_DETAIL} to use the CodeSplash engine`)
+      }
+      const providers: Record<string, ProviderClient> = {}
+      for (const runtime of registry.providers) {
+        providers[runtime.id] = this.options.providers?.[runtime.id] ?? runtime.client
+      }
+      // Resume: reload the provider-native history the transcript persisted. An empty or missing
+      // file is simply a fresh session.
+      const seededHistory =
+        history ?? (options.nativeTranscriptPath ? await loadTranscript(options.nativeTranscriptPath) : [])
+      // The permission runtime is built before the session object exists, so its creation-time
+      // warnings (unknown rule tools, corrupt grants files) buffer in the bridge and flush as
+      // warning events once the session can emit them.
+      const bridge = new PermissionEventBridge()
+      const factory = this.options.permissions ?? createPermissionRuntime
+      const permissions = await factory({
+        cwd: options.cwd,
+        mode: options.policy?.permissionMode ?? "default",
+        workspaceTrusted: options.workspaceTrusted ?? true,
+        configRules: config.permissions,
+        constraints: config.resolution?.constraints,
+        overrides: options.permissionOverrides,
+        grantsPath: options.permissionGrantsPath,
+        onWarning: (message) => bridge.warning(message),
+        onModeChange: (mode) => bridge.modeChanged(mode),
+      })
+      const directory = options.nativeTranscriptPath ? dirname(options.nativeTranscriptPath) : undefined
+      const scope = options.sessionState ? directoryScope(options.sessionState.read().state) : undefined
+      const profilePath = directory
+        ? scope
+          ? join(directory, "cwd-profiles", `${scope}.json`)
+          : join(directory, "sandbox-profile.json")
+        : undefined
+      if (
+        directory &&
+        seededHistory.length &&
+        !(await Bun.file(join(directory, "sandbox-profile.json")).exists())
+      ) {
+        bridge.warning(
+          "This older session has no pinned execution profile. Pinning the current execution policy before tools can run; previous temporary access grants are not restored.",
+        )
+      }
+      const sandbox = this.options.sandbox
+        ? await this.options.sandbox(options, config)
+        : new NativeSandbox(
+            await pinProfile(
+              createProfile(
+                options.cwd,
+                options.policy?.sandbox ?? defaultSessionPolicy.sandbox,
+                config.sandbox,
+                options.sessionState?.directory ? [dirname(dirname(options.sessionState.directory))] : [],
+              ),
+              profilePath,
+            ),
+            directory ? join(directory, "sandbox-events.jsonl") : undefined,
+            undefined,
+            config.resolution?.constraints,
+          )
+      const session = new CodesplashSession(
+        options,
+        config,
+        registry,
+        providers,
+        seededHistory,
+        permissions,
+        bridge,
+        sandbox,
+        extensions,
+      )
+      try {
+        if (!prepared) await session.initializeRecovery()
+        return session
+      } catch (error) {
+        await session.close()
+        throw error
+      }
     } catch (error) {
-      await session.close()
+      await extensions.close()
       throw error
     }
   }
@@ -480,18 +521,29 @@ class CodesplashSession implements EngineSession {
   #memoryEpoch = 0
   #ownedMaintenance = new OwnedMaintenance()
   #lastTurnSucceeded = false
-  readonly #inputs: ContextInputs
+  #inputs: ContextInputs
   #inputPromise: Promise<unknown> | undefined
   #contextSuffix = ""
   #inputSuffix = ""
   #personality: "neutral" | "concise" | "explanatory"
-  readonly #registry: ToolRegistry
-  readonly #mcp: McpManager
+  #registry: ToolRegistry
+  #mcp: McpManager
+  #hooks: HookManager
+  #extensions: ExtensionRuntime
+  readonly #extensionBase: ToolRegistry
+  #extensionTools: ToolRegistry
+  #extensionComposer?: (text: string) => boolean
+  #extensionsPublished = false
+  #extensionAuxiliary = 0
+  #extensionAuxiliaryBusy = false
+  #extensionCommandAbort = new AbortController()
+  #hooksInitialized = false
+  #suppressSessionEnd = false
   #mcpInitialized = false
   readonly #providerRegistry: ProviderRegistry
   /** Provider clients keyed by runtime id ("anthropic", "openai", or a custom config key). */
   readonly #providers: Record<string, ProviderClient>
-  readonly #config: AgentConfig
+  #config: AgentConfig
   readonly #policy: SessionPolicy
   readonly #cwd: string
   readonly #permissions: PermissionRuntime
@@ -530,7 +582,9 @@ class CodesplashSession implements EngineSession {
     permissions: PermissionRuntime,
     bridge: PermissionEventBridge,
     sandbox: SandboxRuntime,
+    extensions: ExtensionRuntime,
   ) {
+    this.#extensions = extensions
     const state = options.sessionState ?? new MemorySessionState()
     this.events = this.#queue
     this.#config = config
@@ -549,6 +603,7 @@ class CodesplashSession implements EngineSession {
       options.workspaceTrusted ?? true,
       config.context,
       sandbox.sanitize?.bind(sandbox),
+      config.pluginResources,
     )
     this.#memory = new MemorySession({
       root: physicalPath(join(dataDirectory(), "memory")),
@@ -562,9 +617,26 @@ class CodesplashSession implements EngineSession {
       writable: () => sandbox.profile.mode === "workspace-write" && permissions.mode !== "plan",
     })
     this.#personality = config.context?.personality ?? "neutral"
+    const outputs = new ToolOutputStore(
+      options.nativeTranscriptPath ? join(dirname(options.nativeTranscriptPath), "tool-outputs") : undefined,
+    )
+    this.#hooks = new HookManager({
+      cwd: options.cwd,
+      dataDir: options.trustDataDirectory ?? dataDirectory(),
+      config,
+      resolveConfig: () => resolveConfigForWorkspace(config, options.cwd, options.workspaceTrusted),
+      mode: () => permissions.mode,
+      sandbox,
+      state,
+      outputs,
+      activity: (activity) =>
+        this.#push(this.#factory.event("hooks/activity", {}, { kind: "hook.activity", payload: activity })),
+      diagnostic: (message) =>
+        this.#push(this.#factory.event("hooks/diagnostic", {}, { kind: "warning", payload: { message } })),
+    })
     this.#mcp = new McpManager({
       cwd: options.cwd,
-      dataDir: dataDirectory(),
+      dataDir: options.trustDataDirectory ?? dataDirectory(),
       sandbox,
       mode: () => permissions.mode,
       configurationBoundary: structuredClone(config),
@@ -581,27 +653,43 @@ class CodesplashSession implements EngineSession {
         this.#systemPrompt = undefined
       },
     })
+    this.#extensionBase = createToolRegistry(
+      [
+        ...builtinTools(),
+        ...internalContextTools(),
+        contextReadTool(userRoot, () => this.#config.pluginResources ?? []),
+        skillTool,
+        ...memoryTools(this.#memory, () => this.#loop.historySnapshot(), options.nativeTranscriptPath),
+        memoryGate("memory_access", "memory_search"),
+        memoryGate("memory_history_access", "history_read"),
+        memoryGate("memory_access_read", "memory_read"),
+        memoryGate("memory_change", "memory_write", true),
+        embeddingTool(config.memory?.embedding, (tokens, cost) =>
+          this.#loop.recordEmbeddingUsage(tokens, cost),
+        ),
+      ],
+      config.resolution?.generation,
+    )
+    this.#extensionTools = extensions.registry(this.#extensionBase)
+    const owner = this
     this.#registry = createMcpToolRegistry(
-      createToolRegistry(
-        [
-          ...builtinTools(),
-          ...internalContextTools(),
-          contextReadTool(userRoot),
-          skillTool,
-          ...memoryTools(this.#memory, () => this.#loop.historySnapshot(), options.nativeTranscriptPath),
-          memoryGate("memory_access", "memory_search"),
-          memoryGate("memory_history_access", "history_read"),
-          memoryGate("memory_access_read", "memory_read"),
-          memoryGate("memory_change", "memory_write", true),
-          embeddingTool(config.memory?.embedding, (tokens, cost) =>
-            this.#loop.recordEmbeddingUsage(tokens, cost),
-          ),
-        ],
-        config.resolution?.generation,
-      ),
+      {
+        get generation() {
+          return owner.#extensionTools.generation
+        },
+        specs: () => this.#extensionTools.specs(),
+        get: (name, generation) => this.#extensionTools.get(name, generation),
+        source: (name) => this.#extensionTools.source(name),
+      },
       this.#mcp,
     )
     this.#loop = new CodesplashLoop({
+      extensionsEnabled: () => this.#extensions.enabled,
+      observeHook: async (event, signal) => {
+        if (event.name === "turn.start") this.#extensionAuxiliary = 0
+        await this.#extensions.observe(event, signal)
+      },
+      hooks: this.#hooks,
       cwd: options.cwd,
       onContextBoundary: (kind, messages) => this.#recovery.capture(kind, kind, messages),
       beforeMutation: async (label, signal) => {
@@ -622,16 +710,15 @@ class CodesplashSession implements EngineSession {
       },
       policy: this.#policy,
       registry: this.#registry,
-      beforePermissionModeChange: () => this.#mcp.suspend(),
+      beforePermissionModeChange: async () => {
+        this.#extensions.suspend()
+        await this.#mcp.suspend()
+      },
       events: this.#factory,
       emit: (event) => this.#push(event),
       fallbackModel: config.codesplash.fallbackModel,
       context: config.codesplash,
-      outputStore: new ToolOutputStore(
-        options.nativeTranscriptPath
-          ? join(dirname(options.nativeTranscriptPath), "tool-outputs")
-          : undefined,
-      ),
+      outputStore: outputs,
       permissions,
       sandbox,
       guardian: config.guardian,
@@ -646,6 +733,7 @@ class CodesplashSession implements EngineSession {
         return provider ? { model, provider } : undefined
       },
     })
+    extensions.activate(this.#extensionHost())
     if (seededHistory.length > 0) this.#loop.seedHistory(seededHistory)
     this.inputQueue = new InputQueue({
       state,
@@ -765,8 +853,39 @@ class CodesplashSession implements EngineSession {
       ),
     )
   }
-  async initializeRecovery(): Promise<void> {
+  async initializeRecovery(startLifecycle = true): Promise<void> {
     await this.#recovery.initialize()
+    if (!this.#hooksInitialized) {
+      const started = startLifecycle
+        ? await this.#loop.hook(
+            this.options.resuming ? "session.resume" : "session.start",
+            AbortSignal.timeout(30000),
+            { cwd: this.#cwd },
+          )
+        : undefined
+      if (started?.context.length)
+        this.#loop.seedHistory([
+          ...this.#loop.historySnapshot(),
+          { role: "user", content: started.context.map((text) => ({ type: "text", text })) },
+        ])
+      this.#hooksInitialized = true
+      const enabled = Object.entries(this.#config.hooks?.handlers ?? {}).filter(
+        ([, handler]) => handler.enabled,
+      )
+      if (enabled.length)
+        this.#push(
+          this.#factory.event(
+            "hooks/review",
+            {},
+            {
+              kind: "warning",
+              payload: {
+                message: `Configured hooks: ${enabled.map(([id, handler]) => `${id} (${handler.kind}, shares ${handler.share.join(", ") || "metadata only"})`).join("; ")}. Inspect /hooks show ID for source trust and execution limits.`,
+              },
+            },
+          ),
+        )
+    }
     if (!this.#mcpInitialized) {
       this.#mcpInitialized = true
       for (const [id, server] of Object.entries(this.#config.mcp?.servers ?? {})) {
@@ -785,10 +904,39 @@ class CodesplashSession implements EngineSession {
         }
       }
     }
+    this.#extensionsPublished = true
+    if (this.#extensions.enabled)
+      this.#push(
+        this.#factory.event(
+          "extensions/review",
+          {},
+          {
+            kind: "warning",
+            payload: {
+              message:
+                "Reviewed extensions run with harness-process privileges. Use --no-extensions to recover from a faulty extension.",
+            },
+          },
+        ),
+      )
     this.#inputRunner.wake()
   }
   directoryStatus() {
     return { cwd: this.#cwd, trusted: this.options.workspaceTrusted ?? true }
+  }
+  async lifecycleHook(name: HookEventName, fields: HookFields = {}): Promise<void> {
+    try {
+      await this.#loop.hook(name, AbortSignal.timeout(30000), { cwd: this.#cwd, ...fields })
+    } catch (error) {
+      if (hookIsGate(name)) throw error
+    }
+  }
+  retireDirectoryHooks(): void {
+    this.#suppressSessionEnd = true
+  }
+  async suspendHooks(): Promise<void> {
+    this.#extensions.suspend()
+    await this.#hooks.suspend()
   }
   async sessionPresentation(request: PresentationRequest): Promise<unknown> {
     this.#requireOpen()
@@ -983,6 +1131,7 @@ class CodesplashSession implements EngineSession {
           userMessageId: inputId,
           userContent,
           hasSteering: () => Boolean(this.inputQueue.next("steering")),
+          hasForegroundInput: () => Boolean(this.inputQueue.next()),
           takeSteering: async () => {
             const item = this.inputQueue.next("steering")
             if (!item) return undefined
@@ -1005,17 +1154,31 @@ class CodesplashSession implements EngineSession {
               userText: next.text,
               userContent: next.text ? [{ type: "text" as const, text: next.text }] : [],
               system: await this.#systemPromptFor(),
-              prepare: (run: ContextToolRunner, signal: AbortSignal) =>
-                this.#prepareInput(next, run, signal, item.id),
+              prepare: (run: ContextToolRunner, signal: AbortSignal, admittedText?: string) =>
+                this.#prepareInput({ ...next, text: admittedText ?? next.text }, run, signal, item.id),
             }
           },
-          prepare: (run, signal) => this.#prepareInput(input, run, signal, inputId),
-          invokeSkill: async (value, run) => {
+          prepare: (run, signal, admittedText) =>
+            this.#prepareInput({ ...input, text: admittedText ?? input.text }, run, signal, inputId),
+          invokeSkill: async (value, run, signal) => {
             if (!value || typeof value !== "object" || !("name" in value) || typeof value.name !== "string")
               throw new Error("skill requires a name")
             const args = "arguments" in value ? value.arguments : ""
             if (typeof args !== "string") throw new Error("skill arguments must be a string")
-            return this.#inputs.invoke(value.name, args, run, true)
+            const before = await this.#loop.hook(
+              "resource.before",
+              signal,
+              { text: args, cwd: this.#cwd },
+              { kind: "skill", toolName: value.name },
+            )
+            const result = await this.#inputs.invoke(value.name, args, run, true)
+            const after = await this.#loop.hook(
+              "resource.after",
+              signal,
+              { cwd: this.#cwd },
+              { kind: "skill", toolName: value.name },
+            )
+            return [result, ...(before?.context ?? []), ...(after?.context ?? [])].join("\n\n")
           },
         })
         .catch((error) => {
@@ -1118,9 +1281,41 @@ class CodesplashSession implements EngineSession {
     if (request.action === "checkpoints")
       return { title: "File checkpoints", data: this.#recovery.checkpoints.view() }
     return this.#inputOperation(async () => {
+      // Recorder outcome materialization shares the recovery revision. Drain it before reviewing
+      // a target, and again after lifecycle callbacks, so it cannot race blob validation/apply.
+      await this.options.flushSessionEvents?.()
       this.inputQueue.pause()
-      if (["fork", "rewind", "restore", "recover-restore"].includes(request.action)) await this.#mcp.suspend()
-      return this.#recovery.execute(request)
+      const transition =
+        request.action === "fork" ||
+        request.action === "recover-restore" ||
+        ((request.action === "rewind" || request.action === "restore") && request.apply === true)
+      let reviewed: RecoveryResult | undefined
+      if ((request.action === "rewind" || request.action === "restore") && request.apply) {
+        reviewed = await this.#recovery.execute({ ...request, apply: false })
+        if (!("revision" in reviewed.data) || request.revision !== reviewed.data.revision)
+          throw new Error("Recovery preview is stale; review it again")
+      }
+      if (transition) {
+        await this.lifecycleHook("branch.before", { transition: { action: request.action } })
+        await this.#hooks.suspend()
+        await this.#mcp.suspend()
+        await this.options.flushSessionEvents?.()
+      }
+      if (reviewed && (request.action === "rewind" || request.action === "restore")) {
+        const fresh = await this.#recovery.execute({ ...request, apply: false })
+        if (
+          JSON.stringify({ ...reviewed.data, revision: undefined }) !==
+            JSON.stringify({ ...fresh.data, revision: undefined }) ||
+          !("revision" in fresh.data) ||
+          typeof fresh.data.revision !== "string"
+        )
+          throw new Error("Hook changed the recovery target; review the updated preview")
+        request = { ...request, revision: fresh.data.revision }
+      }
+      const result = await this.#recovery.execute(request)
+      if (transition) await this.lifecycleHook("branch.after", { transition: { action: request.action } })
+      if (request.action === "rewind" && request.apply) result.data = this.#recovery.branches.view()
+      return result
     })
   }
 
@@ -1130,6 +1325,9 @@ class CodesplashSession implements EngineSession {
   }
 
   async interrupt(): Promise<void> {
+    this.#extensionCommandAbort.abort()
+    this.#extensionCommandAbort = new AbortController()
+    this.#extensions.suspend()
     if (this.#closed) return
     this.inputQueue.pause()
     await this.#interruptAndSettle()
@@ -1147,6 +1345,13 @@ class CodesplashSession implements EngineSession {
   async #prepareInput(input: UserInput, run: ContextToolRunner, signal: AbortSignal, inputId?: string) {
     await this.#mcp.revalidate()
     signal.throwIfAborted()
+    const before = await this.#loop.hook(
+      "resource.before",
+      signal,
+      { text: input.text, cwd: this.#cwd },
+      { kind: "context-input" },
+      inputId,
+    )
     this.#contextSuffix = ""
     const references = inputId ? this.inputQueue.references(inputId) : []
     const checkedRun: ContextToolRunner = async (name, args) => {
@@ -1204,6 +1409,19 @@ class CodesplashSession implements EngineSession {
       )
         throw new Error("Queued attachment changed before provider admission; reattach it")
     this.#contextSuffix = prepared.suffix
+    const after = await this.#loop.hook(
+      "resource.after",
+      signal,
+      { cwd: this.#cwd },
+      { kind: "context-input" },
+      inputId,
+    )
+    prepared.content.push(
+      ...[...(before?.context ?? []), ...(after?.context ?? [])].map((text) => ({
+        type: "text" as const,
+        text,
+      })),
+    )
     return prepared
   }
 
@@ -1257,8 +1475,13 @@ class CodesplashSession implements EngineSession {
     await this.#inputOperation(async () => {
       if (personality !== "neutral" && personality !== "concise" && personality !== "explanatory")
         throw new Error("Use neutral, concise or explanatory")
+      await this.lifecycleHook("config.before", {
+        transition: { kind: "personality", from: this.#personality, to: personality },
+      })
+      await this.#hooks.suspend()
       this.#personality = personality
       this.#systemPrompt = undefined
+      await this.lifecycleHook("config.after", { transition: { kind: "personality", to: personality } })
     })
   }
 
@@ -1351,6 +1574,8 @@ class CodesplashSession implements EngineSession {
     try {
       await this.#cancelLearning()
       this.#requireOpen()
+      await this.lifecycleHook("config.before", { transition: { kind: "permission-rules", command } })
+      await this.#hooks.suspend()
       const updated = await editPermissionRule(parsePermissionEdit(command), {
         cwd: this.#cwd,
         trusted: this.options.workspaceTrusted ?? true,
@@ -1373,6 +1598,7 @@ class CodesplashSession implements EngineSession {
       this.#memoryText = ""
       this.#loop.clearApprovalCache()
       this.#systemPrompt = undefined
+      await this.lifecycleHook("config.after", { transition: { kind: "permission-rules" } })
     } finally {
       this.#turnReserved = false
       this.#inputRunner.wake()
@@ -1423,6 +1649,315 @@ class CodesplashSession implements EngineSession {
       }
     })
   }
+  #extensionHost(): ExtensionHost {
+    return {
+      interactive: () =>
+        this.#extensionsPublished && this.options.interactiveExtensions === true && !this.#closed,
+      ui: (update) => {
+        if (update.operation === "composer")
+          return (
+            this.#extensionsPublished &&
+            !this.#loop.isTurnActive &&
+            !this.#loop.hasPendingInteraction &&
+            this.#extensionComposer?.(update.text) === true
+          )
+        if (this.#ended) return false
+        this.#push(this.#factory.event("extensions/ui", {}, { kind: "extension.ui", payload: update }))
+        return this.options.interactiveExtensions === true
+      },
+      dialog: (form, signal) => this.#loop.requestForm(form, signal, true),
+      diagnostic: (message) =>
+        this.#push(
+          this.#factory.event("extensions/diagnostic", {}, { kind: "warning", payload: { message } }),
+        ),
+      complete: async (selector, prompt, signal) => {
+        if (
+          !this.#extensionsPublished ||
+          this.#closed ||
+          this.#extensionAuxiliaryBusy ||
+          (!this.#loop.isTurnActive && !this.#turnReserved) ||
+          ++this.#extensionAuxiliary > 8
+        )
+          throw new Error("Extension auxiliary work is unavailable or its budget is exhausted")
+        const model = this.#providerRegistry.find(selector),
+          provider = model ? this.#providers[model.provider] : undefined
+        if (
+          !model ||
+          !provider ||
+          prompt.length / 3 + Math.min(model.maxOutputTokens, 8192) + 512 > model.contextWindow
+        )
+          throw new Error(
+            "Extension auxiliary model unavailable or exceeds its 8192-token output/context budget",
+          )
+        this.#extensionAuxiliaryBusy = true
+        try {
+          return this.#extensions.sanitize(
+            await this.#loop.extensionComplete(
+              { ...model, maxOutputTokens: Math.min(model.maxOutputTokens, 8192) },
+              provider,
+              prompt,
+              signal,
+            ),
+          )
+        } finally {
+          this.#extensionAuxiliaryBusy = false
+        }
+      },
+    }
+  }
+  setExtensionComposer(callback?: (text: string) => boolean): void {
+    this.#extensionComposer = callback
+  }
+  async pluginsCommand(command: string): Promise<unknown> {
+    if (!["status", "reload"].includes(command.trim())) throw new Error("Usage: /plugins status|reload")
+    return this.#inputOperation(async () => {
+      if (command.trim() === "reload") {
+        const signal = this.#extensionCommandSignal()
+        const config = await resolveConfigForWorkspace(
+          this.#config,
+          this.#cwd,
+          this.options.workspaceTrusted,
+          true,
+        )
+        const policy = (value: AgentConfig) =>
+          stableValue([value.permissions, value.codex, value.sandbox, value.resolution?.constraints])
+        if (policy(config) !== policy(this.#config))
+          throw new Error("Plugin reload cannot change pinned policy; open a new session")
+        const resolveCurrent = () =>
+          resolveConfigForWorkspace(config, this.#cwd, this.options.workspaceTrusted)
+        const extensions = new ExtensionRuntime({
+          ...this.#extensions.options,
+          config,
+          resolveConfig: resolveCurrent,
+        })
+        const hooks = new HookManager({ ...this.#hooks.options, config, resolveConfig: resolveCurrent })
+        let published = false
+        const mcp = new McpManager({
+          ...this.#mcp.options,
+          configurationBoundary: config,
+          resolveConfig: resolveCurrent,
+          changed: () => {
+            if (published) {
+              this.#loop.clearApprovalCache()
+              this.#systemPrompt = undefined
+            }
+          },
+        })
+        const abortStaging = () => {
+          if (!published) void Promise.allSettled([extensions.close(), hooks.close(), mcp.close()])
+        }
+        signal.addEventListener("abort", abortStaging, { once: true })
+        try {
+          signal.throwIfAborted()
+          await extensions.stage(signal)
+          if (extensions.providers().length || this.#extensions.providers().length)
+            throw new Error("Plugin provider changes require a new session")
+          const tools = extensions.registry(this.#extensionBase)
+          await hooks.reload()
+          for (const [id, server] of Object.entries(config.mcp?.servers ?? {}))
+            if (server.enabled) {
+              signal.throwIfAborted()
+              await mcp.connect(id)
+            }
+          const inputs = new ContextInputs(
+            this.#cwd,
+            resolve(configDirectory(), "context"),
+            this.options.workspaceTrusted ?? true,
+            config.context,
+            this.#sandbox.sanitize?.bind(this.#sandbox),
+            config.pluginResources,
+          )
+          // Metadata and integrity are staged without prematurely granting resource read permissions.
+          for (const selection of config.pluginResources ?? [])
+            await verifySelection(selection, "plugin", signal)
+          const owner = this
+          const registry = createMcpToolRegistry(
+            {
+              get generation() {
+                return owner.#extensionTools.generation
+              },
+              specs: () => this.#extensionTools.specs(),
+              get: (name, generation) => this.#extensionTools.get(name, generation),
+              source: (name) => this.#extensionTools.source(name),
+            },
+            mcp,
+          )
+          await this.lifecycleHook("config.before", { transition: { kind: "plugins-reload" } })
+          signal.throwIfAborted()
+          this.#requireOpen()
+          await extensions.revalidate(signal)
+          const fresh = await resolveConfigForWorkspace(
+            this.#config,
+            this.#cwd,
+            this.options.workspaceTrusted,
+            true,
+          )
+          if (fresh.resolution?.generation !== config.resolution?.generation)
+            throw new Error("Plugin selection changed during staging; retry the reviewed reload")
+          await this.#hooks.suspend()
+          signal.throwIfAborted()
+          this.#requireOpen()
+          const old = { extensions: this.#extensions, hooks: this.#hooks, mcp: this.#mcp }
+          if (this.#loop.hasPendingInteraction)
+            throw new Error("Resolve the pending interaction before plugin reload")
+          const retiring = Promise.allSettled([old.extensions.close(), old.hooks.close(), old.mcp.close()])
+          // No await between final owner check and publication.
+          this.#config = config
+          this.#extensions = extensions
+          this.#extensionTools = tools
+          this.#hooks = hooks
+          this.#mcp = mcp
+          this.#inputs = inputs
+          this.#registry = registry
+          this.#loop.replaceIntegrations(hooks, registry)
+          extensions.activate(this.#extensionHost())
+          published = true
+          this.#contextSuffix = ""
+          this.#systemPrompt = undefined
+          this.#memory.invalidate()
+          await retiring
+          await this.lifecycleHook("config.after", { transition: { kind: "plugins-reload" } })
+        } finally {
+          signal.removeEventListener("abort", abortStaging)
+          if (!published) await Promise.allSettled([extensions.close(), hooks.close(), mcp.close()])
+        }
+      }
+      return {
+        generation: this.#config.resolution?.generation,
+        plugins: Object.entries(this.#config.plugins?.entries ?? {}).map(([id, selection]) => ({
+          id,
+          ...selection,
+          inactiveAgents: selection.enabled ? readPluginManifest(selection.root).agents : [],
+        })),
+        message:
+          "Selected immutable versions stay pinned until explicit reload. Agents are inactive until M7. Executable changes require native component fingerprint trust.",
+      }
+    })
+  }
+  async extensionsCommand(command: string): Promise<unknown> {
+    const match = /^(status|disable|reload|run|complete)(?:\s+(\S+))?(?:\s+([\s\S]*))?$/.exec(command.trim())
+    if (!match)
+      throw new Error(
+        "Usage: /extensions status|disable ID|reload|run ID/COMMAND [ARGUMENT]|complete ID/COMMAND [ARGUMENT]",
+      )
+    const [, action, id, argument = ""] = match
+    if (["status", "reload"].includes(action!) ? !!id : !id)
+      throw new Error("Invalid extension command arguments")
+    return this.#inputOperation(async () => {
+      if (action === "run")
+        return { result: await this.#extensions.command(id!, argument, this.#extensionCommandSignal()) }
+      if (action === "complete")
+        return {
+          completions: await this.#extensions.completeCommand(id!, argument, this.#extensionCommandSignal()),
+        }
+      if (action === "disable") {
+        if (this.#providers[this.#model.provider] && this.#model.provider.startsWith(`ext_${id}_`))
+          throw new Error("Select another provider before disabling its extension")
+        await this.#extensions.disable(id!)
+      }
+      if (action === "reload") {
+        const config = await resolveConfigForWorkspace(this.#config, this.#cwd, this.options.workspaceTrusted)
+        const policy = (value: AgentConfig) => ({
+          permissions: value.permissions,
+          sandbox: value.codex.sandbox,
+          sandboxConfig: value.sandbox,
+          managed: value.resolution?.constraints,
+        })
+        if (stableValue(policy(config)) !== stableValue(policy(this.#config)))
+          throw new Error(
+            "Extension reload cannot change the pinned permission/sandbox policy; open a new session",
+          )
+        const next = new ExtensionRuntime({
+          config,
+          cwd: this.#cwd,
+          dataDir: this.options.trustDataDirectory ?? dataDirectory(),
+          disabled: this.options.disableExtensions,
+          hostExtensions: this.#extensions.options.hostExtensions,
+          resolveConfig: () => resolveConfigForWorkspace(config, this.#cwd, this.options.workspaceTrusted),
+          sanitize: this.#sandbox.sanitize?.bind(this.#sandbox),
+        })
+        try {
+          await next.stage(this.#extensionCommandSignal())
+          const tools = next.registry(this.#extensionBase)
+          if (next.providers().length || this.#extensions.providers().length)
+            throw new Error(
+              "Extension provider changes require a new session; the current registry is preserved",
+            )
+          await this.lifecycleHook("config.before", { transition: { kind: "extensions-reload" } })
+          this.#requireOpen()
+          const old = this.#extensions
+          await old.close()
+          this.#requireOpen()
+          this.#extensions = next
+          this.#extensionTools = tools
+          next.activate(this.#extensionHost())
+          this.#loop.clearApprovalCache()
+          this.#systemPrompt = undefined
+        } catch (error) {
+          await next.close()
+          throw error
+        }
+        await this.lifecycleHook("config.after", { transition: { kind: "extensions-reload" } })
+      }
+      return this.#extensions.status()
+    })
+  }
+  #extensionCommandSignal(): AbortSignal {
+    return AbortSignal.any([this.#extensionCommandAbort.signal, AbortSignal.timeout(30000)])
+  }
+
+  async hooksCommand(command: string): Promise<unknown> {
+    const [action = "status", id, ...extra] = command.trim().split(/\s+/)
+    if (
+      extra.length ||
+      !["status", "show", "reload", "disable", "receipts", "acknowledge"].includes(action) ||
+      (["show", "disable", "acknowledge"].includes(action) ? !id : !!id)
+    )
+      throw new Error("Usage: /hooks status|show ID|reload|disable ID|receipts|acknowledge KEY")
+    return this.#inputOperation(async () => {
+      if (action === "acknowledge" && id) this.#hooks.receipts.acknowledge(id)
+      if (["receipts", "acknowledge"].includes(action))
+        return {
+          receipts: this.#hooks.receipts.list(),
+          message: "Acknowledgment consumes uncertain execution; it never retries the operation.",
+        }
+      if (action === "disable" && id) await this.#hooks.disable(id)
+      if (action === "reload") {
+        await this.#hooks.reload(() =>
+          this.lifecycleHook("config.before", { transition: { kind: "hooks-reload" } }),
+        )
+        await this.lifecycleHook("config.after", { transition: { kind: "hooks-reload" } })
+      }
+      const config = await resolveConfigForWorkspace(this.#config, this.#cwd, this.options.workspaceTrusted)
+      const handlers = []
+      for (const [name, handler] of Object.entries(config.hooks?.handlers ?? {})) {
+        if (id && action === "show" && name !== id) continue
+        let review: unknown
+        try {
+          const value = await reviewHook(config, name, this.#cwd)
+          review = {
+            ...value,
+            trusted: hookTrusted(this.options.trustDataDirectory ?? dataDirectory(), value),
+          }
+        } catch (error) {
+          review = { error: this.#mcp.sanitize(error instanceof Error ? error.message : "Review failed") }
+        }
+        handlers.push({
+          id: name,
+          enabled: handler.enabled,
+          disabledInSession: this.#hooks.disabled(name),
+          review,
+        })
+      }
+      if (id && action === "show" && !handlers.length) throw new Error("Unknown hook handler")
+      return {
+        generation: this.#hooks.generation,
+        handlers,
+        message:
+          "No handler executes during inspection. Review/trust with codesplash hooks; reload reactivates reviewed configured handlers.",
+      }
+    })
+  }
   sandboxStatus(): string {
     return this.#sandbox.status?.() ?? "Execution backend status unavailable"
   }
@@ -1435,12 +1970,19 @@ class CodesplashSession implements EngineSession {
     this.#ownedMaintenance.cancel()
     this.#maintenanceAbort?.abort()
     this.#loop.interrupt()
+    this.#extensionCommandAbort.abort()
+    this.#extensions.suspend()
+    await this.#hooks.suspend().catch(() => {})
     await this.#mcp.close()
     await this.#admissionSettled?.catch(() => {})
     await this.#turnPromise?.catch(() => {})
     await this.#inputPromise?.catch(() => {})
     await this.#ownedMaintenance.close()
     await this.#inputRunner.settled()
+    if (this.#hooksInitialized && !this.#suppressSessionEnd)
+      await this.#loop.hook("session.end", AbortSignal.timeout(10000), { cwd: this.#cwd }).catch(() => {})
+    await this.#hooks.close()
+    await this.#extensions.close()
     try {
       await this.#sandbox.close()
     } finally {
@@ -1468,6 +2010,10 @@ class CodesplashSession implements EngineSession {
     }
     await this.#inputOperation(async () => {
       const selection = this.#selectModel(model)
+      await this.lifecycleHook("config.before", {
+        transition: { kind: "model", from: this.#model.id, to: selection.model.id },
+      })
+      await this.#hooks.suspend()
       this.#memory.invalidate()
       this.#model = selection.model
       this.#reasoningEffort = selection.effort
@@ -1483,6 +2029,7 @@ class CodesplashSession implements EngineSession {
       )
       this.#memoryText = ""
       this.#contextSuffix = this.#inputSuffix
+      await this.lifecycleHook("config.after", { transition: { kind: "model", to: selection.model.id } })
     })
   }
 
@@ -1502,11 +2049,16 @@ class CodesplashSession implements EngineSession {
       throw new Error("Bypass mode requires launching with --bypass-approvals")
     }
     await this.#inputOperation(async () => {
+      await this.lifecycleHook("config.before", {
+        transition: { kind: "permission-mode", from: this.#permissions.mode, to: mode },
+      })
+      await this.#hooks.suspend()
       this.#memory.invalidate()
       this.#memoryText = ""
       await this.#mcp.suspend()
       this.#loop.clearApprovalCache()
       this.#permissions.setMode(mode)
+      await this.lifecycleHook("config.after", { transition: { kind: "permission-mode", to: mode } })
       this.#contextSuffix = ""
       this.#inputs.catalog = { resources: [], diagnostics: [] }
     })

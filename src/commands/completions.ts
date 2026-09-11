@@ -27,6 +27,9 @@ const SUBCOMMANDS = [
   "memory",
   "config",
   "mcp",
+  "hooks",
+  "plugin",
+  "extensions",
 ] as const
 
 const ROOT_FLAGS = [
@@ -34,6 +37,7 @@ const ROOT_FLAGS = [
   "--version",
   "--doctor",
   "--no-history",
+  "--no-extensions",
   "--sandbox",
   "--full-access",
   "--permission-mode",
@@ -58,6 +62,7 @@ const RUN_FLAGS = [
   "--max-turns",
   "--sandbox",
   "--no-history",
+  "--no-extensions",
   "--resume",
   "--continue",
   "--effort",
@@ -96,8 +101,24 @@ const SANDBOX_FLAGS = [
   "--write-root",
   "--allow-host",
   "--no-history",
+  "--no-extensions",
   "--",
 ] as const
+const PLUGIN_ACTIONS = [
+  "install",
+  "list",
+  "show",
+  "enable",
+  "disable",
+  "remove",
+  "update",
+  "validate",
+  "rollback",
+  "build",
+  "marketplace",
+]
+const EXTENSION_ACTIONS = ["list", "show", "enable", "disable", "trust"] as const
+const HOOK_ACTIONS = ["list", "show", "enable", "disable", "trust", "receipts", "acknowledge"] as const
 const MCP_ACTIONS = [
   "add",
   "list",
@@ -211,6 +232,9 @@ _codesplash_completions() {
     import) COMPREPLY=($(compgen -W "claude cursor --apply --destination" -- "$cur")) ;;
     create-skill) COMPREPLY=($(compgen -W "--write" -- "$cur")) ;;
     mcp) COMPREPLY=($(compgen -W "${words(MCP_ACTIONS)}" -- "$cur")) ;;
+    plugin) COMPREPLY=($(compgen -W "${words(PLUGIN_ACTIONS)}" -- "$cur")) ;;
+    extensions) COMPREPLY=($(compgen -W "${words(EXTENSION_ACTIONS)}" -- "$cur")) ;;
+    hooks) COMPREPLY=($(compgen -W "${words(HOOK_ACTIONS)}" -- "$cur")) ;;
     secrets) COMPREPLY=($(compgen -W "${words(SECRET_ACTIONS)}" -- "$cur")) ;;
     login) COMPREPLY=($(compgen -W "--api-key" -- "$cur")) ;;
     *) COMPREPLY=($(compgen -W "${words(ROOT_FLAGS)}" -- "$cur")) ;;
@@ -254,6 +278,9 @@ _codesplash() {
     import) compadd -- claude cursor --apply --destination ;;
     create-skill) compadd -- --write ;;
     mcp) compadd ${words(MCP_ACTIONS)} ;;
+    plugin) compadd ${words(PLUGIN_ACTIONS)} ;;
+    extensions) compadd ${words(EXTENSION_ACTIONS)} ;;
+    hooks) compadd ${words(HOOK_ACTIONS)} ;;
     secrets) compadd ${words(SECRET_ACTIONS)} ;;
     login) compadd -- --api-key ;;
     *) compadd -- ${words(ROOT_FLAGS)} ;;
@@ -285,6 +312,9 @@ function fishScript(): string {
     `complete -c codesplash -n "__fish_seen_subcommand_from import" -l destination -r`,
     `complete -c codesplash -n "__fish_seen_subcommand_from create-skill" -l write`,
     `complete -c codesplash -n "__fish_seen_subcommand_from mcp" -a "${words(MCP_ACTIONS)}"`,
+    `complete -c codesplash -n "__fish_seen_subcommand_from plugin" -a "${words(PLUGIN_ACTIONS)}"`,
+    `complete -c codesplash -n "__fish_seen_subcommand_from extensions" -a "${words(EXTENSION_ACTIONS)}"`,
+    `complete -c codesplash -n "__fish_seen_subcommand_from hooks" -a "${words(HOOK_ACTIONS)}"`,
     `complete -c codesplash -n "__fish_seen_subcommand_from secrets" -a "${words(SECRET_ACTIONS)}"`,
     `complete -c codesplash -n "__fish_seen_subcommand_from sandbox" -l read-only`,
     `complete -c codesplash -n "__fish_seen_subcommand_from sandbox" -l read-root -r`,
@@ -356,6 +386,9 @@ Register-ArgumentCompleter -Native -CommandName codesplash -ScriptBlock {
                 'import' { @('claude', 'cursor', '--apply', '--destination') }
                 'create-skill' { @('--write') }
                 'mcp' { @(${quotedList(MCP_ACTIONS)}) }
+                'plugin' { @(${quotedList(PLUGIN_ACTIONS)}) }
+                'extensions' { @(${quotedList(EXTENSION_ACTIONS)}) }
+                'hooks' { @(${quotedList(HOOK_ACTIONS)}) }
                 'secrets' { @(${quotedList(SECRET_ACTIONS)}) }
                 'login' { @('--api-key') }
                 default { @(${quotedList(SUBCOMMANDS)}, ${quotedList(ROOT_FLAGS)}) }

@@ -77,7 +77,8 @@ it does not reconstruct previous tool events or repeat prior handlers.
 
 Blocking timeout defaults to 10 seconds, maximum 30 seconds; async observation defaults to 30 seconds,
 maximum 30 seconds. At most 16 owned handler operations and four active async observations; no
-unbounded waiting queue. Combined handler input/output/context work is bounded per event. Each
+unbounded waiting queue. Combined handler input/output/context work is bounded per event. An
+event dispatch also has a 30-second aggregate deadline, including validation and retained-output work. Each
 input/output JSON envelope is at most 128 KiB, 5,000 nodes and depth 32. Up to 1 MiB total additional
 context per event is retained through ToolOutputStore with bounded previews; M4 still enforces the
 model request budget. Diagnostics are at most 2 KiB and sanitized before publication.
@@ -96,6 +97,9 @@ workspace writes require explicit source review and remain clamped by plan/read-
 There is no full-access or unsandboxed fallback. HTTP requests use fixed M3 destination grants and
 DNS pinning, same-origin bounded redirects for safe discovery only, and no automatic POST retries.
 Only explicitly declared sanitized payload fields are shared with the reviewed destination.
+HTTP POST handlers have unknown remote effects and are refused in plan/read-only mode; local
+filesystem enforcement cannot establish that a remote endpoint is read-only. Command network access
+retains the fixed host ceiling; it does not claim containment of remote effects at permitted hosts.
 
 ## Tool order and irreversible outcomes
 
@@ -107,6 +111,9 @@ effects after any await. Input rewriting cannot change the tool id/name, source 
 
 Calls with changing hooks are barriers during preparation; only the final approval-free read-only
 calls may be batched. All wrappers, including MCP resources, execute the revalidated effective input.
+The C implementation conservatively serializes tool calls while any handler is enabled; disabled-hook
+sessions retain ordinary read batching. Result publication is staged until the deadline, source and
+generation are rechecked after asynchronous validation/retention.
 An explicit deny, dangerous floor, plan rule or sandbox restriction cannot be overridden by a hook.
 Hook `allow` applies only to an ordinary default approval with the corresponding reviewed capability;
 explicit ask and always-ask decisions continue to the user. Existing guardian reductions observe the
@@ -127,6 +134,10 @@ process death is uncertain and is not automatically replayed. An uncertain once 
 permit an operation. User-visible receipt inspection/acknowledgment or explicit disable/review provides
 a recovery path. Payloads/credentials are not receipt keys. Receipts are bounded and source-specific;
 changing cwd or handler fingerprints never inherits unrelated approvals or outputs.
+Once scope is per handler fingerprint and event name within the turn/session. A completed denial
+remains a denial for that scope. Acknowledging uncertainty explicitly consumes the once receipt;
+it does not retry the external operation. Retain at most 256 receipts and 128 KiB within M5's 1 MiB
+control-state ceiling; unresolved intents are never evicted to make room for more effects.
 
 ## Stop and compaction budgets
 

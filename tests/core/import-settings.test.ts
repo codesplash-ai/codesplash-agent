@@ -6,6 +6,73 @@ import { applySettings, previewSettings } from "../../src/commands/import-settin
 import { resolveConfig } from "../../src/core/config/resolver.ts"
 import { loadConfig } from "../../src/core/config.ts"
 
+test("hook migration is inert and reports foreign execution and output incompatibilities", async () => {
+  const root = mkdtempSync(join(tmpdir(), "settings-hooks-")),
+    source = join(root, "hooks.json"),
+    destination = join(root, "config.toml")
+  try {
+    writeFileSync(
+      source,
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: "Bash",
+              hooks: [{ type: "command", command: '/bin/echo "literal argument"', timeout: 5 }],
+            },
+          ],
+          PostToolUse: [{ hooks: [{ type: "http", url: "https://example.test/hook" }] }],
+          Stop: [{ hooks: [{ type: "command", command: "/bin/true", async: true }] }],
+          SubagentStart: [{ hooks: [{ type: "command", command: "OMITTED_SUBAGENT" }] }],
+          UserPromptSubmit: [
+            {
+              hooks: [
+                { type: "command", command: 'echo "$SECRET_VALUE"', env: { TOKEN: "OMITTED_CREDENTIAL" } },
+              ],
+            },
+          ],
+        },
+      }),
+    )
+    const preview = previewSettings("claude", source, destination)
+    expect(preview.changes).toHaveLength(2)
+    expect(preview.unsupported).toHaveLength(3)
+    expect(JSON.stringify(preview)).not.toContain("OMITTED_")
+    expect(preview.changes.every((entry) => entry.effect.includes("not translated"))).toBe(true)
+    applySettings(preview)
+    const config = await loadConfig(destination, [], { env: {} })
+    const handlers = Object.values(config.hooks?.handlers ?? {})
+    expect(
+      handlers.every(
+        (entry) =>
+          !entry.enabled && !entry.allowInputRewrite && !entry.allowContinuation && entry.share.length === 0,
+      ),
+    ).toBe(true)
+    expect(handlers.find((entry) => entry.kind === "command")?.args).toEqual(["literal argument"])
+    expect(handlers.find((entry) => entry.kind === "command")?.matchTools).toEqual(["bash"])
+    expect(previewSettings("claude", source, destination).changes).toHaveLength(0)
+    writeFileSync(
+      source,
+      JSON.stringify({
+        hooks: {
+          beforeShellExecution: [{ command: "/bin/true" }],
+          afterAgentThought: [{ command: "OMITTED_REASONING" }],
+        },
+      }),
+    )
+    const cursor = previewSettings("cursor", source, join(root, "cursor.toml"))
+    expect(cursor.changes).toHaveLength(1)
+    expect(cursor.changes[0]?.value).toMatchObject({
+      matchTools: ["bash"],
+      events: ["tool.before"],
+      enabled: false,
+    })
+    expect(JSON.stringify(cursor)).not.toContain("OMITTED_REASONING")
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test("Codex profile model import stays inactive and omits executable settings", async () => {
   const root = mkdtempSync(join(tmpdir(), "settings-profile-")),
     source = join(root, "source.toml"),
@@ -106,6 +173,34 @@ test("MCP settings import is inert, preserves literal argv and rejects credentia
     expect(config.mcp?.servers.remote?.enabled).toBe(false)
     expect(config.mcp?.servers.existing).toMatchObject({ enabled: true, command: "original" })
     expect(config.mcp?.servers.secret).toBeUndefined()
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("plugin migration retains inactive source references without installation or trust", async () => {
+  const root = mkdtempSync(join(tmpdir(), "settings-plugins-")),
+    source = join(root, "plugins.json"),
+    destination = join(root, "config.toml")
+  try {
+    writeFileSync(
+      source,
+      JSON.stringify({ enabledPlugins: { "fixture@market": true }, plugins: ["npm:fixture@1.0.0"] }),
+    )
+    const preview = previewSettings("claude", source, destination)
+    expect(preview.changes).toHaveLength(2)
+    expect(
+      preview.changes.every(
+        (change) =>
+          change.target.startsWith("plugins.pending.") &&
+          (change.value as { enabled: boolean }).enabled === false,
+      ),
+    ).toBe(true)
+    applySettings(preview)
+    const config = await loadConfig(destination, [], { cwd: root, env: {}, strict: true })
+    expect(Object.keys(config.plugins?.pending ?? {})).toHaveLength(2)
+    expect(config.plugins?.entries).toEqual({})
+    expect(config.pluginResources).toEqual([])
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

@@ -3,7 +3,10 @@ import { constants, type Dir } from "node:fs"
 import { lstat, open, opendir, realpath } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import { promisify } from "node:util"
+import { digest } from "../../../core/session/files.ts"
 import type { HarnessTool, ToolContext } from "../contracts.ts"
+import type { PluginResourceRoot } from "../plugins/resolve.ts"
+import { verifySelection } from "../plugins/store.ts"
 import { contains, physicalPath } from "../sandbox/profile.ts"
 import { INPUT_FILE_BYTES } from "./contracts.ts"
 
@@ -106,7 +109,10 @@ function inputOf(input: unknown) {
     throw new Error("Invalid context path")
   return { root, path: path as string | undefined }
 }
-export function contextReadTool(userRoot?: string): HarnessTool {
+export function contextReadTool(
+  userRoot?: string,
+  plugins: () => PluginResourceRoot[] = () => [],
+): HarnessTool {
   return {
     name: userRoot ? "user_context_read" : "context_read",
     hidden: true,
@@ -121,8 +127,15 @@ export function contextReadTool(userRoot?: string): HarnessTool {
     },
     async run(input, context) {
       const { root, path } = inputOf(input)
-      if (!path || (userRoot && root !== userRoot)) throw new Error("Invalid context source")
+      const plugin = plugins().find((entry) => entry.root === root)
+      if (!path || (userRoot && root !== userRoot && !plugin)) throw new Error("Invalid context source")
+      const lock = plugin ? await verifySelection(plugin, "plugin", context.signal) : undefined
       const text = await safeRead(root, path, context.signal)
+      if (
+        lock &&
+        lock.files.find((file) => file.path === relative(root, resolve(root, path)))?.sha256 !== digest(text)
+      )
+        throw new Error("Plugin resource changed while reading")
       return { text: JSON.stringify({ text: context.sanitizeOutput?.(text) ?? text }), label: path }
     },
   }

@@ -123,6 +123,7 @@ export async function sessionPresentationCommand(
         recorder = new SessionRecorder(handle)
         recorder.seedFromHistory(history.events)
         const session = await new CodesplashDriver({ config }).openSession({
+          resuming: true,
           cwd: current.projectPath,
           localSessionId: meta.localSessionId,
           sessionState: handle.state,

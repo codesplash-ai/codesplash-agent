@@ -5,6 +5,8 @@ import { join } from "node:path"
 import { type JSONRPCMessage, parseJSONRPCMessage, type Transport } from "@modelcontextprotocol/client"
 import { validateConfig } from "../../../src/core/config.ts"
 import type { AgentEvent } from "../../../src/core/events.ts"
+import type { HookEvent } from "../../../src/core/hooks.ts"
+import { MemorySessionState } from "../../../src/core/session/control.ts"
 import type {
   ModelInfo,
   ProviderClient,
@@ -12,6 +14,8 @@ import type {
   ToolCallBlock,
   ToolContext,
 } from "../../../src/engines/codesplash/contracts.ts"
+import { HookManager } from "../../../src/engines/codesplash/hooks/manager.ts"
+import { reviewHook, trustHook } from "../../../src/engines/codesplash/hooks/trust.ts"
 import { CodesplashEventFactory, CodesplashLoop } from "../../../src/engines/codesplash/loop.ts"
 import { McpManager } from "../../../src/engines/codesplash/mcp/manager.ts"
 import { createMcpToolRegistry, rankMcpTools } from "../../../src/engines/codesplash/mcp/registry.ts"
@@ -19,6 +23,7 @@ import { recordMcpTrust, reviewMcpServer } from "../../../src/engines/codesplash
 import { createPermissionRuntime } from "../../../src/engines/codesplash/permissions.ts"
 import { createProfile } from "../../../src/engines/codesplash/sandbox/profile.ts"
 import { NativeSandbox } from "../../../src/engines/codesplash/sandbox/runtime.ts"
+import { ToolOutputStore } from "../../../src/engines/codesplash/tool-output-store.ts"
 import { createToolRegistry } from "../../../src/engines/codesplash/tools/registry.ts"
 
 const echo = {
@@ -38,6 +43,7 @@ class FixtureTransport implements Transport {
   onmessage?: (message: JSONRPCMessage) => void
   closed = false
   calls = 0
+  arguments: unknown[] = []
   hang = false
   repeatCursor = false
   lastRead?: unknown
@@ -80,6 +86,7 @@ class FixtureTransport implements Transport {
       }
     if (message.method === "tools/call") {
       this.calls++
+      this.arguments.push(message.params?.arguments)
       if (this.hang) return
       if (this.elicitation) {
         this.pendingCall = message.id
@@ -303,6 +310,7 @@ async function runMcpLoop(
   fixture: Awaited<ReturnType<typeof setup>>,
   calls: ToolCallBlock[],
   deny: string[] = [],
+  hooks?: HookManager,
 ) {
   const registry = createMcpToolRegistry(createToolRegistry([]), fixture.manager)
   await registry.get("search_tool")!.run({ query: "select:fixture/echo/fixture" }, context)
@@ -317,6 +325,7 @@ async function runMcpLoop(
     grantsPath: join(fixture.cwd, "grants.json"),
   })
   const loop = new CodesplashLoop({
+    hooks,
     cwd: fixture.cwd,
     policy: context.policy,
     registry,
@@ -352,6 +361,125 @@ async function runMcpLoop(
   })
   return { events, history: loop.historySnapshot(), checkpointCount }
 }
+
+test("direct, deferred and resource MCP rewrites use effective inputs without changing source identity", async () => {
+  const f = await setup(),
+    seen: HookEvent[] = []
+  const config = validateConfig(
+    {
+      hooks: {
+        handlers: {
+          rewrite: {
+            kind: "command",
+            command: "/bin/cat",
+            enabled: true,
+            events: ["tool.before"],
+            share: ["input"],
+            allowInputRewrite: true,
+          },
+        },
+      },
+    },
+    "fixture",
+  )
+  const sandbox = new NativeSandbox(createProfile(f.cwd, "read-only"))
+  let malicious = false
+  sandbox.executeFixed = async (_argv, input) => {
+    const event = JSON.parse(input) as HookEvent
+    seen.push(event)
+    const resource = event.metadata.toolSource?.includes("/resources/")
+    return {
+      kind: "success",
+      exitCode: 0,
+      stderr: "",
+      stdout: JSON.stringify({
+        version: 1,
+        input: resource
+          ? { ...event.fields.input, uri: "fixture://rewritten", ...(malicious ? { server: "evil" } : {}) }
+          : { message: "rewritten" },
+      }),
+    }
+  }
+  const hooks = new HookManager({
+    config,
+    resolveConfig: async () => config,
+    cwd: f.cwd,
+    dataDir: f.cwd,
+    sandbox,
+    mode: () => "default",
+    state: new MemorySessionState(),
+    outputs: new ToolOutputStore(),
+  })
+  try {
+    const review = await reviewHook(config, "rewrite", f.cwd)
+    trustHook(f.cwd, review, review.fingerprint)
+    await f.enable()
+    await f.manager.connect("fixture")
+    const target = f.manager.catalog()[0]!
+    await runMcpLoop(
+      f,
+      [
+        { type: "tool_call", id: "direct", name: target.id, input: { message: "original" } },
+        {
+          type: "tool_call",
+          id: "deferred",
+          name: "use_tool",
+          input: { id: target.id, generation: target.generation, input: { message: "original" } },
+        },
+        {
+          type: "tool_call",
+          id: "resource",
+          name: "mcp_resource",
+          input: {
+            server: "fixture",
+            generation: target.generation,
+            action: "read",
+            uri: "fixture://original",
+          },
+        },
+      ],
+      [],
+      hooks,
+    )
+    expect(f.transport.arguments).toEqual([{ message: "rewritten" }, { message: "rewritten" }])
+    expect(f.transport.lastRead).toBe("fixture://rewritten")
+    expect(seen.map((event) => event.metadata.toolSource)).toEqual([
+      "mcp:fixture/echo/fixture",
+      "mcp:fixture/echo/fixture",
+      "mcp:fixture/resources/read",
+    ])
+    expect(seen.every((event) => event.metadata.toolGeneration === target.generation)).toBe(true)
+    malicious = true
+    const refused = await runMcpLoop(
+      f,
+      [
+        {
+          type: "tool_call",
+          id: "bad-resource",
+          name: "mcp_resource",
+          input: {
+            server: "fixture",
+            generation: target.generation,
+            action: "read",
+            uri: "fixture://original",
+          },
+        },
+      ],
+      [],
+      hooks,
+    )
+    expect(
+      refused.history
+        .flatMap((message) => message.content)
+        .some((block) => block.type === "tool_result" && block.isError),
+    ).toBe(true)
+    expect(f.transport.lastRead).toBe("fixture://rewritten")
+  } finally {
+    await hooks.close()
+    await sandbox.close()
+    await f.close()
+  }
+})
 
 test("direct and deferred MCP calls share actual approvals, schema guards, results and external checkpoint boundaries", async () => {
   const fixture = await setup()

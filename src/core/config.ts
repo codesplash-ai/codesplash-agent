@@ -1,11 +1,13 @@
 import { chmod, mkdir, readFile, rename } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
+import { type ExtensionConfig, validateExtensions } from "../engines/codesplash/extensions/config.ts"
 import { type HookConfig, validateHookConfig } from "../engines/codesplash/hooks/config.ts"
 import type { ContextInputConfig } from "../engines/codesplash/inputs/contracts.ts"
 import { type McpConfig, mcpConfigTable, validateMcpConfig } from "../engines/codesplash/mcp/config.ts"
 import { validateMemoryConfig } from "../engines/codesplash/memory/config.ts"
 import type { MemoryConfig } from "../engines/codesplash/memory/contracts.ts"
+import { type PluginConfig, validatePlugins } from "../engines/codesplash/plugins/config.ts"
 import type { NativeSandboxConfig } from "../engines/codesplash/sandbox/contracts.ts"
 import { validateEnvironmentName } from "../engines/codesplash/sandbox/env-policy.ts"
 import type { ConfigResolution, ConfigResolutionOptions } from "./config/contracts.ts"
@@ -87,6 +89,9 @@ export type AgentConfig = {
   context?: ContextInputConfig
   sandbox?: NativeSandboxConfig
   mcp?: McpConfig
+  plugins?: PluginConfig
+  pluginResources?: import("../engines/codesplash/plugins/resolve.ts").PluginResourceRoot[]
+  extensions?: ExtensionConfig
   hooks?: HookConfig
   guardian?: {
     enabled: boolean
@@ -465,6 +470,20 @@ export function validateConfig(parsed: unknown, path: string): AgentConfig {
     }
   }
 
+  if (parsed.plugins !== undefined) {
+    try {
+      config.plugins = validatePlugins(parsed.plugins)
+    } catch (error) {
+      problems.push(error instanceof Error ? error.message : "Invalid plugins configuration")
+    }
+  }
+  if (parsed.extensions !== undefined) {
+    try {
+      config.extensions = validateExtensions(parsed.extensions)
+    } catch (error) {
+      problems.push(error instanceof Error ? error.message : "Invalid extensions configuration")
+    }
+  }
   if (parsed.hooks !== undefined) {
     try {
       config.hooks = validateHookConfig(parsed.hooks)
@@ -780,6 +799,8 @@ export async function saveConfig(config: AgentConfig, path = configFilePath()): 
     }
   if (config.context) table.context = { ...config.context }
   if (config.sandbox) table.sandbox = { ...config.sandbox }
+  if (config.plugins) table.plugins = JSON.parse(JSON.stringify(config.plugins)) as TomlTable
+  if (config.extensions) table.extensions = JSON.parse(JSON.stringify(config.extensions)) as TomlTable
   if (config.hooks) table.hooks = JSON.parse(JSON.stringify(config.hooks)) as TomlTable
   if (config.mcp) table.mcp = mcpConfigTable(config.mcp) as TomlTable
   if (config.guardian) table.guardian = { ...config.guardian }

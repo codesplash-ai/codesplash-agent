@@ -1,6 +1,14 @@
 import type { PermissionMode, SandboxMode } from "../config.ts"
 
-export type ConfigScope = "defaults" | "user" | "project" | "profile" | "environment" | "cli" | "managed"
+export type ConfigScope =
+  | "plugin"
+  | "defaults"
+  | "user"
+  | "project"
+  | "profile"
+  | "environment"
+  | "cli"
+  | "managed"
 export type ConfigSource = {
   id: string
   scope: ConfigScope
@@ -15,6 +23,10 @@ export type ManagedConstraints = {
   allowedHosts?: string[]
   environment?: string[]
   /** Exact server ids and server/tool pairs; an empty ceiling disables all. */
+  pluginIds?: string[]
+  marketplaceIds?: string[]
+  pluginPins?: string[]
+  extensionIds?: string[]
   mcpServers?: string[]
   mcpTools?: string[]
   hookHandlers?: string[]
@@ -28,6 +40,10 @@ export type ConfigResolutionOptions = {
   profile?: string
   strict?: boolean
   workspaceTrusted?: boolean
+  /** Owned session pin; refreshed only by explicit plugin reload. */
+  /** Inert management can detach a damaged package without loading its contributions. */
+  inspectPlugins?: boolean
+  pluginSnapshot?: import("../../engines/codesplash/plugins/config.ts").PluginConfig
   dataDir?: string
 }
 export type ConfigResolution = {

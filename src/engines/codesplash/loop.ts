@@ -7,6 +7,7 @@ import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { type FormResponse, type InteractionForm, validateFormValues } from "../../core/forms.ts"
 import { safeGitArguments, safeGitEnvironment } from "../../core/git-process.ts"
+import type { HookEvent, HookEventName, HookFields } from "../../core/hooks.ts"
 import {
   type AgentEvent,
   type AgentEventInput,
@@ -54,7 +55,11 @@ import {
   type ToolResultBlock,
 } from "./contracts.ts"
 import { Guardian, type GuardianConfig } from "./guardian.ts"
+import { HookContinuationBudget } from "./hooks/continuation.ts"
+import type { HookDispatch, HookManager } from "./hooks/manager.ts"
 import type { ContextToolRunner } from "./inputs/contracts.ts"
+import { boundedJson, jsonObject } from "./mcp/bounds.ts"
+import { BoundedSchemaValidators } from "./mcp/schema.ts"
 import { derivePersistableRule } from "./permissions.ts"
 import type { SandboxRuntime } from "./sandbox/contracts.ts"
 import { READ_TOOL_OUTPUT, ToolOutputStore } from "./tool-output-store.ts"
@@ -140,6 +145,9 @@ export type DiffCollector = (cwd: string, paths: string[]) => Promise<string>
 export type ResolvedModel = { model: ModelInfo; provider: ProviderClient }
 
 export type CodesplashLoopOptions = {
+  observeHook?: (event: HookEvent, signal: AbortSignal) => Promise<void>
+  extensionsEnabled?: () => boolean
+  hooks?: HookManager
   onContextBoundary?: (kind: "before-compaction" | "compaction", messages: ChatMessage[]) => void
   beforeMutation?: (label: string, signal: AbortSignal) => Promise<string | undefined>
   afterMutation?: (id: string | undefined) => Promise<void>
@@ -190,12 +198,14 @@ export type SteeringInput = {
   prepare?: TurnRequest["prepare"]
 }
 export type TurnRequest = {
+  hasForegroundInput?: () => boolean
   userMessageId?: string
   hasSteering?: () => boolean
   takeSteering?: () => Promise<SteeringInput | undefined>
   prepare?: (
     run: ContextToolRunner,
     signal: AbortSignal,
+    admittedText?: string,
   ) => Promise<{ suffix: string; content: ContentBlock[] }>
   invokeSkill?: (input: unknown, run: ContextToolRunner, signal: AbortSignal) => Promise<string>
   provider: ProviderClient
@@ -226,14 +236,27 @@ type StreamResult =
     }
 
 export class CodesplashLoop {
+  #hooks: HookManager | undefined
+  replaceIntegrations(hooks: HookManager, registry: ToolRegistry): void {
+    if (this.isTurnActive || this.hasPendingInteraction)
+      throw new Error("Integrations may change only at idle")
+    this.#hooks = hooks
+    this.#registry = registry
+    this.clearApprovalCache()
+  }
+  readonly #hookSchemas = new BoundedSchemaValidators()
+  readonly #hookAsks = new Set<string>()
+  readonly #hookContext = new Map<string, string[]>()
   readonly #recoveryHooks: Pick<
     CodesplashLoopOptions,
     "onContextBoundary" | "beforeMutation" | "afterMutation"
   >
   readonly #cwd: string
   readonly #policy: SessionPolicy
-  readonly #registry: ToolRegistry
+  #registry: ToolRegistry
   readonly #events: CodesplashEventFactory
+  readonly #extensionsEnabled?: () => boolean
+  readonly #observeHook?: CodesplashLoopOptions["observeHook"]
   readonly #emit: (event: AgentEvent) => void
   readonly #maxToolRounds: number
   readonly #collectDiff: DiffCollector
@@ -275,6 +298,7 @@ export class CodesplashLoop {
   #compactionFailures = 0
 
   constructor(options: CodesplashLoopOptions) {
+    this.#hooks = options.hooks
     this.#recoveryHooks = options
     this.#beforePermissionModeChange = options.beforePermissionModeChange
     this.#contextOptions = options.context ?? {}
@@ -283,6 +307,8 @@ export class CodesplashLoop {
     this.#policy = options.policy
     this.#registry = options.registry
     this.#events = options.events
+    this.#extensionsEnabled = options.extensionsEnabled
+    this.#observeHook = options.observeHook
     this.#emit = options.emit
     this.#maxToolRounds = options.maxToolRounds ?? MAX_TOOL_ROUNDS
     this.#collectDiff = options.collectDiff ?? ((cwd, paths) => collectGitDiff(cwd, paths, options.sandbox))
@@ -303,6 +329,95 @@ export class CodesplashLoop {
 
   get history(): readonly ChatMessage[] {
     return this.#history
+  }
+  #hookEvent(
+    name: HookEventName,
+    fields: HookFields = {},
+    metadata: HookEvent["metadata"] = {},
+    operationId?: string,
+  ): HookEvent {
+    return {
+      version: 1,
+      id: crypto.randomUUID(),
+      name,
+      sessionId: this.#events.localSessionId,
+      ...(this.#turnId ? { turnId: this.#turnId } : {}),
+      ...(operationId ? { operationId } : {}),
+      generation: this.#hooks?.generation ?? this.#registry.generation,
+      metadata: { mode: this.#permissions?.mode ?? "default", ...metadata },
+      fields,
+    }
+  }
+  async hook(
+    name: HookEventName,
+    signal: AbortSignal,
+    fields: HookFields = {},
+    metadata: HookEvent["metadata"] = {},
+    operationId?: string,
+  ): Promise<HookDispatch | undefined> {
+    const event = this.#hookEvent(name, fields, metadata, operationId)
+    await this.#observeHook?.(event, signal)
+    return this.#hooks?.dispatch(event, signal)
+  }
+  async #admitHookInput(
+    text: string,
+    content: ContentBlock[],
+    signal: AbortSignal,
+  ): Promise<{ text: string; content: ContentBlock[] }> {
+    const admitted = await this.hook("input.admit", signal, { text, cwd: this.#cwd })
+    const effective = admitted?.fields.text ?? text
+    const next = [...content]
+    if (effective !== text) {
+      const index = next.findIndex((block) => block.type === "text" && block.text === text)
+      if (index >= 0) next[index] = { type: "text", text: effective }
+      else if (!text) next.unshift({ type: "text", text: effective })
+      else throw new ToolInputError("Input hook cannot identify the user text block to replace")
+      this.#event(
+        "hooks/inputRewrite",
+        {},
+        {
+          kind: "warning",
+          payload: {
+            message:
+              "A reviewed input hook revised the model instruction; the original user message is retained.",
+          },
+        },
+      )
+    }
+    next.push(...(admitted?.context ?? []).map((value): ContentBlock => ({ type: "text", text: value })))
+    return { text: effective, content: next }
+  }
+  #hookTool(tool: HarnessTool): boolean {
+    return (
+      (!!this.#hooks?.enabled || this.#extensionsEnabled?.() === true) &&
+      !tool.hidden &&
+      ![
+        ASK_USER_TOOL_NAME,
+        ENTER_PLAN_MODE_TOOL_NAME,
+        EXIT_PLAN_MODE_TOOL_NAME,
+        REQUEST_PERMISSIONS_TOOL_NAME,
+        READ_TOOL_OUTPUT,
+        "skill",
+      ].includes(tool.name)
+    )
+  }
+  #hookMetadata(tool: HarnessTool): HookEvent["metadata"] {
+    const source = tool.source ?? this.#registry.source(tool.name)
+    return {
+      toolName: tool.name,
+      toolSource: source?.id ?? "builtin",
+      toolGeneration: source?.generation ?? this.#registry.generation,
+    }
+  }
+  #validateHookInput(tool: HarnessTool, input: unknown): asserts input is Record<string, unknown> {
+    boundedJson(input, 1024 * 1024, 5000)
+    if (!jsonObject(input))
+      throw new ToolInputError("Tool input must be a bounded object before hook execution")
+    const validation = this.#hookSchemas.getValidator(tool.inputSchema)(input)
+    if (!validation.valid) throw new ToolInputError(validation.errorMessage ?? "Invalid tool input")
+    // Builtin parsers and external generation checks also run before handler execution.
+    tool.isReadOnly(input)
+    tool.permissionTargets?.(input, this.#toolContext(this.#abort?.signal ?? new AbortController().signal))
   }
 
   get isTurnActive(): boolean {
@@ -333,12 +448,12 @@ export class CodesplashLoop {
       const resolved = typeof request === "function" ? await request() : request
       abort.signal.throwIfAborted()
       if (this.#contextOptions.compactionStrategy === "prune") {
-        if (!this.#pruneHistory())
+        if (!(await this.#pruneHistory(abort.signal)))
           throw new Error("No older tool output can be pruned; choose the summary strategy or a new session")
       } else await this.#compactHistory(resolved, abort.signal, instructions)
-      this.#completeTurn("completed")
+      await this.#completeTurn("completed")
     } catch (error) {
-      this.#completeTurn(abort.signal.aborted ? "interrupted" : "failed")
+      await this.#completeTurn(abort.signal.aborted ? "interrupted" : "failed")
       throw error
     } finally {
       this.#abort = undefined
@@ -405,6 +520,8 @@ export class CodesplashLoop {
     this.#abort = abort
     this.#turnId = crypto.randomUUID()
     this.#escalations = 0
+    this.#hookAsks.clear()
+    this.#hookContext.clear()
     this.#guardianRequest = request
     this.#turnStartIndex = this.#history.length
     this.#lastTurnMessages = []
@@ -419,6 +536,10 @@ export class CodesplashLoop {
     let fallbackUsed = false
     let compactionAttempts = 0
     let overflowRecovered = false
+    let providerFailed = false
+    const continuation = new HookContinuationBudget(
+      this.#hooks?.continuationLimits ?? { maxCount: 0, maxDurationMs: 120000, maxTokens: 0 },
+    )
     const applySteering = async (): Promise<boolean> => {
       const next = await request.takeSteering?.()
       if (!next) return false
@@ -429,14 +550,19 @@ export class CodesplashLoop {
         { kind: "user.message", payload: { id: next.id, text: next.userText } },
         true,
       )
-      this.#history.push({ role: "user", content: next.userContent })
+      const admitted = await this.#admitHookInput(next.userText, next.userContent, abort.signal)
+      this.#history.push({ role: "user", content: admitted.content })
       let suffix = ""
       if (next.prepare) {
-        const prepared = await next.prepare(this.#contextRunner(abort.signal, turnMutatedPaths), abort.signal)
+        const prepared = await next.prepare(
+          this.#contextRunner(abort.signal, turnMutatedPaths),
+          abort.signal,
+          admitted.text,
+        )
         abort.signal.throwIfAborted()
         this.#history[this.#history.length - 1] = {
           role: "user",
-          content: [...next.userContent, ...prepared.content],
+          content: [...admitted.content, ...prepared.content],
         }
         suffix = prepared.suffix
       }
@@ -456,11 +582,20 @@ export class CodesplashLoop {
         true,
       )
       this.#event("loop/turnStarted", {}, { kind: "turn.started", payload: {} })
+      const admitted = await this.#admitHookInput(request.userText, request.userContent, abort.signal)
+      request.userText = admitted.text
+      request.userContent = admitted.content
+      const started = await this.hook("turn.start", abort.signal, { text: request.userText, cwd: this.#cwd })
+      request.userContent = [
+        ...request.userContent,
+        ...(started?.context ?? []).map((text): ContentBlock => ({ type: "text", text })),
+      ]
       this.#history.push({ role: "user", content: request.userContent })
       if (request.prepare) {
         const prepared = await request.prepare(
           this.#contextRunner(abort.signal, turnMutatedPaths),
           abort.signal,
+          request.userText,
         )
         abort.signal.throwIfAborted()
         request.system = [request.system, prepared.suffix].filter(Boolean).join("\n\n")
@@ -473,15 +608,38 @@ export class CodesplashLoop {
       let executedRounds = 0
       while (true) {
         abort.signal.throwIfAborted()
+        if (continuation.active && request.hasSteering?.()) {
+          await this.#completeTurn("completed")
+          return
+        }
         if (request.hasSteering?.()) await applySteering()
+        if (continuation.active && (request.hasForegroundInput?.() || !continuation.remainingMs)) {
+          await this.#completeTurn("completed")
+          return
+        }
         const contextRequest = { ...request, model, provider }
         let context = this.inspectContext(model, request.system, request.reasoningEffort)
         if (context.totalTokens > context.inputBudget) {
+          if (continuation.active) {
+            this.#event(
+              "hooks/continuationLimit",
+              {},
+              {
+                kind: "warning",
+                payload: {
+                  message:
+                    "Hook continuation stopped at the context budget; foreground input can resume the work.",
+                },
+              },
+            )
+            await this.#completeTurn("completed")
+            return
+          }
           if (this.#contextOptions.autoCompact === false)
             throw new Error(
               "Context exceeds this model's budget. Run /compact or use a larger-context model.",
             )
-          this.#pruneHistory()
+          await this.#pruneHistory(abort.signal)
           context = this.inspectContext(model, request.system, request.reasoningEffort)
           if (context.totalTokens > context.inputBudget) {
             if (
@@ -502,15 +660,46 @@ export class CodesplashLoop {
               )
           }
         }
-        const response = await this.#streamResponse(provider, model, request, abort.signal)
+        const reservation = Math.ceil(context.totalTokens * 3) + model.maxOutputTokens
+        if (continuation.active && !continuation.reserve(reservation)) {
+          this.#event(
+            "hooks/continuationLimit",
+            {},
+            {
+              kind: "warning",
+              payload: { message: "Hook continuation stopped at its provider token budget." },
+            },
+          )
+          await this.#completeTurn("completed")
+          return
+        }
+        const usageBefore =
+          this.#usageTotals.inputTokens + this.#usageTotals.cachedInputTokens + this.#usageTotals.outputTokens
+        const response = await this.#streamResponse(
+          provider,
+          model,
+          request,
+          continuation.active
+            ? AbortSignal.any([abort.signal, AbortSignal.timeout(Math.max(1, continuation.remainingMs))])
+            : abort.signal,
+        )
+        if (continuation.active)
+          continuation.chargeExcess(
+            reservation,
+            this.#usageTotals.inputTokens +
+              this.#usageTotals.cachedInputTokens +
+              this.#usageTotals.outputTokens -
+              usageBefore,
+          )
         if (response.kind === "error") {
-          if (!response.sawEvent && isContextOverflow(response.error)) {
+          providerFailed = true
+          if (!continuation.active && !response.sawEvent && isContextOverflow(response.error)) {
             if (overflowRecovered || this.#contextOptions.autoCompact === false)
               throw new Error(
                 "The provider rejected the context size. Try /compact, a larger-context model, or a new session.",
               )
             overflowRecovered = true
-            if (!this.#pruneHistory()) {
+            if (!(await this.#pruneHistory(abort.signal))) {
               if (
                 compactionAttempts >= 2 ||
                 this.#compactionFailures >= 2 ||
@@ -522,7 +711,8 @@ export class CodesplashLoop {
             }
             continue
           }
-          const fallback = fallbackUsed ? undefined : this.#fallbackTarget(response, model)
+          const fallback =
+            fallbackUsed || continuation.active ? undefined : this.#fallbackTarget(response, model)
           if (fallback) {
             fallbackUsed = true
             this.#event(
@@ -545,14 +735,21 @@ export class CodesplashLoop {
             {},
             { kind: "error", payload: { message, recoverable: response.error instanceof ProviderHttpError } },
           )
-          this.#completeTurn("failed")
+          await this.#completeTurn("failed")
           return
         }
         if (response.kind === "aborted") {
           if (response.text !== "") {
             this.#history.push({ role: "assistant", content: [{ type: "text", text: response.text }] })
           }
-          this.#completeTurn("interrupted")
+          if (continuation.active && !abort.signal.aborted) {
+            this.#event(
+              "hooks/continuationLimit",
+              {},
+              { kind: "warning", payload: { message: "Hook continuation stopped at its time budget." } },
+            )
+            await this.#completeTurn("completed")
+          } else await this.#completeTurn("interrupted")
           return
         }
 
@@ -569,6 +766,10 @@ export class CodesplashLoop {
             response.toolCalls,
             "Skipped: user steering arrived before tool dispatch.",
           )
+          if (continuation.active) {
+            await this.#completeTurn("completed")
+            return
+          }
           await applySteering()
           continue
         }
@@ -585,7 +786,7 @@ export class CodesplashLoop {
               payload: { message: "The response was cut off at the model's output token limit." },
             },
           )
-          this.#completeTurn("completed")
+          await this.#completeTurn("completed")
           return
         }
         if (response.stopReason !== "tool_use" || response.toolCalls.length === 0) {
@@ -593,7 +794,30 @@ export class CodesplashLoop {
             response.toolCalls,
             "Skipped: the turn ended before this tool call could run.",
           )
-          this.#completeTurn("completed")
+          if (!providerFailed && !request.hasForegroundInput?.() && continuation.canContinue()) {
+            const stop = await this.hook("turn.stop", abort.signal, { text: response.text, cwd: this.#cwd })
+            if (
+              stop?.continuations.length &&
+              !request.hasForegroundInput?.() &&
+              !request.hasSteering?.() &&
+              continuation.continue()
+            ) {
+              const text = stop.continuations.map((entry) => entry.text).join("\n\n")
+              this.#event(
+                "hooks/continuation",
+                {},
+                {
+                  kind: "warning",
+                  payload: {
+                    message: `Continuing at the request of hook ${stop.continuations.map((entry) => entry.handler).join(", ")}.`,
+                  },
+                },
+              )
+              this.#history.push({ role: "user", content: [{ type: "text", text }] })
+              continue
+            }
+          }
+          await this.#completeTurn("completed")
           return
         }
 
@@ -619,7 +843,7 @@ export class CodesplashLoop {
               },
             },
           )
-          this.#completeTurn("completed")
+          await this.#completeTurn("completed")
           return
         }
         executedRounds += 1
@@ -642,23 +866,23 @@ export class CodesplashLoop {
           await this.#emitDiff(turnMutatedPaths)
         }
         if (abort.signal.aborted) {
-          this.#completeTurn("interrupted")
+          await this.#completeTurn("interrupted")
           return
         }
         if (round.doomEnded) {
           this.#event("loop/doomLoop", {}, { kind: "warning", payload: { message: DOOM_LOOP_WARNING } })
-          this.#completeTurn("completed")
+          await this.#completeTurn("completed")
           return
         }
       }
     } catch (error) {
       if (abort.signal.aborted) {
-        this.#completeTurn("interrupted")
+        await this.#completeTurn("interrupted")
         return
       }
       const message = error instanceof Error ? error.message : String(error)
       this.#event("loop/error", {}, { kind: "error", payload: { message, recoverable: false } })
-      this.#completeTurn("failed")
+      await this.#completeTurn("failed")
     } finally {
       this.#sandbox?.endTurn()
       this.#guardian?.endTurn()
@@ -680,12 +904,48 @@ export class CodesplashLoop {
     pending.settle(choice, values)
   }
 
+  async extensionComplete(
+    model: ModelInfo,
+    provider: ProviderClient,
+    prompt: string,
+    signal: AbortSignal,
+  ): Promise<string> {
+    let text = "",
+      usage: ProviderUsage = {}
+    try {
+      for await (const event of provider.stream(
+        {
+          model,
+          system: "Complete the requested auxiliary task. Do not call tools.",
+          messages: [{ role: "user", content: [{ type: "text", text: prompt }] }],
+          tools: [],
+        },
+        signal,
+      )) {
+        signal.throwIfAborted()
+        if (event.type === "usage") usage = event.usage
+        else if (event.type === "text_delta") {
+          text += event.text
+          if (text.length > 65536) throw new Error("Extension auxiliary output limit exceeded")
+        } else if (event.type === "tool_call") throw new Error("Extension auxiliary work cannot invoke tools")
+        else if (event.type === "done") {
+          if (event.stopReason === "aborted") throw new Error("Extension auxiliary request cancelled")
+          break
+        }
+      }
+      return text
+    } finally {
+      if (Object.keys(usage).length) this.recordAuxiliaryUsage(usage, model)
+      else this.recordUnknownAuxiliaryUsage()
+    }
+  }
+
   get hasPendingInteraction(): boolean {
     return this.#pendingRequests.size > 0
   }
 
-  requestForm(form: InteractionForm, signal: AbortSignal): Promise<FormResponse> {
-    if (this.hasPendingInteraction || !this.#turnId || signal.aborted)
+  requestForm(form: InteractionForm, signal: AbortSignal, idle = false): Promise<FormResponse> {
+    if (this.hasPendingInteraction || (!this.#turnId && !idle) || signal.aborted)
       return Promise.resolve({ action: "decline" })
     const requestId = crypto.randomUUID(),
       itemId = `mcp-form-${requestId}`
@@ -715,7 +975,7 @@ export class CodesplashLoop {
           payload: {
             id: requestId,
             requestKind: "elicitation",
-            title: `MCP ${form.source.server}: ${form.source.operation}`,
+            title: `${form.source.server.startsWith("extension:") ? "" : "MCP "}${form.source.server}: ${form.message.slice(0, 128)}`,
             detail: form.message,
             choices: ["accept", "decline"],
             form,
@@ -762,19 +1022,41 @@ export class CodesplashLoop {
     this.#recoveryHooks.onContextBoundary?.("compaction", this.historySnapshot())
   }
 
-  #pruneHistory(): boolean {
+  async #pruneHistory(signal: AbortSignal): Promise<boolean> {
     const messages = pruneToolResults(this.#history)
     if (estimateMessages(messages) >= estimateMessages(this.#history)) return false
-    this.#replaceHistory(messages)
-    this.#event(
-      "context/pruned",
-      {},
-      {
-        kind: "warning",
-        payload: { message: "Shortened older tool output in model context; visible history is preserved." },
-      },
-    )
-    return true
+    try {
+      const before = await this.hook("compaction.before", signal, { cwd: this.#cwd, reason: "prune" })
+      if (before?.instructions.length)
+        throw new ToolInputError("Summary instructions apply only to summary compaction")
+      signal.throwIfAborted()
+      this.#replaceHistory(messages)
+      const after = await this.hook("compaction.after", signal, { cwd: this.#cwd, reason: "prune" })
+      const context = [...(before?.context ?? []), ...(after?.context ?? [])]
+      if (context.length)
+        this.#history.push({ role: "user", content: context.map((text) => ({ type: "text", text })) })
+      this.#event(
+        "context/pruned",
+        {},
+        {
+          kind: "warning",
+          payload: { message: "Shortened older tool output in model context; visible history is preserved." },
+        },
+      )
+      return true
+    } catch (error) {
+      await this.#compactionErrorHook(error, signal)
+      throw error
+    }
+  }
+  async #compactionErrorHook(error: unknown, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return
+    const failed = await this.hook("compaction.error", signal, {
+      cwd: this.#cwd,
+      reason: error instanceof Error ? error.message : "Compaction failed",
+    }).catch(() => undefined)
+    if (failed?.context.length)
+      this.#history.push({ role: "user", content: failed.context.map((text) => ({ type: "text", text })) })
   }
 
   async #compactHistory(request: TurnRequest, signal: AbortSignal, instructions?: string): Promise<void> {
@@ -785,6 +1067,15 @@ export class CodesplashLoop {
     )
     const before = estimateMessages(this.#history)
     try {
+      const hook = await this.hook("compaction.before", signal, {
+        cwd: this.#cwd,
+        reason: instructions ?? "summary",
+      })
+      instructions = [instructions, ...(hook?.instructions ?? []), ...(hook?.context ?? [])]
+        .filter(Boolean)
+        .join("\n\n")
+      if (instructions.length > 4000)
+        throw new ToolInputError("Combined compaction instructions exceed 4000 characters")
       const context = this.inspectContext(request.model, request.system, request.reasoningEffort)
       const messages = await compactMessages({
         provider: request.provider,
@@ -804,6 +1095,9 @@ export class CodesplashLoop {
       })
       signal.throwIfAborted()
       this.#replaceHistory(messages)
+      const after = await this.hook("compaction.after", signal, { cwd: this.#cwd, reason: "summary" })
+      if (after?.context.length)
+        this.#history.push({ role: "user", content: after.context.map((text) => ({ type: "text", text })) })
       this.#compactionFailures = 0
       this.#event(
         "context/compacted",
@@ -817,6 +1111,7 @@ export class CodesplashLoop {
       )
     } catch (error) {
       if (!signal.aborted) this.#compactionFailures++
+      await this.#compactionErrorHook(error, signal)
       throw error
     }
   }
@@ -893,6 +1188,8 @@ export class CodesplashLoop {
     } finally {
       // Adapters emit request-scoped snapshots; the last one folds into the session totals.
       this.#commitRequestUsage(requestUsage, model)
+      if (model.provider.startsWith("ext_") && !Object.keys(requestUsage).length)
+        this.recordUnknownAuxiliaryUsage()
       if (requestUsage.inputTokens !== undefined || requestUsage.cachedInputTokens !== undefined) {
         this.#contextTracker.observe(
           (requestUsage.inputTokens ?? 0) + (requestUsage.cachedInputTokens ?? 0),
@@ -1178,6 +1475,40 @@ export class CodesplashLoop {
           throw new ToolInputError(`Denied by permission rule: ${call.name}`)
         target = this.#registry.resolve?.(call) ?? { call, tool: tool as HarnessTool }
         if (!target.tool || target.tool.hidden) throw new ToolInputError(`Unknown tool: ${call.name}`)
+        if (this.#hookTool(target.tool)) {
+          await flushReadOnlyBatch()
+          this.#validateHookInput(target.tool, target.call.input)
+          const metadata = this.#hookMetadata(target.tool)
+          const beforeEvent = this.#hookEvent(
+            "tool.before",
+            { input: target.call.input, cwd: this.#cwd },
+            metadata,
+            call.id,
+          )
+          await this.#observeHook?.(beforeEvent, signal)
+          const before = await this.#hooks?.dispatch(beforeEvent, signal, (input) =>
+            this.#validateHookInput(target.tool, input),
+          )
+          const effective = before?.fields.input ?? target.call.input
+          const rewritten =
+            call.name === "use_tool" && jsonObject(call.input)
+              ? { ...call, input: { ...call.input, input: effective } }
+              : { ...call, input: effective }
+          const fresh = this.#registry.resolve?.(rewritten) ?? {
+            call: rewritten,
+            tool: this.#registry.get(rewritten.name) as HarnessTool,
+          }
+          if (
+            !fresh.tool ||
+            fresh.call.name !== target.call.name ||
+            JSON.stringify(this.#hookMetadata(fresh.tool)) !== JSON.stringify(metadata)
+          )
+            throw new ToolInputError("Hook rewrite changed tool identity or generation")
+          this.#validateHookInput(fresh.tool, fresh.call.input)
+          target = fresh
+          if (before?.decision === "ask") this.#hookAsks.add(call.id)
+          if (before?.context.length) this.#hookContext.set(call.id, before.context)
+        }
         resolved.set(index, target)
       } catch (error) {
         const message = error instanceof Error ? error.message : "Tool resolution failed"
@@ -1251,6 +1582,8 @@ export class CodesplashLoop {
    * their results and requests land in the model's call order.
    */
   #canRunConcurrently(tool: HarnessTool, call: ToolCallBlock, signal: AbortSignal): boolean {
+    // Hook handlers may themselves have effects or approvals; preserve call order through their completion.
+    if (this.#hookTool(tool)) return false
     if (
       tool.name === ASK_USER_TOOL_NAME ||
       tool.name === ENTER_PLAN_MODE_TOOL_NAME ||
@@ -1294,10 +1627,13 @@ export class CodesplashLoop {
         return { decision: { kind: "default" }, targets: undefined }
       }
     }
-    return {
-      decision: permissions.decide(tool.permissionName ?? tool.name, targets, tool.isReadOnly(call.input)),
-      targets,
+    let decision = permissions.decide(tool.permissionName ?? tool.name, targets, tool.isReadOnly(call.input))
+    if (tool.permissionFloor) {
+      const floor = this.#permissionDecision(tool.permissionFloor, call, signal).decision
+      if (floor.kind === "deny" || (floor.kind === "ask" && decision.kind !== "deny"))
+        decision = floor.kind === "ask" ? { ...floor, alwaysAsk: true, persistableRule: undefined } : floor
     }
+    return { decision, targets }
   }
 
   async #runToolCall(
@@ -1309,6 +1645,7 @@ export class CodesplashLoop {
     images?: ImageBlock[],
   ): Promise<ToolResultBlock> {
     const itemId = call.id
+    let executionStarted = false
     const provisionalLabel = callLabel(tool.name, call.input)
     this.#emitToolItem(itemId, provisionalLabel, undefined, "running")
     if (signal.aborted) {
@@ -1383,18 +1720,55 @@ export class CodesplashLoop {
       // The permission engine is consulted first: deny short-circuits with no request, allow
       // skips approval entirely, ask opens a rule-driven approval, and default falls through to
       // the tool's own permission() flow exactly as before.
-      const { decision, targets } = this.#permissionDecision(tool, call, signal)
+      let { decision, targets } = this.#permissionDecision(tool, call, signal)
+      const policyBefore = JSON.stringify(decision),
+        modeBefore = this.#permissions?.mode,
+        identityBefore = JSON.stringify(this.#hookMetadata(tool))
       if (decision.kind === "deny") {
         return this.#failCall(itemId, call, provisionalLabel, `Denied by permission rule: ${decision.reason}`)
+      }
+      let hookAllowed = false
+      const defaultPermission = tool.permission(call.input, this.#toolContext(signal))
+      // Deterministic always-ask floors are represented by decision.kind === "ask" above.
+      const ordinaryApproval = defaultPermission.kind === "approval"
+      if (this.#hookTool(tool)) {
+        if (tool.source?.id.includes("/resources/")) {
+          const resource = await this.hook(
+            "resource.before",
+            signal,
+            { input: call.input as Record<string, unknown>, cwd: this.#cwd },
+            this.#hookMetadata(tool),
+            call.id,
+          )
+          if (resource?.context.length)
+            this.#hookContext.set(call.id, [...(this.#hookContext.get(call.id) ?? []), ...resource.context])
+        }
+        const permission = await this.hook(
+          "permission.request",
+          signal,
+          { input: call.input as Record<string, unknown>, cwd: this.#cwd, reason: decision.kind },
+          this.#hookMetadata(tool),
+          call.id,
+        )
+        if (permission?.decision === "ask" || this.#hookAsks.has(call.id)) {
+          if (decision.kind !== "ask")
+            decision = {
+              kind: "ask",
+              alwaysAsk: true,
+              reason: permission?.reason ?? "Hook requires explicit review",
+            }
+        } else
+          hookAllowed = permission?.decision === "allow" && decision.kind === "default" && ordinaryApproval
       }
       let guardianAllowed = false
       // Explicit ask rules and deterministic floors are human decisions. Guardian may
       // reduce only the tool's default prompts, never a policy-authored ask.
       if (
         this.#guardian &&
+        !hookAllowed &&
         this.#guardianRequest &&
         decision.kind === "default" &&
-        tool.permission(call.input, this.#toolContext(signal)).kind === "approval"
+        ordinaryApproval
       ) {
         const request = this.#guardianRequest
         const selected = this.#guardian.config.model
@@ -1445,7 +1819,7 @@ export class CodesplashLoop {
           guardianAllowed = true
         }
       }
-      if (!guardianAllowed && decision.kind === "ask") {
+      if (!hookAllowed && !guardianAllowed && decision.kind === "ask") {
         const refusal = await this.#askApproval(
           tool,
           call,
@@ -1456,7 +1830,7 @@ export class CodesplashLoop {
           signal,
         )
         if (refusal !== undefined) return refusal
-      } else if (!guardianAllowed && decision.kind === "default") {
+      } else if (!hookAllowed && !guardianAllowed && decision.kind === "default") {
         const refusal = await this.#defaultApproval(tool, call, itemId, provisionalLabel, targets, signal)
         if (refusal !== undefined) return refusal
       }
@@ -1490,12 +1864,43 @@ export class CodesplashLoop {
             "Named secrets require the native sandbox runtime",
           )
       }
+      if (this.#hookTool(tool)) {
+        const metadata = this.#hookMetadata(tool)
+        for (const name of ["tool.before", "permission.request"] as const)
+          await this.#hooks?.revalidate(this.#hookEvent(name, {}, metadata, call.id), signal)
+        this.#validateHookInput(tool, call.input)
+        const current = this.#permissionDecision(tool, call, signal).decision
+        if (current.kind === "deny") throw new ToolInputError(`Denied by permission rule: ${current.reason}`)
+        signal.throwIfAborted()
+      }
       const checkpoint =
         !tool.isReadOnly(call.input) && tool.effects !== "external"
           ? await this.#recoveryHooks.beforeMutation?.(call.name, signal)
           : undefined
       let outcome: ToolOutcome
       try {
+        if (this.#hookTool(tool)) {
+          if (
+            JSON.stringify(this.#hookMetadata(tool)) !== identityBefore ||
+            this.#permissions?.mode !== modeBefore ||
+            JSON.stringify(this.#permissionDecision(tool, call, signal).decision) !== policyBefore
+          )
+            throw new ToolInputError(
+              "Tool identity or permission policy changed during approval; request the operation again",
+            )
+          for (const name of [
+            "tool.before",
+            "permission.request",
+            ...(tool.source?.id.includes("/resources/") ? ["resource.before" as const] : []),
+          ] as const)
+            await this.#hooks?.revalidate(
+              this.#hookEvent(name, {}, this.#hookMetadata(tool), call.id),
+              signal,
+            )
+          this.#validateHookInput(tool, call.input)
+          signal.throwIfAborted()
+        }
+        executionStarted = true
         outcome =
           call.name === "skill" && this.#guardianRequest?.invokeSkill
             ? {
@@ -1509,8 +1914,18 @@ export class CodesplashLoop {
             : call.name === READ_TOOL_OUTPUT
               ? { text: await this.#outputStore.read(call.input), label: "Retained tool output" }
               : this.#sandbox
-                ? await this.#sandbox.runTool(tool, call.input, this.#toolContext(signal))
-                : await tool.run(call.input, this.#toolContext(signal))
+                ? await this.#sandbox.runTool(tool, call.input, {
+                    ...this.#toolContext(signal),
+                    progress: (text) => {
+                      if (!signal.aborted) this.#emitToolItem(itemId, provisionalLabel, text, "running")
+                    },
+                  })
+                : await tool.run(call.input, {
+                    ...this.#toolContext(signal),
+                    progress: (text) => {
+                      if (!signal.aborted) this.#emitToolItem(itemId, provisionalLabel, text, "running")
+                    },
+                  })
       } finally {
         if (checkpoint) await this.#recoveryHooks.afterMutation?.(checkpoint)
       }
@@ -1539,13 +1954,68 @@ export class CodesplashLoop {
       }
       if (outcome.isError) result.isError = true
       images?.push(...(outcome.images ?? []))
+      if (this.#hookTool(tool)) {
+        // The actual effect and original output above are already recorded; processing cannot erase them.
+        try {
+          const after = await this.hook(
+            outcome.isError ? "tool.error" : "tool.after",
+            signal,
+            { input: call.input as Record<string, unknown>, result: outcome.text, cwd: this.#cwd },
+            this.#hookMetadata(tool),
+            call.id,
+          )
+          const resource = tool.source?.id.includes("/resources/")
+            ? await this.hook(
+                "resource.after",
+                signal,
+                { cwd: this.#cwd, result: outcome.text },
+                this.#hookMetadata(tool),
+                call.id,
+              )
+            : undefined
+          const text = [
+            after?.fields.result ?? result.text,
+            ...(this.#hookContext.get(call.id) ?? []),
+            ...(after?.context ?? []),
+            ...(resource?.context ?? []),
+          ].join("\n\n")
+          result.text = retainOutput ? await this.#outputStore.retain(text) : text
+        } catch (error) {
+          const message =
+            this.#sandbox?.sanitize?.(error instanceof Error ? error.message : "Hook processing failed") ??
+            "Hook processing failed"
+          result.text += `\n[Post-tool hook processing failed: ${message.slice(0, 2048)}. The recorded tool outcome is unchanged.]`
+        }
+      }
       return result
     } catch (error) {
-      if (error instanceof ToolInputError)
-        return this.#failCall(itemId, call, provisionalLabel, error.message)
-      if (signal.aborted) return this.#failCall(itemId, call, provisionalLabel, "Interrupted by the user.")
       const message = error instanceof Error ? error.message : String(error)
-      return this.#failCall(itemId, call, provisionalLabel, `${tool.name} failed: ${message}`)
+      const result = this.#failCall(
+        itemId,
+        call,
+        provisionalLabel,
+        signal.aborted
+          ? "Interrupted by the user."
+          : error instanceof ToolInputError
+            ? message
+            : `${tool.name} failed: ${message}`,
+      )
+      if (executionStarted && this.#hookTool(tool) && !signal.aborted) {
+        const after = await this.hook(
+          "tool.error",
+          signal,
+          { input: call.input as Record<string, unknown>, result: result.text, cwd: this.#cwd },
+          this.#hookMetadata(tool),
+          call.id,
+        ).catch(() => undefined)
+        const text = [
+          after?.fields.result ?? result.text,
+          ...(this.#hookContext.get(call.id) ?? []),
+          ...(after?.context ?? []),
+        ].join("\n\n")
+        result.text = retainOutput ? await this.#outputStore.retain(text) : text
+      }
+      return result
     }
   }
 
@@ -1720,8 +2190,18 @@ export class CodesplashLoop {
       return this.#failCall(itemId, call, label, "Already in plan mode.")
     }
     this.#modeBeforePlan = permissions.mode
+    const signal = this.#abort?.signal ?? AbortSignal.timeout(30000)
+    await this.hook("config.before", signal, {
+      transition: { kind: "permission-mode", from: permissions.mode, to: "plan" },
+      cwd: this.#cwd,
+    })
     await this.#beforePermissionModeChange?.()
+    await this.#hooks?.suspend()
     permissions.setMode("plan")
+    await this.hook("config.after", signal, {
+      transition: { kind: "permission-mode", to: "plan" },
+      cwd: this.#cwd,
+    }).catch(() => {})
     this.#emitToolItem(itemId, label, ENTER_PLAN_MODE_RESULT_TEXT, "completed")
     return { type: "tool_result", toolCallId: call.id, text: ENTER_PLAN_MODE_RESULT_TEXT }
   }
@@ -1758,8 +2238,17 @@ export class CodesplashLoop {
       signal,
     )
     if (choice === "approve") {
+      await this.hook("config.before", signal, {
+        transition: { kind: "permission-mode", from: permissions.mode, to: this.#modeBeforePlan },
+        cwd: this.#cwd,
+      })
       await this.#beforePermissionModeChange?.()
+      await this.#hooks?.suspend()
       permissions.setMode(this.#modeBeforePlan)
+      await this.hook("config.after", signal, {
+        transition: { kind: "permission-mode", to: this.#modeBeforePlan },
+        cwd: this.#cwd,
+      }).catch(() => {})
       this.#emitToolItem(itemId, label, PLAN_APPROVED_RESULT_TEXT, "completed")
       return { type: "tool_result", toolCallId: call.id, text: PLAN_APPROVED_RESULT_TEXT }
     }
@@ -1854,7 +2343,8 @@ export class CodesplashLoop {
     )
   }
 
-  #completeTurn(status: "completed" | "interrupted" | "failed"): void {
+  async #completeTurn(status: "completed" | "interrupted" | "failed"): Promise<void> {
+    await this.hook("turn.end", AbortSignal.timeout(10000), { cwd: this.#cwd }, { status }).catch(() => {})
     this.#event("loop/turnCompleted", {}, { kind: "turn.completed", payload: { status } })
   }
 

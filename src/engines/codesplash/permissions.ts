@@ -168,7 +168,7 @@ function collectRules(
       continue
     }
     const { tool, pattern } = splitRuleString(raw)
-    if (!KNOWN_TOOL_NAMES.has(tool) && !/^mcp_[a-z][a-z0-9_-]{0,31}_[a-f0-9]{24}$/.test(tool)) {
+    if (!KNOWN_TOOL_NAMES.has(tool) && !/^(?:mcp|ext)_[a-z][a-z0-9_-]{0,31}_[a-f0-9]{24}$/.test(tool)) {
       // Warn once per unknown tool name, however many rules reference it.
       warn(
         `Ignoring permission rules for unknown tool "${tool}" (e.g. ${source} ${action} rule ${JSON.stringify(raw)})`,
