@@ -1,4 +1,6 @@
 /** Per-invocation application options resolved from CLI flags; they override config values. */
+
+import { assertManagedPolicy } from "./config/policy.ts"
 import type { AgentConfig, ConfigSandboxMode, PermissionMode } from "./config.ts"
 import type { SessionPolicy } from "./engine.ts"
 
@@ -11,6 +13,8 @@ export type AppOptions = {
   fullAccess: boolean
   /** Repeatable `-c/--config key=value` overrides applied when config is loaded for this run. */
   configOverrides?: readonly string[]
+  profile?: string
+  strictConfig?: boolean
   /** `--permission-mode <mode>`: overrides `[permissions].mode`; "bypass" is never a flag value. */
   permissionModeOverride?: PermissionMode
   /** `--bypass-approvals`: the only route to bypass mode; per session, never persisted. */
@@ -40,11 +44,11 @@ export function effectiveHistoryEnabled(config: AgentConfig, options: AppOptions
 }
 
 export function effectiveSessionPolicy(config: AgentConfig, options: AppOptions): SessionPolicy {
-  return {
+  return assertManagedPolicy(config, {
     sandbox: options.fullAccess ? "danger-full-access" : (options.sandboxOverride ?? config.codex.sandbox),
     approvalPolicy: config.codex.approvalPolicy,
     permissionMode: options.bypassApprovals
       ? "bypass"
       : (options.permissionModeOverride ?? config.permissions.mode),
-  }
+  })
 }

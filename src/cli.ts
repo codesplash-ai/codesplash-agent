@@ -66,6 +66,8 @@ Commands:
   session        Search, organize, export/import and recover local sessions; inspect foreign history
   memory         Inspect and manage repository memory; automatic learning is opt-in
   create-skill   Preview a native skill scaffold; --write creates it without overwriting
+  mcp            Manage native MCP servers, trust, connection checks and OAuth login
+  config         Explain/validate effective configuration and select named profiles
   debug          Inspect harness internals; "debug prompt" prints the model-visible surface
                  (model, system prompt, tool specs) as JSON without opening a session
 
@@ -87,6 +89,10 @@ Options:
   -c, --config <key=value>
                  Override one config value for this invocation, e.g. -c codex.sandbox=read-only
                  (repeatable; dotted TOML path; never written back to config.toml)
+  --profile <name>
+                 Select a named configuration profile for this invocation
+  --strict-config
+                 Reject unknown configuration settings
   --fixture      Render the synthetic OpenTUI development fixture
   --codex-smoke  Check Codex app-server startup, protocol, and account state without running a model
   --codex-live-smoke
@@ -178,7 +184,62 @@ function checkConfigOverride(value: string): string {
  * Pulls repeatable `-c/--config key=value` flags out of a subcommand's argument list, for
  * subcommands whose parsers live in src/commands and take the overrides separately.
  */
-export function extractConfigOverrides(args: string[]): { args: string[]; configOverrides: string[] } {
+/** Shared resolver controls; keep values out of ordinary dotted overrides. */
+export function extractConfigControls(args: string[]): {
+  args: string[]
+  profile?: string
+  strictConfig?: boolean
+} {
+  const result: { args: string[]; profile?: string; strictConfig?: boolean } = { args: [] }
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!
+    if (arg === "--") {
+      result.args.push(...args.slice(index))
+      break
+    }
+    if (
+      [
+        "-c",
+        "--config",
+        "-p",
+        "--prompt",
+        "--model",
+        "--path",
+        "--sandbox",
+        "--permission-mode",
+        "--allow",
+        "--ask",
+        "--deny",
+        "--resume",
+        "--effort",
+        "--max-turns",
+        "--output-format",
+      ].includes(arg)
+    ) {
+      result.args.push(arg)
+      const value = args[++index]
+      if (value !== undefined) result.args.push(value)
+      continue
+    }
+    if (arg === "--strict-config") result.strictConfig = true
+    else if (arg === "--profile" || arg.startsWith("--profile=")) {
+      const value = arg.startsWith("--profile=") ? arg.slice(10) : args[++index]
+      if (!value || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(value))
+        throw new UsageError("--profile requires a profile name")
+      result.profile = value
+    } else result.args.push(arg)
+  }
+  return result
+}
+
+export function extractConfigOverrides(args: string[]): {
+  args: string[]
+  configOverrides: string[]
+  profile?: string
+  strictConfig?: boolean
+} {
+  const { args: remaining, ...controls } = extractConfigControls(args)
+  args = remaining
   const rest: string[] = []
   const configOverrides: string[] = []
 
@@ -197,15 +258,18 @@ export function extractConfigOverrides(args: string[]): { args: string[]; config
     }
   }
 
-  return { args: rest, configOverrides }
+  return { args: rest, configOverrides, ...controls }
 }
 
 export function parseAppArguments(args: string[]): { path?: string; options: AppOptions } {
+  const { args: remaining, ...controls } = extractConfigControls(args)
+  args = remaining
   const configOverrides: string[] = []
   const allowRules: string[] = []
   const askRules: string[] = []
   const denyRules: string[] = []
   const options: AppOptions = {
+    ...controls,
     noHistory: false,
     fullAccess: false,
     configOverrides,
@@ -413,6 +477,8 @@ function readSecretFromTty(prompt: string, stderr: HeadlessSink): Promise<string
 /* ------------------------------------- run subcommand ------------------------------------- */
 
 export type RunCommand = {
+  profile?: string
+  strictConfig?: boolean
   path?: string
   /** Prompt from --prompt or positional text; undefined defers to piped stdin. */
   prompt?: string
@@ -459,6 +525,8 @@ export function parseRunArguments(
   args: string[],
   isDirectory: (path: string) => boolean = defaultIsDirectory,
 ): RunCommand {
+  const { args: remaining, ...controls } = extractConfigControls(args)
+  args = remaining
   let promptFlag: string | undefined
   let model: string | undefined
   let effort: ReasoningEffort | undefined
@@ -597,6 +665,7 @@ export function parseRunArguments(
     noHistory,
     resume,
     continueSession,
+    ...controls,
     configOverrides,
     permissionMode,
     allowRules,
@@ -649,7 +718,13 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
   const project = await inspectProject(requestedPath)
 
   const { configDirectory, configFilePath, loadConfig } = await import("./core/config.ts")
-  const config = await loadConfig(configFilePath(configDirectory(env)), command.configOverrides)
+  const config = await loadConfig(configFilePath(configDirectory(env)), command.configOverrides, {
+    cwd: project.cwd,
+    env,
+    workspaceTrusted: command.trust || undefined,
+    profile: command.profile,
+    strict: command.strictConfig,
+  })
 
   if (command.model !== undefined) {
     // Validate against the static built-in catalog first (availability-agnostic, like always),
@@ -891,6 +966,10 @@ async function main(): Promise<void> {
     await (await import("./engines/codesplash/sandbox/supervisor.ts")).supervisorMain()
     return
   }
+  if (args[0] === "--internal-sandbox-stream-supervisor") {
+    await (await import("./engines/codesplash/sandbox/supervisor.ts")).streamSupervisorMain()
+    return
+  }
   if (args[0] === "--internal-sandbox-worker") {
     await (await import("./engines/codesplash/sandbox/worker.ts")).workerMain()
     return
@@ -911,6 +990,11 @@ async function main(): Promise<void> {
     return
   }
 
+  if (args[0] === "mcp") {
+    process.exitCode = await (await import("./commands/mcp.ts")).runMcpCommand(args.slice(1))
+    return
+  }
+
   if (args.includes("--help") || args.includes("-h")) {
     printHelp()
     return
@@ -927,11 +1011,15 @@ async function main(): Promise<void> {
     return
   }
 
+  if (args[0] === "config") {
+    const { args: rest, ...configOptions } = extractConfigOverrides(args.slice(1))
+    process.exitCode = await (await import("./commands/config.ts")).runConfigCommand(rest, configOptions)
+    return
+  }
+
   if (args[0] === "memory") {
-    const { args: rest, configOverrides } = extractConfigOverrides(args.slice(1))
-    process.exitCode = await (await import("./commands/memory.ts")).runMemoryCommand(rest, {
-      configOverrides,
-    })
+    const { args: rest, ...configOptions } = extractConfigOverrides(args.slice(1))
+    process.exitCode = await (await import("./commands/memory.ts")).runMemoryCommand(rest, configOptions)
     return
   }
   if (args[0] === "import") {
@@ -969,8 +1057,8 @@ async function main(): Promise<void> {
 
   if (args[0] === "review") {
     const { runReviewCommand } = await import("./commands/review.ts")
-    const { args: rest, configOverrides } = extractConfigOverrides(args.slice(1))
-    process.exitCode = await runReviewCommand(rest, { configOverrides })
+    const { args: rest, ...configOptions } = extractConfigOverrides(args.slice(1))
+    process.exitCode = await runReviewCommand(rest, configOptions)
     return
   }
 
@@ -988,8 +1076,8 @@ async function main(): Promise<void> {
 
   if (args[0] === "debug") {
     const { runDebugCommand } = await import("./commands/debug-prompt.ts")
-    const { args: rest, configOverrides } = extractConfigOverrides(args.slice(1))
-    process.exitCode = await runDebugCommand(rest, { configOverrides })
+    const { args: rest, ...configOptions } = extractConfigOverrides(args.slice(1))
+    process.exitCode = await runDebugCommand(rest, configOptions)
     return
   }
 

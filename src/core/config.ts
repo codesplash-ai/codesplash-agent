@@ -1,11 +1,15 @@
 import { chmod, mkdir, readFile, rename } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
+import { type HookConfig, validateHookConfig } from "../engines/codesplash/hooks/config.ts"
 import type { ContextInputConfig } from "../engines/codesplash/inputs/contracts.ts"
+import { type McpConfig, mcpConfigTable, validateMcpConfig } from "../engines/codesplash/mcp/config.ts"
 import { validateMemoryConfig } from "../engines/codesplash/memory/config.ts"
 import type { MemoryConfig } from "../engines/codesplash/memory/contracts.ts"
 import type { NativeSandboxConfig } from "../engines/codesplash/sandbox/contracts.ts"
 import { validateEnvironmentName } from "../engines/codesplash/sandbox/env-policy.ts"
+import type { ConfigResolution, ConfigResolutionOptions } from "./config/contracts.ts"
+import { checkConfigBounds } from "./config/source.ts"
 import { redactSensitiveText } from "./redaction.ts"
 import { stringifyToml, type TomlTable } from "./toml.ts"
 
@@ -69,6 +73,8 @@ export type CustomProviderConfig = {
 }
 
 export type AgentConfig = {
+  /** Effective source snapshot. Never persist this field into user configuration. */
+  resolution?: ConfigResolution
   schemaVersion: 1
   models?: Partial<Record<"codesplash" | "codex" | "claude", string>>
   theme: ThemePreference
@@ -80,6 +86,8 @@ export type AgentConfig = {
   memory?: MemoryConfig
   context?: ContextInputConfig
   sandbox?: NativeSandboxConfig
+  mcp?: McpConfig
+  hooks?: HookConfig
   guardian?: {
     enabled: boolean
     model?: string
@@ -161,7 +169,12 @@ export function configFilePath(directory = configDirectory()): string {
 export async function loadConfig(
   path = configFilePath(),
   overrides: readonly string[] = [],
+  options?: ConfigResolutionOptions,
 ): Promise<AgentConfig> {
+  if (options) {
+    const { resolveConfig } = await import("./config/resolver.ts")
+    return resolveConfig(path, overrides, options)
+  }
   let source: string
   try {
     source = await readFile(path, "utf8")
@@ -190,6 +203,10 @@ export async function loadConfig(
  * like a credential is never echoed.
  */
 export function applyConfigOverrides(parsed: unknown, overrides: readonly string[]): unknown {
+  checkConfigBounds(parsed)
+  if (overrides.length > 128) throw new Error("At most 128 config overrides are supported")
+  if (overrides.reduce((size, value) => size + Buffer.byteLength(value), 0) > 1024 * 1024)
+    throw new Error("Config overrides exceed 1 MiB")
   if (overrides.length === 0) return parsed
   const root: Record<string, unknown> = isRecord(parsed) ? structuredClone(parsed) : {}
 
@@ -205,6 +222,11 @@ export function applyConfigOverrides(parsed: unknown, overrides: readonly string
     if (path === "" || segments.some((segment) => segment === "")) {
       throw new Error(`Invalid config override "${redactSensitiveText(override)}": the key path is empty`)
     }
+    if (
+      segments.length > 32 ||
+      segments.some((segment) => ["__proto__", "prototype", "constructor"].includes(segment))
+    )
+      throw new Error("Unsafe configuration key")
     setConfigPath(root, segments, parseOverrideValue(override.slice(separator + 1)))
   }
 
@@ -238,6 +260,7 @@ function setConfigPath(root: Record<string, unknown>, segments: string[], value:
 }
 
 export function validateConfig(parsed: unknown, path: string): AgentConfig {
+  checkConfigBounds(parsed)
   if (!isRecord(parsed)) throw new Error(`Invalid config at ${path}: expected a TOML table`)
 
   const problems: string[] = []
@@ -439,6 +462,21 @@ export function validateConfig(parsed: unknown, path: string): AgentConfig {
         } else problems.push(`[context].${key}: unknown setting`)
       }
       config.context = context
+    }
+  }
+
+  if (parsed.hooks !== undefined) {
+    try {
+      config.hooks = validateHookConfig(parsed.hooks)
+    } catch (error) {
+      problems.push(error instanceof Error ? error.message : "Invalid hook configuration")
+    }
+  }
+  if (parsed.mcp !== undefined) {
+    try {
+      config.mcp = validateMcpConfig(parsed.mcp)
+    } catch (error) {
+      problems.push(error instanceof Error ? error.message : "Invalid MCP configuration")
     }
   }
 
@@ -721,6 +759,7 @@ function capitalize(value: string): string {
 }
 
 export async function saveConfig(config: AgentConfig, path = configFilePath()): Promise<void> {
+  if (config.resolution) throw new Error("Cannot persist merged configuration; edit the intended source")
   const directory = dirname(path)
 
   await mkdir(directory, { recursive: true, mode: 0o700 })
@@ -741,6 +780,8 @@ export async function saveConfig(config: AgentConfig, path = configFilePath()): 
     }
   if (config.context) table.context = { ...config.context }
   if (config.sandbox) table.sandbox = { ...config.sandbox }
+  if (config.hooks) table.hooks = JSON.parse(JSON.stringify(config.hooks)) as TomlTable
+  if (config.mcp) table.mcp = mcpConfigTable(config.mcp) as TomlTable
   if (config.guardian) table.guardian = { ...config.guardian }
   if (Object.keys(config.codesplash).length > 0) {
     table.codesplash = Object.fromEntries(

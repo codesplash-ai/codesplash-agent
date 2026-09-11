@@ -1,5 +1,7 @@
 import { createCliRenderer, type KittyKeyboardOptions, type ThemeMode } from "@opentui/core"
 import { createRoot } from "@opentui/react"
+import { assertManagedPolicy } from "../core/config/policy.ts"
+import { resolveConfigForWorkspace } from "../core/config/resolver.ts"
 import type {
   AgentConfig,
   AppOptions,
@@ -126,6 +128,7 @@ export type CodexSessionRunOptions = {
   /** Loaded harness config (with `-c` overrides applied); handed to the engine driver. */
   config?: AgentConfig
   policy?: SessionPolicy
+  sandboxExplicit?: boolean
   /** When false (`--no-history` or config opt-out), nothing is written to disk. */
   historyEnabled?: boolean
   /** Resume this persisted session instead of starting a new one. */
@@ -169,7 +172,7 @@ export async function runCodexSession(
   const engine = options.engine ?? "codex"
   const isCodesplash = engine === "codesplash"
   let policy = options.policy ?? defaultSessionPolicy
-  const historyEnabled = options.historyEnabled ?? true
+  let historyEnabled = options.historyEnabled ?? true
   if (options.resume?.effectiveProjectId) {
     const { inspectProject } = await import("../core/preflight.ts")
     project = await inspectProject(options.resume.projectPath)
@@ -200,11 +203,30 @@ export async function runCodexSession(
     workspaceTrusted = trusted
   }
 
+  if (options.config) {
+    const previous = options.config
+    const config = await resolveConfigForWorkspace(
+      previous,
+      project.cwd,
+      isCodesplash ? workspaceTrusted : undefined,
+    )
+    options = { ...options, config }
+    if (!options.resume) {
+      if (!options.sandboxExplicit && policy.sandbox !== "danger-full-access")
+        policy = { ...policy, sandbox: config.codex.sandbox }
+      if (!options.permissions?.modeExplicit) policy = { ...policy, permissionMode: config.permissions.mode }
+      policy = { ...policy, approvalPolicy: config.codex.approvalPolicy }
+    }
+    historyEnabled = historyEnabled && config.history.enabled
+    assertManagedPolicy(config, policy)
+  }
+
   // Resume reopens in the session's recorded permission mode unless the launch set one
   // explicitly (--permission-mode / --bypass-approvals win, matching sandbox reuse).
   if (isCodesplash && options.resume && !options.permissions?.modeExplicit) {
     const recorded = resumedPermissionMode(options.resume)
     if (recorded) policy = { ...policy, permissionMode: recorded }
+    if (options.config) assertManagedPolicy(options.config, policy)
   }
 
   const localSessionId = options.resume?.localSessionId ?? crypto.randomUUID()
@@ -387,6 +409,7 @@ export async function runCodexSession(
                 mode: policy.permissionMode ?? "default",
                 workspaceTrusted,
                 configRules: (options.config ?? defaultConfig).permissions,
+                constraints: options.config?.resolution?.constraints,
                 overrides: options.permissions?.overrides,
                 grantsPath: permissionGrantsPath,
               })

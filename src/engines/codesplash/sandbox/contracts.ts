@@ -36,6 +36,13 @@ export type ExecutionResult = {
 }
 
 export interface SandboxRuntime {
+  openDuplex?(
+    argv: string[],
+    signal: AbortSignal,
+    stdout: (chunk: Uint8Array) => void | Promise<void>,
+    mode?: PermissionMode,
+    environment?: readonly string[],
+  ): Promise<import("./duplex.ts").SandboxDuplex>
   readonly profile: SandboxProfile
   runTool(tool: HarnessTool, input: unknown, context: ToolContext): Promise<ToolOutcome>
   execute(argv: string[], signal: AbortSignal, mode?: PermissionMode): Promise<ExecutionResult>

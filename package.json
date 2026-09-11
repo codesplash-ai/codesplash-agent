@@ -44,8 +44,10 @@
   },
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "0.0.75",
+    "@modelcontextprotocol/client": "2.0.0",
     "@opentui/core": "0.5.3",
     "@opentui/react": "0.5.3",
+    "ajv": "8.20.0",
     "react": "19.2.0",
     "shell-quote": "1.10.0"
   },

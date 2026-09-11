@@ -35,6 +35,9 @@ const FILE_TOOLS = new Set([
 ])
 
 export class NativeSandbox implements SandboxRuntime {
+  readonly #streamAbort = new AbortController()
+  readonly #streamOpenings = new Set<Promise<import("./duplex.ts").SandboxDuplex>>()
+  readonly #streams = new Set<import("./duplex.ts").SandboxDuplex>()
   readonly #grants: AccessGrant[] = []
   readonly #log: SandboxLog
   #closed = false
@@ -44,6 +47,7 @@ export class NativeSandbox implements SandboxRuntime {
     readonly profile: SandboxProfile,
     logPath?: string,
     readonly secrets = new NamedSecrets(),
+    readonly constraints?: import("../../../core/config/contracts.ts").ManagedConstraints,
   ) {
     this.#log = new SandboxLog(logPath)
     // Desktop session metadata is not a credential. Treating XDG_SESSION_ID=7 as
@@ -56,6 +60,12 @@ export class NativeSandbox implements SandboxRuntime {
   validateGrant(grant: AccessGrant, mode: PermissionMode): AccessGrant {
     const checked = validateAccessGrant(this.profile, grant, mode === "plan")
     if (
+      checked.resource === "network" &&
+      this.constraints?.allowedHosts &&
+      !this.constraints.allowedHosts.includes(checked.target)
+    )
+      throw new Error("Network grant prohibited by managed configuration")
+    if (
       checked.resource !== "network" &&
       (contains(checked.target, installationRoot()) || contains(installationRoot(), checked.target))
     )
@@ -64,6 +74,12 @@ export class NativeSandbox implements SandboxRuntime {
   }
   grant(grant: AccessGrant): void {
     if (this.#closed) throw new Error("Sandbox session closed")
+    if (
+      grant.resource === "network" &&
+      this.constraints?.allowedHosts &&
+      !this.constraints.allowedHosts.includes(canonicalHost(grant.target))
+    )
+      throw new Error("Network grant prohibited by managed configuration")
     if (!this.#grants.some((g) => JSON.stringify(g) === JSON.stringify(grant))) this.#grants.push(grant)
     this.#log.record("grant", this.profile.hash, grant.resource)
   }
@@ -76,12 +92,61 @@ export class NativeSandbox implements SandboxRuntime {
   }
   async close(): Promise<void> {
     this.#closed = true
+    this.#streamAbort.abort(new Error("Sandbox session closed"))
+    await Promise.allSettled([...this.#streamOpenings])
+    await Promise.allSettled([...this.#streams].map((stream) => stream.close()))
     this.#grants.length = 0
     this.#secretValues.clear()
     await this.#log.flush()
   }
   sanitize(value: string): string {
     return redactSensitiveText(new SecretSanitizer([...this.#secretValues]).redact(value))
+  }
+  async openDuplex(
+    argv: string[],
+    signal: AbortSignal,
+    stdout: (chunk: Uint8Array) => void | Promise<void>,
+    mode: PermissionMode = "default",
+    environment: readonly string[] = this.profile.environment,
+  ) {
+    if (this.#closed) throw new Error("Sandbox session closed")
+    if (this.#streams.size + this.#streamOpenings.size >= 32)
+      throw new Error("Persistent sandbox process limit reached")
+    // Persistent children may not retain temporary grants after their turn ends.
+    if (environment.some((name) => !this.profile.environment.includes(name)))
+      throw new Error("MCP environment variable has no fixed sandbox grant")
+    const profile = {
+      ...this.profile,
+      environment: [...environment],
+      ...(mode === "plan" ? { mode: "read-only" as const, writeRoots: [] } : {}),
+    }
+    const opening = (async () => {
+      const { openSandboxDuplex } = await import("./duplex.ts")
+      const stream = await openSandboxDuplex(
+        profile,
+        argv,
+        AbortSignal.any([signal, this.#streamAbort.signal]),
+        stdout,
+        [...this.#secretValues],
+      )
+      if (this.#closed) {
+        await stream.close()
+        throw new Error("Sandbox session closed")
+      }
+      this.#streams.add(stream)
+      void stream.finished
+        .finally(() => {
+          this.#streams.delete(stream)
+        })
+        .catch(() => {})
+      return stream
+    })()
+    this.#streamOpenings.add(opening)
+    try {
+      return await opening
+    } finally {
+      this.#streamOpenings.delete(opening)
+    }
   }
   #effective(mode?: PermissionMode): SandboxProfile {
     return {

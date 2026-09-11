@@ -23,6 +23,8 @@ export async function runMemoryCommand(
   args: string[],
   options: {
     configOverrides?: readonly string[]
+    profile?: string
+    strictConfig?: boolean
     output?: (text: string) => void
     env?: NodeJS.ProcessEnv
   } = {},
@@ -53,7 +55,13 @@ export async function runMemoryCommand(
     } else command.push(arg)
   }
   cwd = physicalPath(cwd)
-  const config = await loadConfig(configFilePath(configDirectory(env)), options.configOverrides),
+  const config = await loadConfig(configFilePath(configDirectory(env)), options.configOverrides, {
+      cwd,
+      env,
+      workspaceTrusted: trust || undefined,
+      profile: options.profile,
+      strict: options.strictConfig,
+    }),
     data = physicalPath(dataDirectory(env))
   history = history && config.history.enabled
   if (trust && history) await writeTrustDecision(cwd, true, data)
@@ -63,13 +71,19 @@ export async function runMemoryCommand(
     mode: config.permissions.mode,
     workspaceTrusted: trusted,
     configRules: config.permissions,
+    constraints: config.resolution?.constraints,
   })
   const policy = {
     sandbox: readonly ? ("read-only" as const) : config.codex.sandbox,
     approvalPolicy: config.codex.approvalPolicy,
     permissionMode: permissions.mode,
   }
-  const sandbox = new NativeSandbox(createProfile(cwd, policy.sandbox, config.sandbox)),
+  const sandbox = new NativeSandbox(
+      createProfile(cwd, policy.sandbox, config.sandbox),
+      undefined,
+      undefined,
+      config.resolution?.constraints,
+    ),
     abort = new AbortController()
   const cancel = () => abort.abort(new Error("Memory command interrupted"))
   process.once("SIGINT", cancel)

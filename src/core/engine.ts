@@ -175,6 +175,7 @@ export interface EngineSession {
   setPermissionMode?(mode: PermissionMode): Promise<void>
   /** User-invoked rule edits only; engines reject these while tools/turns are active. */
   editPermissionRule?(command: string): Promise<void>
+  mcpCommand?(command: string): Promise<unknown>
   sandboxStatus?(): string
   permissionRules?(): Array<{
     tool: string

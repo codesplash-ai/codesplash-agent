@@ -129,6 +129,52 @@ function turnRequest(provider: ProviderClient, userText = "do the thing"): TurnR
   }
 }
 
+test("MCP forms share pending request ownership, validate answers and omit answer data from events", async () => {
+  let loop: CodesplashLoop
+  const form = {
+    message: "Choose a label",
+    source: { server: "fixture", generation: "generation", operation: "echo" },
+    fields: [{ name: "label", label: "Label", type: "string" as const, required: true }],
+  }
+  let answer: unknown
+  const tool = fakeTool({
+    name: "mcp_fixture",
+    readOnly: true,
+    run: async (_input, context) => {
+      answer = await loop.requestForm(form, context.signal)
+      return { text: "Form completed", label: "MCP fixture" }
+    },
+  })
+  const fixture = makeLoop({ tools: [tool] })
+  loop = fixture.loop
+  const provider = scriptedProvider([
+    [
+      { type: "tool_call", id: "form-call", name: tool.name, input: {} },
+      { type: "done", stopReason: "tool_use" },
+    ],
+    [{ type: "done", stopReason: "end_turn" }],
+  ])
+  const running = loop.runTurn(turnRequest(provider))
+  try {
+    const until = Date.now() + 1000
+    while (!loop.hasPendingInteraction && Date.now() < until) await Bun.sleep(1)
+    const opened = fixture.events.find((event) => event.kind === "request.opened")
+    if (!opened || opened.kind !== "request.opened") throw new Error("MCP form did not open")
+    expect(opened.payload.requestKind).toBe("elicitation")
+    expect(await loop.requestForm(form, AbortSignal.timeout(1000))).toEqual({ action: "decline" })
+    expect(() => loop.resolveRequest(opened.payload.id, "accept", { label: 3 })).toThrow("Invalid field")
+    expect(loop.hasPendingInteraction).toBe(true)
+    loop.resolveRequest(opened.payload.id, "accept", { label: "PRIVATE_USER_FORM_VALUE" })
+    await running
+    expect(answer).toEqual({ action: "accept", content: { label: "PRIVATE_USER_FORM_VALUE" } })
+    expect(JSON.stringify(fixture.events)).not.toContain("PRIVATE_USER_FORM_VALUE")
+    expect(loop.hasPendingInteraction).toBe(false)
+  } finally {
+    loop.interrupt()
+    await running
+  }
+})
+
 test("steering settles undispatched tool calls before adding user context", async () => {
   let pending = false
   const tool = fakeTool({ name: "write_thing" })

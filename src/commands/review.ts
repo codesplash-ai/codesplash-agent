@@ -325,6 +325,8 @@ export type ReviewCommandOverrides = {
   git?: GitRunner
   /** Repeatable `-c/--config key=value` overrides (extracted by cli.ts) for the config load. */
   configOverrides?: readonly string[]
+  profile?: string
+  strictConfig?: boolean
 }
 
 export async function runReviewCommand(
@@ -339,7 +341,13 @@ export async function runReviewCommand(
 
   applyStoredCredentials(env)
 
-  const config = await loadConfig(configFilePath(configDirectory(env)), overrides.configOverrides)
+  const config = await loadConfig(configFilePath(configDirectory(env)), overrides.configOverrides, {
+    cwd: command.path ?? process.cwd(),
+    env,
+    workspaceTrusted: command.trust || undefined,
+    profile: overrides.profile,
+    strict: overrides.strictConfig,
+  })
 
   if (command.model !== undefined) {
     try {

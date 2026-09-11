@@ -112,6 +112,12 @@ export class SessionController {
     await this.#consumePromise
   }
 
+  async mcpCommand(command: string): Promise<unknown> {
+    if (this.#closed || !this.#session.mcpCommand)
+      throw new Error("MCP management is unavailable for this engine")
+    return this.#session.mcpCommand(command)
+  }
+
   async contextResources(kind: "skill" | "command") {
     if (this.#closed || !this.#session.contextResources)
       throw new Error("Context resources are unavailable for this engine")

@@ -11,6 +11,7 @@ import { realpathSync } from "node:fs"
 import { chmod, mkdir, readFile, rename } from "node:fs/promises"
 import { homedir } from "node:os"
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
+import { assertManagedMode } from "../../core/config/policy.ts"
 import {
   configDirectory,
   dataDirectory,
@@ -49,6 +50,7 @@ export type ParsedPermissionRule = {
 }
 
 export type PermissionRuntimeOptions = {
+  constraints?: import("../../core/config/contracts.ts").ManagedConstraints
   cwd: string
   mode: PermissionMode
   workspaceTrusted: boolean
@@ -86,6 +88,9 @@ const PATTERN_TOOL_NAMES = new Set([...FILE_TOOL_NAMES, "bash", "web_fetch"])
 /** Every tool name rules may reference; anything else warns once and the rule is ignored. */
 const KNOWN_TOOL_NAMES = new Set([
   "read_tool_output",
+  "search_tool",
+  "use_tool",
+  "mcp_resource",
   "skill",
   "memory_search",
   "memory_read",
@@ -163,7 +168,7 @@ function collectRules(
       continue
     }
     const { tool, pattern } = splitRuleString(raw)
-    if (!KNOWN_TOOL_NAMES.has(tool)) {
+    if (!KNOWN_TOOL_NAMES.has(tool) && !/^mcp_[a-z][a-z0-9_-]{0,31}_[a-f0-9]{24}$/.test(tool)) {
       // Warn once per unknown tool name, however many rules reference it.
       warn(
         `Ignoring permission rules for unknown tool "${tool}" (e.g. ${source} ${action} rule ${JSON.stringify(raw)})`,
@@ -420,6 +425,7 @@ function analyzeBash(command: string | undefined): BashAnalysis {
 export async function createPermissionRuntime(
   options: PermissionRuntimeOptions,
 ): Promise<CodesplashPermissionRuntime> {
+  assertManagedMode(options.constraints, options.mode)
   const seenWarnings = new Set<string>()
   const warn: Warn = (message, dedupeKey) => {
     const key = dedupeKey ?? message
@@ -703,6 +709,7 @@ export async function createPermissionRuntime(
     },
 
     setMode(next: PermissionMode): void {
+      assertManagedMode(options.constraints, next)
       if (!isPermissionMode(next)) {
         throw new Error(
           `Unknown permission mode ${JSON.stringify(next)}; expected "plan", "default", "accept-edits", or "bypass"`,

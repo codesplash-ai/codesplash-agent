@@ -113,7 +113,10 @@ export async function sessionPresentationCommand(
         const current = handle.meta
         const history = await readSessionEvents(directory)
         const outcomes = projectOutcomes(history.events)
-        const config = await loadConfig(configFilePath(configDirectory(env)))
+        const config = await loadConfig(configFilePath(configDirectory(env)), [], {
+          cwd: meta.projectPath,
+          env,
+        })
         const latestModel = [...history.events]
           .reverse()
           .find((e) => e.kind === "session.status" && e.payload.model)

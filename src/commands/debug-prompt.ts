@@ -1,4 +1,5 @@
 import { join, resolve } from "node:path"
+import { assertManagedPolicy } from "../core/config/policy.ts"
 /**
  * `codesplash debug prompt`: prints the model-visible surface for a session that WOULD open in
  * the given project — the resolved model selector, the assembled system prompt, and every tool
@@ -90,6 +91,8 @@ export type DebugPromptCommandOverrides = {
   env?: NodeJS.ProcessEnv
   /** Repeatable `-c/--config key=value` overrides (extracted by cli.ts) for the config load. */
   configOverrides?: readonly string[]
+  profile?: string
+  strictConfig?: boolean
 }
 
 /** Dispatches the `debug` subcommand; `prompt` is its only topic today. */
@@ -114,7 +117,12 @@ export async function runDebugPromptCommand(
 
   applyStoredCredentials(env)
   const project = await inspectProject(command.path ?? process.cwd())
-  const config = await loadConfig(configFilePath(configDirectory(env)), overrides.configOverrides)
+  const config = await loadConfig(configFilePath(configDirectory(env)), overrides.configOverrides, {
+    cwd: command.path ?? process.cwd(),
+    env,
+    profile: overrides.profile,
+    strict: overrides.strictConfig,
+  })
   const registry = buildProviderRegistry(config, env)
 
   let selection: ReturnType<typeof registry.parseSelector>
@@ -139,14 +147,21 @@ export async function runDebugPromptCommand(
     approvalPolicy: config.codex.approvalPolicy,
   }
 
+  assertManagedPolicy(config, { ...policy, permissionMode: config.permissions.mode })
   const userRoot = resolve(configDirectory(env), "context")
   const permissions = await createPermissionRuntime({
     cwd: project.cwd,
     mode: config.permissions.mode,
     workspaceTrusted: true,
     configRules: config.permissions,
+    constraints: config.resolution?.constraints,
   })
-  const sandbox = new NativeSandbox(createProfile(project.cwd, policy.sandbox, config.sandbox))
+  const sandbox = new NativeSandbox(
+    createProfile(project.cwd, policy.sandbox, config.sandbox),
+    undefined,
+    undefined,
+    config.resolution?.constraints,
+  )
   const memory = new MemorySession({
     root: join(dataDirectory(env), "memory"),
     cwd: project.cwd,

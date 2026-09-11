@@ -28,7 +28,7 @@ function writeTable(lines: string[], table: TomlTable, path: string[]): void {
     if (isScalar(value)) {
       lines.push(`${formatKey(key)} = ${formatScalar(value)}`)
     } else if (Array.isArray(value)) {
-      if (value.every(isTable)) tableArrays.push([key, value])
+      if (value.length > 0 && value.every(isTable)) tableArrays.push([key, value])
       else lines.push(`${formatKey(key)} = ${formatInlineArray(value, [...path, key])}`)
     } else {
       nestedTables.push([key, value])

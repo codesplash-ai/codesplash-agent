@@ -283,9 +283,10 @@ async function resolveWorkspaceTrust(options: HeadlessRunOptions, stderr: Headle
  * persisting a grant is a deliberate interactive decision.
  */
 function headlessRequestChoice(
-  payload: { requestKind: "approval" | "user-input"; choices: string[]; alwaysAsk?: boolean },
+  payload: { requestKind: "approval" | "user-input" | "elicitation"; choices: string[]; alwaysAsk?: boolean },
   autoApprove: boolean,
 ): string {
+  if (payload.requestKind === "elicitation") return "decline"
   if (payload.requestKind !== "approval") return "cancel"
   if (payload.alwaysAsk) return "decline"
   if (payload.choices.includes("approve")) return autoApprove ? "approve" : "cancel"

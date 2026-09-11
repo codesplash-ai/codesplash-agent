@@ -3,6 +3,8 @@
  * entirely in-process: provider adapters stream model responses and the loop executes tools.
  */
 import { dirname, join, resolve } from "node:path"
+import { assertManagedMode, assertManagedPolicy } from "../../core/config/policy.ts"
+import { resolveConfigForWorkspace } from "../../core/config/resolver.ts"
 import { configDirectory, dataDirectory } from "../../core/config.ts"
 import {
   type AgentConfig,
@@ -81,6 +83,8 @@ import { contextReadTool, internalContextTools } from "./inputs/io.ts"
 import { ContextInputs, skillTool } from "./inputs/session.ts"
 import { fuzzyFiles, mentions } from "./inputs/syntax.ts"
 import { CodesplashEventFactory, CodesplashLoop } from "./loop.ts"
+import { McpManager } from "./mcp/manager.ts"
+import { createMcpToolRegistry } from "./mcp/registry.ts"
 import { embeddingTool } from "./memory/embedding.ts"
 import { maintainMemory } from "./memory/maintenance.ts"
 import { MemorySession } from "./memory/session.ts"
@@ -135,9 +139,22 @@ export class CodesplashDriver implements EngineDriver {
 
   constructor(readonly options: CodesplashDriverOptions = {}) {}
 
-  async #config(): Promise<AgentConfig> {
+  async #config(workspace?: {
+    cwd: string
+    workspaceTrusted?: boolean
+    trustDataDirectory?: string
+  }): Promise<AgentConfig> {
+    if (workspace) {
+      if (this.options.config)
+        return resolveConfigForWorkspace(this.options.config, workspace.cwd, workspace.workspaceTrusted)
+      return loadConfig(undefined, [], {
+        cwd: workspace.cwd,
+        workspaceTrusted: workspace.workspaceTrusted,
+        dataDir: workspace.trustDataDirectory,
+      })
+    }
     if (this.options.config) return this.options.config
-    this.#configPromise ??= loadConfig()
+    this.#configPromise ??= loadConfig(undefined, [], {})
     return this.#configPromise
   }
 
@@ -230,7 +247,13 @@ export class CodesplashDriver implements EngineDriver {
               cwd = destinationDirectory(from, request.path)
             const trusted =
               (await readTrustDecision(cwd, runtime.options.trustDataDirectory))?.trusted === true
-            const revision = digest(JSON.stringify([state.read().revision, cwd, trusted]))
+            const destinationConfig = await this.#config({
+              ...runtime.options,
+              cwd,
+              workspaceTrusted: trusted,
+            })
+            const generation = destinationConfig.resolution?.generation
+            const revision = digest(JSON.stringify([state.read().revision, cwd, trusted, generation]))
             const preview = {
               from,
               cwd,
@@ -299,10 +322,12 @@ export class CodesplashDriver implements EngineDriver {
             // Trust and physical identity are admission inputs, not facts captured indefinitely by preview.
             if (
               destinationDirectory(from, request.path) !== cwd ||
+              (await this.#config({ ...runtime.options, cwd, workspaceTrusted: trusted })).resolution
+                ?.generation !== generation ||
               ((await readTrustDecision(cwd, runtime.options.trustDataDirectory))?.trusted === true) !==
                 trusted
             )
-              throw new Error("Destination or trust changed during preparation; preview again")
+              throw new Error("Destination, configuration or trust changed during preparation; preview again")
             prepared.publish()
             return { ...preview, applied: true }
           })
@@ -329,7 +354,11 @@ export class CodesplashDriver implements EngineDriver {
     history?: ChatMessage[],
     prepared = false,
   ): Promise<CodesplashSession> {
-    const config = await this.#config()
+    const config = await this.#config(options)
+    assertManagedPolicy(
+      config,
+      options.policy ?? { ...config.codex, permissionMode: config.permissions.mode },
+    )
     options = { ...options, model: options.model ?? config.models?.codesplash }
     const registry = buildProviderRegistry(config)
     if (registry.providers.length === 0) {
@@ -353,6 +382,7 @@ export class CodesplashDriver implements EngineDriver {
       mode: options.policy?.permissionMode ?? "default",
       workspaceTrusted: options.workspaceTrusted ?? true,
       configRules: config.permissions,
+      constraints: config.resolution?.constraints,
       overrides: options.permissionOverrides,
       grantsPath: options.permissionGrantsPath,
       onWarning: (message) => bridge.warning(message),
@@ -387,6 +417,8 @@ export class CodesplashDriver implements EngineDriver {
             profilePath,
           ),
           directory ? join(directory, "sandbox-events.jsonl") : undefined,
+          undefined,
+          config.resolution?.constraints,
         )
     const session = new CodesplashSession(
       options,
@@ -454,6 +486,8 @@ class CodesplashSession implements EngineSession {
   #inputSuffix = ""
   #personality: "neutral" | "concise" | "explanatory"
   readonly #registry: ToolRegistry
+  readonly #mcp: McpManager
+  #mcpInitialized = false
   readonly #providerRegistry: ProviderRegistry
   /** Provider clients keyed by runtime id ("anthropic", "openai", or a custom config key). */
   readonly #providers: Record<string, ProviderClient>
@@ -528,20 +562,45 @@ class CodesplashSession implements EngineSession {
       writable: () => sandbox.profile.mode === "workspace-write" && permissions.mode !== "plan",
     })
     this.#personality = config.context?.personality ?? "neutral"
-    this.#registry = createToolRegistry([
-      ...builtinTools(),
-      ...internalContextTools(),
-      contextReadTool(userRoot),
-      skillTool,
-      ...memoryTools(this.#memory, () => this.#loop.historySnapshot(), options.nativeTranscriptPath),
-      memoryGate("memory_access", "memory_search"),
-      memoryGate("memory_history_access", "history_read"),
-      memoryGate("memory_access_read", "memory_read"),
-      memoryGate("memory_change", "memory_write", true),
-      embeddingTool(config.memory?.embedding, (tokens, cost) =>
-        this.#loop.recordEmbeddingUsage(tokens, cost),
+    this.#mcp = new McpManager({
+      cwd: options.cwd,
+      dataDir: dataDirectory(),
+      sandbox,
+      mode: () => permissions.mode,
+      configurationBoundary: structuredClone(config),
+      resolveConfig: () => resolveConfigForWorkspace(config, options.cwd, options.workspaceTrusted),
+      toolAllowed: (id, readOnly) => permissions.decide(id, undefined, readOnly).kind !== "deny",
+      elicitation: {
+        busy: () => this.#loop.hasPendingInteraction,
+        respond: (form, signal) => this.#loop.requestForm(form, signal),
+      },
+      diagnostic: (message) =>
+        this.#push(this.#factory.event("mcp/status", {}, { kind: "warning", payload: { message } })),
+      changed: () => {
+        this.#loop?.clearApprovalCache()
+        this.#systemPrompt = undefined
+      },
+    })
+    this.#registry = createMcpToolRegistry(
+      createToolRegistry(
+        [
+          ...builtinTools(),
+          ...internalContextTools(),
+          contextReadTool(userRoot),
+          skillTool,
+          ...memoryTools(this.#memory, () => this.#loop.historySnapshot(), options.nativeTranscriptPath),
+          memoryGate("memory_access", "memory_search"),
+          memoryGate("memory_history_access", "history_read"),
+          memoryGate("memory_access_read", "memory_read"),
+          memoryGate("memory_change", "memory_write", true),
+          embeddingTool(config.memory?.embedding, (tokens, cost) =>
+            this.#loop.recordEmbeddingUsage(tokens, cost),
+          ),
+        ],
+        config.resolution?.generation,
       ),
-    ])
+      this.#mcp,
+    )
     this.#loop = new CodesplashLoop({
       cwd: options.cwd,
       onContextBoundary: (kind, messages) => this.#recovery.capture(kind, kind, messages),
@@ -563,6 +622,7 @@ class CodesplashSession implements EngineSession {
       },
       policy: this.#policy,
       registry: this.#registry,
+      beforePermissionModeChange: () => this.#mcp.suspend(),
       events: this.#factory,
       emit: (event) => this.#push(event),
       fallbackModel: config.codesplash.fallbackModel,
@@ -707,6 +767,24 @@ class CodesplashSession implements EngineSession {
   }
   async initializeRecovery(): Promise<void> {
     await this.#recovery.initialize()
+    if (!this.#mcpInitialized) {
+      this.#mcpInitialized = true
+      for (const [id, server] of Object.entries(this.#config.mcp?.servers ?? {})) {
+        if (!server.enabled || this.#closed) continue
+        try {
+          await this.#mcp.connect(id)
+        } catch (error) {
+          const message = this.#mcp.sanitize(error instanceof Error ? error.message : "Connection failed")
+          this.#push(
+            this.#factory.event(
+              "mcp/status",
+              {},
+              { kind: "warning", payload: { message: `MCP ${id}: ${message}` } },
+            ),
+          )
+        }
+      }
+    }
     this.#inputRunner.wake()
   }
   directoryStatus() {
@@ -1041,13 +1119,14 @@ class CodesplashSession implements EngineSession {
       return { title: "File checkpoints", data: this.#recovery.checkpoints.view() }
     return this.#inputOperation(async () => {
       this.inputQueue.pause()
+      if (["fork", "rewind", "restore", "recover-restore"].includes(request.action)) await this.#mcp.suspend()
       return this.#recovery.execute(request)
     })
   }
 
   async resolveRequest(requestId: string, decision: EngineDecision): Promise<void> {
     this.#requireOpen()
-    this.#loop.resolveRequest(requestId, decision.choice)
+    this.#loop.resolveRequest(requestId, decision.choice, decision.data)
   }
 
   async interrupt(): Promise<void> {
@@ -1066,6 +1145,8 @@ class CodesplashSession implements EngineSession {
     await this.#inputPromise?.catch(() => {})
   }
   async #prepareInput(input: UserInput, run: ContextToolRunner, signal: AbortSignal, inputId?: string) {
+    await this.#mcp.revalidate()
+    signal.throwIfAborted()
     this.#contextSuffix = ""
     const references = inputId ? this.inputQueue.references(inputId) : []
     const checkedRun: ContextToolRunner = async (name, args) => {
@@ -1274,8 +1355,17 @@ class CodesplashSession implements EngineSession {
         cwd: this.#cwd,
         trusted: this.options.workspaceTrusted ?? true,
         grantsPath: this.options.permissionGrantsPath,
+        userConfigPath: this.#config.resolution?.request.userPath,
       })
-      if (updated) Object.assign(this.#config.permissions, updated)
+      if (updated) {
+        const resolved = await resolveConfigForWorkspace(
+          this.#config,
+          this.#cwd,
+          this.options.workspaceTrusted,
+        )
+        Object.assign(this.#config.permissions, resolved.resolution ? resolved.permissions : updated)
+      }
+      await this.#mcp.suspend()
       await this.#permissions.reload?.()
       this.#contextSuffix = ""
       this.#inputs.catalog = { resources: [], diagnostics: [] }
@@ -1292,6 +1382,47 @@ class CodesplashSession implements EngineSession {
     const rules = describePermissionRules(this.#permissions)
     return rules.map((rule) => ({ ...rule, conflict: ruleConflict(rule, rules) }))
   }
+  async mcpCommand(command: string): Promise<unknown> {
+    const [action = "status", id, ...extra] = command.trim().split(/\s+/)
+    if (
+      extra.length ||
+      !["status", "enable", "disable", "reconnect"].includes(action) ||
+      (action === "status" ? !!id : !id)
+    )
+      throw new Error("Usage: /mcp status|enable ID|disable ID|reconnect ID")
+    return this.#inputOperation(async () => {
+      const config = await resolveConfigForWorkspace(this.#config, this.#cwd, this.options.workspaceTrusted)
+      if (action !== "status" && id) {
+        if (action === "disable") await this.#mcp.disconnect(id)
+        else {
+          if (!config.mcp?.servers[id]) throw new Error("MCP server is not configured")
+          if (!config.mcp.servers[id].enabled)
+            throw new Error(
+              "Enable this source with codesplash mcp enable ID, then inspect and trust its fingerprint before connecting",
+            )
+          await this.#mcp.connect(id)
+        }
+      }
+      if (action === "status") await this.#mcp.revalidate()
+      const active = this.#mcp.statuses()
+      return {
+        scope:
+          "Current session connections; configuration and fingerprint trust are managed by codesplash mcp",
+        servers: Object.entries(config.mcp?.servers ?? {}).map(([id, server]) => ({
+          transport: server.transport,
+          configuredEnabled: server.enabled,
+          permitted: config.resolution?.constraints.mcpServers?.includes(id) ?? true,
+          source: config.resolution?.provenance[`mcp.servers.${id}.transport`] ?? [],
+          authentication: server.oauth
+            ? "protected OAuth"
+            : server.bearerEnv
+              ? "environment reference"
+              : "none",
+          ...(active.find((entry) => entry.id === id) ?? { id, state: "disconnected", tools: 0 }),
+        })),
+      }
+    })
+  }
   sandboxStatus(): string {
     return this.#sandbox.status?.() ?? "Execution backend status unavailable"
   }
@@ -1304,6 +1435,7 @@ class CodesplashSession implements EngineSession {
     this.#ownedMaintenance.cancel()
     this.#maintenanceAbort?.abort()
     this.#loop.interrupt()
+    await this.#mcp.close()
     await this.#admissionSettled?.catch(() => {})
     await this.#turnPromise?.catch(() => {})
     await this.#inputPromise?.catch(() => {})
@@ -1361,6 +1493,7 @@ class CodesplashSession implements EngineSession {
    * A valid change goes through the runtime, whose onModeChange emits the status event.
    */
   async setPermissionMode(mode: PermissionMode): Promise<void> {
+    assertManagedMode(this.#config.resolution?.constraints, mode)
     this.#requireOpen()
     if (this.#turnReserved || this.#loop.isTurnActive) {
       throw new Error("Wait for the current turn before switching permission modes")
@@ -1371,6 +1504,8 @@ class CodesplashSession implements EngineSession {
     await this.#inputOperation(async () => {
       this.#memory.invalidate()
       this.#memoryText = ""
+      await this.#mcp.suspend()
+      this.#loop.clearApprovalCache()
       this.#permissions.setMode(mode)
       this.#contextSuffix = ""
       this.#inputs.catalog = { resources: [], diagnostics: [] }

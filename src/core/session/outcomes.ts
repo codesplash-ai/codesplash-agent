@@ -25,7 +25,7 @@ export type OutcomeState = {
   cumulativeUsage: SessionUsageSnapshot
   baseUsage: SessionUsageSnapshot
   tools: Record<string, { category: ToolCategory; status: string }>
-  approvals: Record<string, "approval" | "user-input">
+  approvals: Record<string, "approval" | "user-input" | "elicitation">
 }
 const hash = (text: string) => createHash("sha256").update(text).digest("hex").slice(0, 32)
 export const emptyOutcomes = (): OutcomeState => ({
@@ -154,7 +154,7 @@ export function reduceOutcome(state: OutcomeState, event: AgentEvent): OutcomeSt
   } else if (event.kind === "request.opened") {
     if (
       typeof event.payload.id !== "string" ||
-      !["approval", "user-input"].includes(event.payload.requestKind)
+      !["approval", "user-input", "elicitation"].includes(event.payload.requestKind)
     ) {
       row.incomplete = true
       return next

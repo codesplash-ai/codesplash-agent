@@ -501,6 +501,124 @@ codesplash -c theme=dark
 codesplash run -p "quick check" -c codex.sandbox=read-only -c codesplash.fallbackModel=gpt-5.1
 ```
 
+Configuration resolves in this order: defaults, user `config.toml`, the trusted workspace's
+`.codesplash/config.toml`, the selected profile, supported environment variables, then `-c`.
+Untrusted workspace configuration is skipped. Tables merge; scalars and arrays replace, except
+permission `deny` and `ask` rules accumulate. Empty ordinary arrays clear inherited arrays.
+
+```toml
+# In your user config.toml:
+[profiles.careful]
+theme = "dark"
+[profiles.careful.permissions]
+mode = "plan"
+
+[profiles.review]
+extends = "careful"
+[profiles.review.codesplash]
+autoCompact = false
+```
+
+```sh
+codesplash --profile review
+codesplash config explain --path /path/to/project --profile review
+codesplash config validate --strict-config
+codesplash config profile list
+codesplash config profile select careful  # persist a user-defined default profile
+codesplash config schema                  # print the JSON schema
+```
+
+`--profile` overrides `CODESPLASH_PROFILE` and the top-level `profile` setting. The supported
+environment overlays are `CODESPLASH_THEME`, `CODESPLASH_MODEL`, `CODESPLASH_HISTORY` (`true` or
+`false`), and `CODESPLASH_PERMISSION_MODE`. No shell expansion or arbitrary environment import
+occurs. `--strict-config` rejects unknown fields; `config explain` reports source fingerprints,
+per-field contributors and diagnostics. Theme and permission edits preserve profiles and unknown
+tables, retaining the previous source in a private `config.toml.backup` file.
+
+`CODESPLASH_CONFIG` also accepts up to 64 KiB of JSON or TOML containing only
+`theme`, `models.codesplash`, `history.enabled`, and `permissions.mode`. The individual
+environment variables override that inline overlay.
+
+An optional `managed.toml` beside the user config sets a separate local policy ceiling:
+
+```toml
+sandboxModes = ["read-only", "workspace-write"]
+permissionModes = ["plan", "default"]
+deny = ["bash(curl *)"]
+allowedHosts = ["example.com:443"]
+environment = ["CI"]
+[required.codex]
+approvalPolicy = "untrusted"
+```
+
+Managed host/environment lists restrict configured grants; they do not grant access. Mode
+restrictions also apply to launch flags and runtime mode changes. Unknown managed fields fail
+closed. This is local harness policy, editable by the OS account that owns the file. Project trust
+does not approve executable extensions or hooks. Configuration changes apply at the next runtime
+open or working-directory transition; recorded sandbox profiles must remain compatible.
+
+Codex settings import also previews model defaults inside named profiles. Imported profiles stay
+unselected; unsupported execution and credential settings are reported without their values.
+
+### Native MCP servers
+
+Add servers as inactive entries, inspect the configuration and executable fingerprint, then
+trust that exact fingerprint. Offline `list` and `show` do not start servers.
+
+```sh
+codesplash mcp add local -- /absolute/path/to/server --literal-argument
+codesplash mcp enable local
+codesplash mcp show local
+codesplash mcp trust local --fingerprint HASH_FROM_SHOW
+codesplash mcp doctor local --connect
+codesplash mcp login remote     # explicitly configured OAuth; prints a consent URL
+codesplash mcp logout remote    # removes local credentials, including prior source generations
+```
+
+Use `--scope project` to edit `.codesplash/config.toml`, or the default `--scope user`.
+Edits preserve unrelated settings and retain a backup. Source changes require a fresh trust
+review. Foreign MCP settings import creates inactive entries; credential/environment settings,
+unsupported definitions and existing-name collisions require manual review.
+
+```toml
+[mcp.servers.remote]
+transport = "http"             # Streamable HTTP; "sse" explicitly selects legacy SSE
+url = "https://example.org/mcp"
+enabled = false
+allowTools = ["search", "create_issue"]
+denyTools = []
+readOnlyTools = ["search"]      # your reviewed assertion; server hints do not grant this
+bearerEnv = "EXAMPLE_MCP_TOKEN" # reference only; omit when using OAuth
+# [mcp.servers.remote.oauth]
+# clientId = "public-client-id" # optional configured client; otherwise dynamic registration
+# scopes = ["read"]
+```
+
+Stdio uses the native OS sandbox, literal arguments and explicitly allowed non-secret environment
+names. `trustFiles` includes additional script/dependency trees in executable review. HTTP/SSE
+and OAuth metadata/token requests use the configured sandbox host grants. Literal loopback HTTP
+fixtures require `allowLoopback = true`; other private destinations are refused. Stdio credentials
+are not injected through the non-secret `environment` list.
+
+In a native session, `/mcp` shows configured servers and active generations. `/mcp disable ID`
+closes a session connection; `enable ID` or `reconnect ID` connects an already enabled, trusted
+source. These session commands leave persistent configuration alone. Permission-mode changes,
+branch selection and source invalidation discard connections or selections; reconnect explicitly.
+
+The model uses `search_tool` (keywords or `select:server/tool`) to load bounded schemas, then
+calls the selected name or `use_tool`. Both routes check the actual namespaced operation and
+current generation. `mcp_resource` lists resources/templates or reads a server URI. Images are
+validated native attachments; other bounded binary content retains MIME/base64/provenance.
+Resource identifiers never grant local file or arbitrary network access. Tool allowlists also apply
+to `resources/list`, `resources/templates/list` and `resources/read`; include the intended resource
+operations when restricting a server. External mutations are
+not undone by workspace checkpoints, and uncertain operations are never automatically retried.
+
+Form elicitation uses a separate validated editor. Headless runs decline forms, including under
+`--auto`; an embedding consumer may answer the typed request. Credential-shaped and unsupported
+forms are refused. OAuth requires protected OS storage; systems without a credential service
+refuse durable login. Logout removes local credentials and does not revoke remote tokens.
+
 ### Permissions
 
 The native CodeSplash engine runs every tool call through a policy layer: permission modes,

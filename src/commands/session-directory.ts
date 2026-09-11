@@ -1,3 +1,4 @@
+import { resolveConfigForWorkspace } from "../core/config/resolver.ts"
 import { configDirectory, configFilePath, dataDirectory, loadConfig } from "../core/config.ts"
 import { directoryCommand } from "../core/session/directory-command.ts"
 import { digest } from "../core/session/files.ts"
@@ -38,7 +39,11 @@ export async function sessionDirectoryCommand(
   try {
     const cwd = destinationDirectory(meta.projectPath, request.path),
       trusted = (await readTrustDecision(cwd, dataDirectory(env)))?.trusted === true
-    const revision = digest(JSON.stringify([handle.state.read().revision, cwd, trusted]))
+    const config = await loadConfig(configFilePath(configDirectory(env)), [], { cwd: meta.projectPath, env })
+    const destinationConfig = await resolveConfigForWorkspace(config, cwd, trusted)
+    const revision = digest(
+      JSON.stringify([handle.state.read().revision, cwd, trusted, destinationConfig.resolution?.generation]),
+    )
     if (!request.apply) {
       output(
         `${JSON.stringify(
@@ -60,8 +65,7 @@ export async function sessionDirectoryCommand(
     }
     if (request.revision !== revision || !request.context)
       throw new Error("Apply requires the current directory preview revision and --carry or --clear")
-    const config = await loadConfig(configFilePath(configDirectory(env))),
-      history = await readSessionEvents(handle.directory)
+    const history = await readSessionEvents(handle.directory)
     recorder = new SessionRecorder(handle)
     recorder.seedFromHistory(history.events)
     const usage = [...history.events].reverse().find((event) => event.kind === "usage.updated")

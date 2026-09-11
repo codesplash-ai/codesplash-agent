@@ -5,6 +5,7 @@
  */
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
+import { type FormResponse, type InteractionForm, validateFormValues } from "../../core/forms.ts"
 import { safeGitArguments, safeGitEnvironment } from "../../core/git-process.ts"
 import {
   type AgentEvent,
@@ -32,6 +33,7 @@ import {
   ENTER_PLAN_MODE_TOOL_NAME,
   EXIT_PLAN_MODE_TOOL_NAME,
   type HarnessTool,
+  type ImageBlock,
   type ModelInfo,
   type PermissionDecision,
   type PermissionMode,
@@ -154,6 +156,7 @@ export type CodesplashLoopOptions = {
    * plan-mode tools report themselves unavailable.
    */
   permissions?: PermissionRuntime
+  beforePermissionModeChange?: () => Promise<void>
   sandbox?: SandboxRuntime
   guardian?: GuardianConfig
   maxToolRounds?: number
@@ -207,7 +210,8 @@ export type TurnRequest = {
 
 type PendingRequest = {
   choices: string[]
-  settle: (choice: string) => void
+  form?: InteractionForm
+  settle: (choice: string, data?: unknown) => void
 }
 
 type StreamResult =
@@ -238,6 +242,7 @@ export class CodesplashLoop {
   readonly #pendingRequests = new Map<string, PendingRequest>()
   readonly #fallbackModel: string | undefined
   readonly #resolveModel: ((id: string) => ResolvedModel | undefined) | undefined
+  readonly #beforePermissionModeChange: (() => Promise<void>) | undefined
   readonly #permissions: PermissionRuntime | undefined
   readonly #sandbox: SandboxRuntime | undefined
   #escalations = 0
@@ -271,6 +276,7 @@ export class CodesplashLoop {
 
   constructor(options: CodesplashLoopOptions) {
     this.#recoveryHooks = options
+    this.#beforePermissionModeChange = options.beforePermissionModeChange
     this.#contextOptions = options.context ?? {}
     this.#outputStore = options.outputStore ?? new ToolOutputStore()
     this.#cwd = options.cwd
@@ -620,7 +626,7 @@ export class CodesplashLoop {
 
         const modeBefore = this.#permissions?.mode
         const round = await this.#runToolRound(response.toolCalls, abort.signal, request.hasSteering)
-        const resultContent: ContentBlock[] = [...round.results]
+        const resultContent: ContentBlock[] = [...round.results, ...round.attachments]
         if (this.#permissions && modeBefore !== this.#permissions.mode) {
           resultContent.push({
             type: "text",
@@ -664,13 +670,60 @@ export class CodesplashLoop {
   }
 
   /** Settles a pending approval or user-input request with the user's decision. */
-  resolveRequest(requestId: string, choice: string): void {
+  resolveRequest(requestId: string, choice: string, data?: unknown): void {
     const pending = this.#pendingRequests.get(requestId)
     if (!pending) throw new Error(`Unknown request ${requestId}`)
     if (!pending.choices.includes(choice) && choice !== "cancel") {
       throw new Error(`Unsupported decision "${choice}" for request ${requestId}`)
     }
-    pending.settle(choice)
+    const values = pending.form && choice === "accept" ? validateFormValues(pending.form, data) : undefined
+    pending.settle(choice, values)
+  }
+
+  get hasPendingInteraction(): boolean {
+    return this.#pendingRequests.size > 0
+  }
+
+  requestForm(form: InteractionForm, signal: AbortSignal): Promise<FormResponse> {
+    if (this.hasPendingInteraction || !this.#turnId || signal.aborted)
+      return Promise.resolve({ action: "decline" })
+    const requestId = crypto.randomUUID(),
+      itemId = `mcp-form-${requestId}`
+    return new Promise<FormResponse>((resolve) => {
+      const settle = (choice: string, data?: unknown) => {
+        if (!this.#pendingRequests.delete(requestId)) return
+        signal.removeEventListener("abort", cancel)
+        this.#event(
+          "request/resolved",
+          { itemId, requestId },
+          { kind: "request.resolved", payload: { id: requestId, decision: choice } },
+        )
+        resolve(
+          choice === "accept"
+            ? { action: "accept", content: validateFormValues(form, data) }
+            : { action: choice === "cancel" ? "cancel" : "decline" },
+        )
+      }
+      const cancel = () => settle("cancel")
+      this.#pendingRequests.set(requestId, { choices: ["accept", "decline"], form, settle })
+      signal.addEventListener("abort", cancel, { once: true })
+      this.#event(
+        "request/opened",
+        { itemId, requestId },
+        {
+          kind: "request.opened",
+          payload: {
+            id: requestId,
+            requestKind: "elicitation",
+            title: `MCP ${form.source.server}: ${form.source.operation}`,
+            detail: form.message,
+            choices: ["accept", "decline"],
+            form,
+          },
+        },
+        true,
+      )
+    })
   }
 
   /** Aborts the provider stream and running tools; pending requests settle as "cancel". */
@@ -1040,8 +1093,15 @@ export class CodesplashLoop {
     calls: ToolCallBlock[],
     signal: AbortSignal,
     hasSteering?: () => boolean,
-  ): Promise<{ results: ToolResultBlock[]; mutatedPaths: string[]; doomEnded: boolean }> {
+  ): Promise<{
+    results: ToolResultBlock[]
+    attachments: ContentBlock[]
+    mutatedPaths: string[]
+    doomEnded: boolean
+  }> {
     const results: Array<ToolResultBlock | undefined> = new Array(calls.length)
+    const attachments = new Map<number, ContentBlock[]>()
+    const resolved = new Map<number, { call: ToolCallBlock; tool: HarnessTool }>()
     const mutated = new Set<string>()
     const decisions = this.#doomLoopDecisions(calls)
     let doomEnded = false
@@ -1058,9 +1118,15 @@ export class CodesplashLoop {
         }
         return
       }
-      const tool = this.#registry.get(call.name)
-      if (!tool) return
-      results[index] = await this.#runToolCall(tool, call, signal, mutated)
+      const target = resolved.get(index)
+      if (!target) return
+      const images: ImageBlock[] = []
+      results[index] = await this.#runToolCall(target.tool, target.call, signal, mutated, true, images)
+      if (images.length)
+        attachments.set(index, [
+          { type: "text", text: `Images from tool call ${call.id} (${target.call.name}), in result order:` },
+          ...images,
+        ])
     }
 
     let readOnlyBatch: number[] = []
@@ -1101,14 +1167,24 @@ export class CodesplashLoop {
         )
         continue
       }
-      const tool = this.#registry.get(call.name)
-      if (!tool || tool.hidden) {
-        const message = `Unknown tool: ${call.name}`
-        this.#emitToolItem(call.id, call.name, message, "failed")
-        results[index] = { type: "tool_result", toolCallId: call.id, text: message, isError: true }
+      let target: { call: ToolCallBlock; tool: HarnessTool }
+      try {
+        const tool = this.#registry.get(call.name)
+        if (
+          tool &&
+          ["use_tool", "mcp_resource"].includes(call.name) &&
+          this.#permissionDecision(tool, call, signal).decision.kind === "deny"
+        )
+          throw new ToolInputError(`Denied by permission rule: ${call.name}`)
+        target = this.#registry.resolve?.(call) ?? { call, tool: tool as HarnessTool }
+        if (!target.tool || target.tool.hidden) throw new ToolInputError(`Unknown tool: ${call.name}`)
+        resolved.set(index, target)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Tool resolution failed"
+        results[index] = this.#failCall(call.id, call, call.name, message)
         continue
       }
-      if (this.#canRunConcurrently(tool, call, signal)) {
+      if (this.#canRunConcurrently(target.tool, target.call, signal)) {
         readOnlyBatch.push(index)
         continue
       }
@@ -1126,7 +1202,12 @@ export class CodesplashLoop {
           isError: true,
         },
     )
-    return { results: finalResults, mutatedPaths: [...mutated], doomEnded }
+    return {
+      results: finalResults,
+      attachments: calls.flatMap((_, index) => attachments.get(index) ?? []),
+      mutatedPaths: [...mutated],
+      doomEnded,
+    }
   }
 
   /**
@@ -1225,6 +1306,7 @@ export class CodesplashLoop {
     signal: AbortSignal,
     mutated: Set<string>,
     retainOutput = true,
+    images?: ImageBlock[],
   ): Promise<ToolResultBlock> {
     const itemId = call.id
     const provisionalLabel = callLabel(tool.name, call.input)
@@ -1294,7 +1376,7 @@ export class CodesplashLoop {
           )
         }
         if (tool.name === ASK_USER_TOOL_NAME) return await this.#runAskUser(call, itemId, signal)
-        if (tool.name === ENTER_PLAN_MODE_TOOL_NAME) return this.#runEnterPlanMode(call, itemId)
+        if (tool.name === ENTER_PLAN_MODE_TOOL_NAME) return await this.#runEnterPlanMode(call, itemId)
         return await this.#runExitPlanMode(call, itemId, signal)
       }
 
@@ -1408,9 +1490,10 @@ export class CodesplashLoop {
             "Named secrets require the native sandbox runtime",
           )
       }
-      const checkpoint = !tool.isReadOnly(call.input)
-        ? await this.#recoveryHooks.beforeMutation?.(call.name, signal)
-        : undefined
+      const checkpoint =
+        !tool.isReadOnly(call.input) && tool.effects !== "external"
+          ? await this.#recoveryHooks.beforeMutation?.(call.name, signal)
+          : undefined
       let outcome: ToolOutcome
       try {
         outcome =
@@ -1455,6 +1538,7 @@ export class CodesplashLoop {
         text: tool.hidden || !retainOutput ? outcome.text : await this.#outputStore.retain(outcome.text),
       }
       if (outcome.isError) result.isError = true
+      images?.push(...(outcome.images ?? []))
       return result
     } catch (error) {
       if (error instanceof ToolInputError)
@@ -1512,7 +1596,10 @@ export class CodesplashLoop {
     if (decision.reason !== undefined) {
       detail = detail === "" ? decision.reason : `${detail}\n\n${decision.reason}`
     }
-    const persistableRule = decision.alwaysAsk === true ? undefined : decision.persistableRule
+    const persistableRule =
+      decision.alwaysAsk === true || tool.allowPersistentApproval === false
+        ? undefined
+        : decision.persistableRule
     const choices =
       persistableRule === undefined
         ? ["accept", "decline", "cancel"]
@@ -1555,7 +1642,8 @@ export class CodesplashLoop {
     const preApproved =
       permission.sessionKey !== undefined && this.#sessionApprovals.has(permission.sessionKey)
     if (preApproved) return undefined
-    const persistableRule = this.#derivePersistableRule(tool.name, targets)
+    const persistableRule =
+      tool.allowPersistentApproval === false ? undefined : this.#derivePersistableRule(tool.name, targets)
     const choices = [...APPROVAL_CHOICES] as string[]
     if (persistableRule !== undefined) choices.splice(2, 0, "acceptAlways")
     const choice = await this.#awaitDecision(
@@ -1622,7 +1710,7 @@ export class CodesplashLoop {
    * enter_plan_mode is intrinsic: flips the permission runtime into plan mode with no approval,
    * remembering the current mode so an approved exit_plan_mode can restore it.
    */
-  #runEnterPlanMode(call: ToolCallBlock, itemId: string): ToolResultBlock {
+  async #runEnterPlanMode(call: ToolCallBlock, itemId: string): Promise<ToolResultBlock> {
     const label = ENTER_PLAN_MODE_TOOL_NAME
     const permissions = this.#permissions
     if (permissions === undefined) {
@@ -1632,6 +1720,7 @@ export class CodesplashLoop {
       return this.#failCall(itemId, call, label, "Already in plan mode.")
     }
     this.#modeBeforePlan = permissions.mode
+    await this.#beforePermissionModeChange?.()
     permissions.setMode("plan")
     this.#emitToolItem(itemId, label, ENTER_PLAN_MODE_RESULT_TEXT, "completed")
     return { type: "tool_result", toolCallId: call.id, text: ENTER_PLAN_MODE_RESULT_TEXT }
@@ -1669,6 +1758,7 @@ export class CodesplashLoop {
       signal,
     )
     if (choice === "approve") {
+      await this.#beforePermissionModeChange?.()
       permissions.setMode(this.#modeBeforePlan)
       this.#emitToolItem(itemId, label, PLAN_APPROVED_RESULT_TEXT, "completed")
       return { type: "tool_result", toolCallId: call.id, text: PLAN_APPROVED_RESULT_TEXT }
@@ -1699,6 +1789,7 @@ export class CodesplashLoop {
     alwaysAsk?: boolean,
     reason?: string,
   ): Promise<string> {
+    if (this.#pendingRequests.size > 0) return Promise.resolve("cancel")
     const requestId = crypto.randomUUID()
     this.#event(
       "request/opened",

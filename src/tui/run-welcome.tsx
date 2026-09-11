@@ -1,5 +1,7 @@
 import { createCliRenderer, type ThemeMode } from "@opentui/core"
 import { createRoot } from "@opentui/react"
+import { editConfigSource } from "../core/config/source.ts"
+import { configFilePath } from "../core/config.ts"
 import {
   type AgentConfig,
   type AppOptions,
@@ -12,7 +14,6 @@ import {
   projectIdFor,
   registerCleanup,
   type SessionMeta,
-  saveConfig,
   type ThemePreference,
 } from "../core/index.ts"
 import { SessionRepository } from "../core/session/repository.ts"
@@ -25,14 +26,15 @@ export async function runWelcome(
   project: ProjectPreflight,
   options: AppOptions = defaultAppOptions,
 ): Promise<void> {
-  let config = await loadConfig(undefined, options.configOverrides)
+  const configOptions = { cwd: project.cwd, profile: options.profile, strict: options.strictConfig }
+  let config = await loadConfig(undefined, options.configOverrides, configOptions)
 
   while (true) {
     const action = await renderWelcome(config.theme, async (theme) => {
       config = { ...config, theme }
-      // Persist the on-disk config plus the new theme: -c overrides are per-invocation and must
-      // never be written back, so the saved snapshot is reloaded without them.
-      await saveConfig({ ...(await loadConfig()), theme })
+      editConfigSource(configFilePath(), (raw) => {
+        raw.theme = theme
+      })
     })
     if (action === "quit") return
 
@@ -48,6 +50,7 @@ export async function runWelcome(
     if (action === "open-codex" || action === "open-codesplash") {
       const engine: HarnessEngineId = action === "open-codesplash" ? "codesplash" : "codex"
       try {
+        config = await loadConfig(undefined, options.configOverrides, configOptions)
         if ((await openEngine(engine, project, config, options)) === "quit") return
       } catch (error) {
         process.stderr.write(`codesplash: ${error instanceof Error ? error.message : String(error)}\n`)
@@ -109,6 +112,7 @@ async function openEngine(
       config,
       policy,
       historyEnabled,
+      sandboxExplicit: options.fullAccess || options.sandboxOverride !== undefined,
       resume,
       // Only codesplash has the first-party permission layer; codex keeps its own approvals.
       permissions: engine === "codesplash" ? permissionLaunchOptionsFrom(options) : undefined,

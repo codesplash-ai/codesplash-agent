@@ -34,6 +34,7 @@ import { extractImageAttachments } from "./attachments.ts"
 import type { BrandPalette } from "./brand.ts"
 import { completeMentionDraft, trailingMention } from "./file-mentions.ts"
 import { InputPanel, inputDraftText } from "./input-panel.tsx"
+import { McpFormPanel } from "./mcp-form.tsx"
 import { RecoveryPanel } from "./recovery-panel.tsx"
 
 export type CodexSessionAction = "home" | "reconnect" | "new" | "resume-picker" | "quit"
@@ -51,6 +52,7 @@ export type SlashCommandName =
   | "resume"
   | "engine"
   | "model"
+  | "mcp"
   | "permissions"
   | "usage"
   | "context"
@@ -99,6 +101,7 @@ const slashCommandNames: readonly SlashCommandName[] = [
   "resume",
   "engine",
   "model",
+  "mcp",
   "permissions",
   "usage",
   "context",
@@ -176,6 +179,10 @@ export const slashCommandHelp: ReadonlyArray<{ command: string; description: str
   { command: "/resume", description: "Open the session picker" },
   { command: "/engine", description: "Back to the engine screen (welcome)" },
   { command: "/model [name]", description: "List models, or switch for the next turn" },
+  {
+    command: "/mcp [status|enable ID|disable ID|reconnect ID]",
+    description: "Inspect MCP clients or change active connections while idle",
+  },
   { command: "/permissions", description: "Show permission mode, rules, sandbox, and trust" },
   { command: "/usage", description: "Show token usage, context left, and estimated cost" },
   { command: "/context", description: "Inspect model context and available input budget (CodeSplash)" },
@@ -666,12 +673,14 @@ export function CodexSessionApp({
   }, [controller])
 
   const resolveRequest = useCallback(
-    (choice: string) => {
+    (choice: string, data?: unknown) => {
       const request = state.pendingRequest
       // "cancel" resolves every request kind (the engine treats it as a dismissal), including
       // ask_user questions whose choices list only the model's own options.
       if (!request || (choice !== "cancel" && !request.choices.includes(choice))) return
-      void runCommand(() => controller.resolveRequest(request.id, { choice }))
+      void runCommand(() =>
+        controller.resolveRequest(request.id, { choice, ...(data === undefined ? {} : { data }) }),
+      )
     },
     [controller, runCommand, state.pendingRequest],
   )
@@ -809,6 +818,12 @@ export function CodexSessionApp({
           return
         case "quit":
           onAction("quit")
+          return
+        case "mcp":
+          void runCommand(async () => {
+            const result = await controller.mcpCommand(command.argument ?? "status")
+            setOverlay({ kind: "resources", title: "MCP servers", text: JSON.stringify(result, null, 2) })
+          })
           return
         case "permissions":
           if (command.argument) {
@@ -1486,12 +1501,22 @@ export function CodexSessionApp({
           onClose={() => setOverlay(undefined)}
         />
       ) : null}
-      <Approval
-        request={overlay ? undefined : state.pendingRequest}
-        palette={palette}
-        active={approvalFocus}
-        queueing={Boolean(controller.inputQueue)}
-      />
+      {!overlay && state.pendingRequest?.requestKind === "elicitation" && state.pendingRequest.form ? (
+        <McpFormPanel
+          key={state.pendingRequest.id}
+          form={state.pendingRequest.form}
+          palette={palette}
+          active={approvalFocus}
+          onDecision={resolveRequest}
+        />
+      ) : (
+        <Approval
+          request={overlay ? undefined : state.pendingRequest}
+          palette={palette}
+          active={approvalFocus}
+          queueing={Boolean(controller.inputQueue)}
+        />
+      )}
     </box>
   )
 }
@@ -2025,6 +2050,7 @@ export function approvalChoiceForKey(name: string, request: PendingRequest): str
   // Esc always resolves as "cancel": the engine accepts it for every request kind even when the
   // request's own choices (e.g. ask_user options) do not list it.
   if (name === "escape") return "cancel"
+  if (request.requestKind === "elicitation") return undefined
   if (request.requestKind === "user-input") {
     if (name === "c") return "cancel"
     if (!/^[1-9]$/.test(name)) return undefined

@@ -1,6 +1,12 @@
 import { chmod, mkdir, readFile, rename } from "node:fs/promises"
 import { dirname, join } from "node:path"
-import { isValidPermissionRule, loadConfig, type PermissionsConfig, saveConfig } from "../../core/config.ts"
+import { editConfigSource, isTable } from "../../core/config/source.ts"
+import {
+  configFilePath,
+  isValidPermissionRule,
+  type PermissionsConfig,
+  validateConfig,
+} from "../../core/config.ts"
 import { stringifyToml } from "../../core/toml.ts"
 import type { ParsedPermissionRule } from "./permissions.ts"
 
@@ -65,10 +71,18 @@ export async function editPermissionRule(
     ]
   }
   if (edit.source === "user") {
-    const config = await loadConfig(options.userConfigPath)
-    config.permissions[edit.action] = apply(config.permissions[edit.action])
-    await saveConfig(config, options.userConfigPath)
-    return config.permissions
+    let permissions: PermissionsConfig | undefined
+    const path = options.userConfigPath ?? configFilePath()
+    editConfigSource(path, (raw) => {
+      const config = validateConfig(raw, path)
+      config.permissions[edit.action] = apply(config.permissions[edit.action])
+      raw.permissions = {
+        ...(isTable(raw.permissions) ? raw.permissions : {}),
+        [edit.action]: config.permissions[edit.action],
+      }
+      permissions = config.permissions
+    })
+    return permissions
   }
   const path =
     edit.source === "project" ? join(options.cwd, ".codesplash", "permissions.toml") : options.grantsPath

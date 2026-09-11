@@ -1,4 +1,5 @@
 import { join } from "node:path"
+import { assertManagedPolicy } from "../core/config/policy.ts"
 import { configDirectory, configFilePath, dataDirectory, loadConfig } from "../core/config.ts"
 import { BranchStore } from "../core/session/branches.ts"
 import { InputQueue } from "../core/session/input-queue.ts"
@@ -36,7 +37,7 @@ export async function sessionRecoveryCommand(
         data: { node: branches.node(request.node), apply: "Use --apply to create an independent session" },
       }
     if (meta.engine === "claude") throw new Error("Use Claude's own terminal session controls")
-    const config = await loadConfig(configFilePath(configDirectory(env))),
+    const config = await loadConfig(configFilePath(configDirectory(env)), [], { cwd: meta.projectPath, env }),
       cwd = physicalPath(meta.projectPath),
       trusted = (await readTrustDecision(cwd, dataDirectory(env)))?.trusted === true
     if (meta.engine === "codex") {
@@ -73,9 +74,18 @@ export async function sessionRecoveryCommand(
       workspaceTrusted: trusted,
       mode: config.permissions.mode,
       configRules: config.permissions,
+      constraints: config.resolution?.constraints,
+    })
+    assertManagedPolicy(config, {
+      sandbox: meta.sandbox ?? config.codex.sandbox,
+      approvalPolicy: config.codex.approvalPolicy,
+      permissionMode: permissions.mode,
     })
     runtime = new NativeSandbox(
       createProfile(cwd, meta.sandbox ?? config.codex.sandbox, config.sandbox, [repository.root]),
+      undefined,
+      undefined,
+      config.resolution?.constraints,
     )
     const profile = runtime.profile,
       transcript = join(handle.directory, "transcript.jsonl")

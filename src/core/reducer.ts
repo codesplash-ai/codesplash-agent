@@ -13,7 +13,8 @@ export type TranscriptItem = {
 
 export type PendingRequest = {
   id: string
-  requestKind: "approval" | "user-input"
+  requestKind: "approval" | "user-input" | "elicitation"
+  form?: import("./forms.ts").InteractionForm
   title: string
   detail: string
   choices: string[]

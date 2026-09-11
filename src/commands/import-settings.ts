@@ -1,11 +1,13 @@
 import { existsSync } from "node:fs"
 import { dirname, resolve } from "node:path"
+import { checkConfigBounds } from "../core/config/source.ts"
 import { configFilePath, validateConfig } from "../core/config.ts"
 import { atomic, bytes, digest, directory, lease } from "../core/session/files.ts"
 import type { ForeignVendor } from "../core/session/foreign.ts"
 import { safeSessionText } from "../core/session/repository.ts"
-import { stringifyToml, type TomlTable } from "../core/toml.ts"
+import { stringifyToml, type TomlTable, type TomlValue } from "../core/toml.ts"
 import { findModel } from "../engines/codesplash/catalog.ts"
+import { MCP_SERVER_ID, validateMcpConfig } from "../engines/codesplash/mcp/config.ts"
 
 export type SettingsPreview = {
   vendor: ForeignVendor
@@ -13,7 +15,7 @@ export type SettingsPreview = {
   destination: string
   sourceHash: string
   destinationHash: string | null
-  changes: Array<{ sourceKey: string; target: string; value: string | boolean; effect: string }>
+  changes: Array<{ sourceKey: string; target: string; value: TomlValue; effect: string }>
   unsupported: Array<{ key: string; reason: string }>
 }
 const object = (value: unknown): value is Record<string, unknown> =>
@@ -26,6 +28,7 @@ export function previewSettings(
   const data = bytes(resolve(source), 1024 * 1024),
     parsed: unknown = vendor === "codex" ? Bun.TOML.parse(data.toString()) : JSON.parse(data.toString())
   if (!object(parsed)) throw new Error("Settings must be an object/table")
+  checkConfigBounds(parsed)
   const preview: SettingsPreview = {
     vendor,
     source: resolve(source),
@@ -38,7 +41,109 @@ export function previewSettings(
   for (const [key, value] of Object.entries(parsed)) {
     const report = (reason: string) =>
       preview.unsupported.push({ key: safeSessionText(key).slice(0, 128), reason })
-    if (key === "model") {
+    if ((key === "mcp_servers" && vendor === "codex") || (key === "mcpServers" && vendor !== "codex")) {
+      if (!object(value) || Object.keys(value).length > 32) {
+        report("Invalid or oversized MCP server table")
+        continue
+      }
+      const existing = existsSync(destination)
+        ? (Bun.TOML.parse(bytes(destination).toString()) as Record<string, unknown>)
+        : {}
+      const existingServers = object(existing.mcp) && object(existing.mcp.servers) ? existing.mcp.servers : {}
+      for (const [id, entry] of Object.entries(value)) {
+        const unsupported = (reason: string) =>
+          preview.unsupported.push({ key: `${key}.${safeSessionText(id).slice(0, 64)}`, reason })
+        if (!MCP_SERVER_ID.test(id) || !object(entry)) {
+          unsupported("Invalid native MCP identifier or definition")
+          continue
+        }
+        if (Object.hasOwn(existingServers, id)) {
+          unsupported("MCP server already exists at the destination; rename or review it manually")
+          continue
+        }
+        if (
+          Object.keys(entry).some(
+            (name) =>
+              !["command", "args", "url", "type", "enabled", "disabled", "bearer_token_env_var"].includes(
+                name,
+              ),
+          )
+        ) {
+          unsupported(
+            "Unmapped MCP settings or credential/environment values require manual review; server omitted",
+          )
+          continue
+        }
+        const server: TomlTable = { enabled: false }
+        if (entry.command !== undefined) {
+          server.transport = "stdio"
+          server.command = entry.command as string
+          server.args = (entry.args ?? []) as string[]
+          if (
+            entry.url !== undefined ||
+            entry.bearer_token_env_var !== undefined ||
+            (entry.type !== undefined && entry.type !== "stdio")
+          ) {
+            unsupported("Conflicting MCP transport settings")
+            continue
+          }
+        } else {
+          server.transport = entry.type === "sse" ? "sse" : "http"
+          server.url = entry.url as string
+          if (
+            entry.args !== undefined ||
+            (entry.type !== undefined && !["http", "sse"].includes(entry.type as string))
+          ) {
+            unsupported("Unsupported MCP transport settings")
+            continue
+          }
+          if (entry.bearer_token_env_var !== undefined)
+            server.bearerEnv = entry.bearer_token_env_var as string
+        }
+        try {
+          validateMcpConfig({ servers: { [id]: server } })
+          if (safeSessionText(JSON.stringify(server)) !== JSON.stringify(server)) throw new Error("sensitive")
+        } catch {
+          unsupported("MCP definition is unsupported or contains sensitive values; server omitted")
+          continue
+        }
+        preview.changes.push({
+          sourceKey: `${key}.${id}`,
+          target: `mcp.servers.${id}`,
+          value: server,
+          effect:
+            "Inert MCP configuration only; enable, inspect and trust its native fingerprint before connection. No credentials or foreign approvals are imported.",
+        })
+      }
+    } else if (vendor === "codex" && key === "profiles" && object(value)) {
+      if (Object.keys(value).length > 32) throw new Error("At most 32 imported profiles are supported")
+      for (const [name, settings] of Object.entries(value)) {
+        if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(name) || !object(settings)) {
+          report("Invalid profile name or definition")
+          continue
+        }
+        for (const [field, entry] of Object.entries(settings)) {
+          const sourceKey = `profiles.${name}.${safeSessionText(field)}`
+          if (
+            field === "model" &&
+            typeof entry === "string" &&
+            /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(entry) &&
+            safeSessionText(entry) === entry
+          ) {
+            preview.changes.push({
+              sourceKey,
+              target: `profiles.${name}.models.codex`,
+              value: entry,
+              effect: "Codex model in an inactive named profile; select the profile explicitly after review",
+            })
+          } else
+            preview.unsupported.push({
+              key: sourceKey,
+              reason: "No supported profile mapping; value omitted",
+            })
+        }
+      }
+    } else if (key === "model") {
       if (
         typeof value !== "string" ||
         !/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(value) ||
@@ -97,7 +202,7 @@ export function applySettings(preview: SettingsPreview): void {
   const fresh = previewSettings(preview.vendor, preview.source, preview.destination)
   if (JSON.stringify(fresh) !== JSON.stringify(preview)) throw new Error("Settings changed since preview")
   directory(dirname(preview.destination), true)
-  const release = lease(dirname(preview.destination), "settings-import.lease")
+  const release = lease(dirname(preview.destination), "config-edit.lease")
   try {
     const old = existsSync(preview.destination) ? bytes(preview.destination) : undefined
     if (
@@ -107,10 +212,16 @@ export function applySettings(preview: SettingsPreview): void {
       throw new Error("Settings source/destination changed since preview")
     const parsed = old ? (Bun.TOML.parse(old.toString()) as TomlTable) : { schemaVersion: 1 }
     for (const change of preview.changes) {
-      const [table, key] = change.target.split(".") as [string, string]
-      const section = object(parsed[table]) ? (parsed[table] as TomlTable) : {}
+      const segments = change.target.split(".")
+      let section = parsed
+      for (const segment of segments.slice(0, -1)) {
+        const child = object(section[segment]) ? (section[segment] as TomlTable) : {}
+        section[segment] = child
+        section = child
+      }
+      const key = segments.at(-1)
+      if (!key) throw new Error("Invalid settings target")
       section[key] = change.value
-      parsed[table] = section
     }
     validateConfig(parsed, preview.destination)
     if (old) {

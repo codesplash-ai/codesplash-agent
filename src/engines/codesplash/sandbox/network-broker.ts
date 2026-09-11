@@ -10,6 +10,8 @@ export async function startNetworkBroker(
   options: {
     resolve?: (host: string) => Promise<string[]>
     blocked?: (address: string) => string | undefined
+    /** Reviewed MCP development endpoints only; never a general private-network grant. */
+    loopbackOrigins?: readonly string[]
   } = {},
 ): Promise<{ url: string; close(): void }> {
   const resolve =
@@ -17,7 +19,21 @@ export async function startNetworkBroker(
   const blocked = options.blocked ?? blockedAddressClass
   const token = Buffer.from(`codesplash:${crypto.randomUUID()}`).toString("base64")
   const sockets = new Set<Socket>()
+  const loopback = new Map<string, { host: string; port: number; address: string }>()
+  for (const origin of options.loopbackOrigins ?? []) {
+    const url = new URL(origin)
+    if (url.protocol !== "http:" || !["127.0.0.1", "[::1]"].includes(url.hostname) || url.origin !== origin)
+      throw new Error("Loopback exceptions require an exact literal HTTP origin")
+    const port = Number(url.port || "80")
+    loopback.set(`${url.hostname}:${port}`, {
+      host: url.hostname,
+      port,
+      address: url.hostname === "[::1]" ? "::1" : "127.0.0.1",
+    })
+  }
   async function destination(authority: string) {
+    const local = loopback.get(authority)
+    if (local) return local
     const target = canonicalHost(authority)
     if (!allowed.includes(target)) throw new Error("Host has no sandbox grant")
     const at = target.lastIndexOf(":")

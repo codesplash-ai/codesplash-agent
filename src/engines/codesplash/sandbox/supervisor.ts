@@ -89,7 +89,7 @@ export function runtimeConfig(input: SupervisorInput): SandboxRuntimeConfig {
 }
 
 /** Dedicated trusted process: its manager and broker are never shared across commands. */
-export async function runSupervisor(input: SupervisorInput): Promise<ExecutionResult> {
+export async function runSupervisor(input: SupervisorInput, execute = runProcess): Promise<ExecutionResult> {
   if (process.platform !== "darwin" && process.platform !== "linux")
     return {
       kind: "unavailable",
@@ -141,7 +141,7 @@ export async function runSupervisor(input: SupervisorInput): Promise<ExecutionRe
     )
     const env = { ...childEnvironment(input.temp), ...input.workloadEnv, ...wrapped.env, ...input.secrets }
     const argv = hardenSandboxArgv(wrapped.argv, config.filesystem, reaper?.tag, input.deniedFile, sensitive)
-    const result = await runProcess(argv, {
+    const result = await execute(argv, {
       cwd: input.profile.cwd,
       env,
       input: input.input,
@@ -242,4 +242,62 @@ export async function supervisorMain(): Promise<void> {
   )
     throw new Error("Invalid sandbox command")
   process.stdout.write(JSON.stringify(await runSupervisor(input)))
+}
+
+/** First line is a bounded trusted envelope; the remaining bytes belong to the child protocol. */
+export async function streamSupervisorMain(): Promise<void> {
+  installSignalHandlers()
+  const reader = Bun.stdin.stream().getReader()
+  let header = Buffer.alloc(0),
+    remainder = Buffer.alloc(0)
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) throw new Error("Missing streaming sandbox envelope")
+    const at = value.indexOf(10)
+    const prefix = at < 0 ? value : value.subarray(0, at)
+    if (header.length + prefix.length > 1024 * 1024)
+      throw new Error("Streaming sandbox envelope exceeds 1 MiB")
+    header = Buffer.concat([header, prefix])
+    if (at >= 0) {
+      remainder = Buffer.from(value.subarray(at + 1))
+      break
+    }
+  }
+  const input = JSON.parse(header.toString()) as SupervisorInput
+  if (
+    !input ||
+    !Array.isArray(input.argv) ||
+    !input.argv.length ||
+    input.argv.some((arg) => typeof arg !== "string" || arg.includes("\0"))
+  )
+    throw new Error("Invalid streaming sandbox command")
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      if (remainder.length) controller.enqueue(remainder)
+    },
+    async pull(controller) {
+      const next = await reader.read()
+      if (next.done) controller.close()
+      else controller.enqueue(next.value)
+    },
+    async cancel() {
+      await reader.cancel()
+      reader.releaseLock()
+    },
+  })
+  const result = await runSupervisor(input, (argv, options) =>
+    runProcess(argv, {
+      ...options,
+      input: undefined,
+      inputStream: stream,
+      secrets: input.redactions ?? [],
+      timeoutMs: 0,
+      onStdout: async (chunk) => {
+        await Bun.write(Bun.stdout, chunk)
+      },
+    }),
+  )
+  if (result.stderr) process.stderr.write(result.stderr)
+  process.exitCode = result.exitCode
+  await stream.cancel().catch(() => {})
 }

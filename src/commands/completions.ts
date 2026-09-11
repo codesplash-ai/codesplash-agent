@@ -25,6 +25,8 @@ const SUBCOMMANDS = [
   "import",
   "create-skill",
   "memory",
+  "config",
+  "mcp",
 ] as const
 
 const ROOT_FLAGS = [
@@ -40,6 +42,8 @@ const ROOT_FLAGS = [
   "--deny",
   "--bypass-approvals",
   "--config",
+  "--profile",
+  "--strict-config",
   "--fixture",
   "--codex-smoke",
   "--codex-live-smoke",
@@ -63,6 +67,8 @@ const RUN_FLAGS = [
   "--deny",
   "--trust",
   "--config",
+  "--profile",
+  "--strict-config",
 ] as const
 
 const REVIEW_FLAGS = [
@@ -78,10 +84,12 @@ const REVIEW_FLAGS = [
   "--deny",
   "--trust",
   "--config",
+  "--profile",
+  "--strict-config",
 ] as const
 
 const STATS_FLAGS = ["--days", "--json"] as const
-const DEBUG_FLAGS = ["--model", "--sandbox", "--config"] as const
+const DEBUG_FLAGS = ["--model", "--sandbox", "--config", "--profile", "--strict-config"] as const
 const SANDBOX_FLAGS = [
   "--read-only",
   "--read-root",
@@ -89,6 +97,24 @@ const SANDBOX_FLAGS = [
   "--allow-host",
   "--no-history",
   "--",
+] as const
+const MCP_ACTIONS = [
+  "add",
+  "list",
+  "show",
+  "remove",
+  "doctor",
+  "enable",
+  "disable",
+  "trust",
+  "login",
+  "logout",
+  "--scope",
+  "--path",
+  "--transport",
+  "--url",
+  "--fingerprint",
+  "--connect",
 ] as const
 const SECRET_ACTIONS = ["set", "list", "delete"] as const
 
@@ -184,6 +210,7 @@ _codesplash_completions() {
     memory) COMPREPLY=($(compgen -W "list show search remember edit forget accept status repair index link refresh extract consolidate --path --trust --read-only --no-history --model --apply" -- "$cur")) ;;
     import) COMPREPLY=($(compgen -W "claude cursor --apply --destination" -- "$cur")) ;;
     create-skill) COMPREPLY=($(compgen -W "--write" -- "$cur")) ;;
+    mcp) COMPREPLY=($(compgen -W "${words(MCP_ACTIONS)}" -- "$cur")) ;;
     secrets) COMPREPLY=($(compgen -W "${words(SECRET_ACTIONS)}" -- "$cur")) ;;
     login) COMPREPLY=($(compgen -W "--api-key" -- "$cur")) ;;
     *) COMPREPLY=($(compgen -W "${words(ROOT_FLAGS)}" -- "$cur")) ;;
@@ -226,6 +253,7 @@ _codesplash() {
     memory) compadd -- list show search remember edit forget accept status repair index link refresh extract consolidate --path --trust --read-only --no-history --model --apply ;;
     import) compadd -- claude cursor --apply --destination ;;
     create-skill) compadd -- --write ;;
+    mcp) compadd ${words(MCP_ACTIONS)} ;;
     secrets) compadd ${words(SECRET_ACTIONS)} ;;
     login) compadd -- --api-key ;;
     *) compadd -- ${words(ROOT_FLAGS)} ;;
@@ -256,6 +284,7 @@ function fishScript(): string {
     `complete -c codesplash -n "__fish_seen_subcommand_from import" -l apply`,
     `complete -c codesplash -n "__fish_seen_subcommand_from import" -l destination -r`,
     `complete -c codesplash -n "__fish_seen_subcommand_from create-skill" -l write`,
+    `complete -c codesplash -n "__fish_seen_subcommand_from mcp" -a "${words(MCP_ACTIONS)}"`,
     `complete -c codesplash -n "__fish_seen_subcommand_from secrets" -a "${words(SECRET_ACTIONS)}"`,
     `complete -c codesplash -n "__fish_seen_subcommand_from sandbox" -l read-only`,
     `complete -c codesplash -n "__fish_seen_subcommand_from sandbox" -l read-root -r`,
@@ -326,6 +355,7 @@ Register-ArgumentCompleter -Native -CommandName codesplash -ScriptBlock {
                 'memory' { @('list', 'show', 'search', 'remember', 'edit', 'forget', 'accept', 'status', 'repair', 'index', 'link', 'refresh', 'extract', 'consolidate', '--path', '--trust', '--read-only', '--no-history', '--model', '--apply') }
                 'import' { @('claude', 'cursor', '--apply', '--destination') }
                 'create-skill' { @('--write') }
+                'mcp' { @(${quotedList(MCP_ACTIONS)}) }
                 'secrets' { @(${quotedList(SECRET_ACTIONS)}) }
                 'login' { @('--api-key') }
                 default { @(${quotedList(SUBCOMMANDS)}, ${quotedList(ROOT_FLAGS)}) }

@@ -12,6 +12,9 @@ export async function runProcess(
     env: NodeJS.ProcessEnv
     signal: AbortSignal
     input?: string
+    /** Owned long-lived transports stream input until close; never combine with input. */
+    inputStream?: ReadableStream<Uint8Array>
+    onStdout?: (chunk: Uint8Array) => void | Promise<void>
     timeoutMs?: number
     secrets?: string[]
     maxBytes?: number
@@ -21,12 +24,14 @@ export async function runProcess(
     cleanup?: () => void
   },
 ): Promise<ExecutionResult> {
+  if (options.input !== undefined && options.inputStream)
+    throw new Error("Process input and inputStream are mutually exclusive")
   if (options.signal.aborted)
     return { kind: "interrupted", exitCode: 130, stdout: "", stderr: "Interrupted before execution" }
   const proc = Bun.spawn(argv, {
     cwd: options.cwd,
     env: options.env,
-    stdin: options.input === undefined ? "ignore" : "pipe",
+    stdin: options.input === undefined && !options.inputStream ? "ignore" : "pipe",
     stdout: "pipe",
     stderr: "pipe",
     detached: options.detached !== false,
@@ -56,13 +61,16 @@ export async function runProcess(
   }
   options.signal.addEventListener("abort", abort, { once: true })
   if (options.signal.aborted) abort()
-  const timeout = setTimeout(() => {
-    timedOut = true
-    stop()
-  }, options.timeoutMs ?? 120_000)
+  const timeout =
+    options.timeoutMs === 0
+      ? undefined
+      : setTimeout(() => {
+          timedOut = true
+          stop()
+        }, options.timeoutMs ?? 120_000)
   const max = options.maxBytes ?? 1024 * 1024
   const readers: ReadableStreamDefaultReader<Uint8Array>[] = []
-  async function drain(stream: ReadableStream<Uint8Array>) {
+  async function drain(stream: ReadableStream<Uint8Array>, output = false) {
     const decoder = new TextDecoder(),
       sanitizer = new SecretSanitizer(options.secrets ?? [])
     let head = Buffer.alloc(0),
@@ -87,9 +95,11 @@ export async function runProcess(
       while (true) {
         const { value, done } = await reader.read()
         if (done) break
+        if (output && options.onStdout) await options.onStdout(value)
         retain(sanitizer.push(decoder.decode(value, { stream: true })))
       }
     } catch {
+      stop()
     } finally {
       reader.releaseLock()
     }
@@ -99,8 +109,25 @@ export async function runProcess(
       : Buffer.concat([head, tail]).toString("utf8")
     return options.structured ? result : redactSensitiveText(result, options.env)
   }
-  const stdout = drain(proc.stdout),
+  const stdout = drain(proc.stdout, true),
     stderr = drain(proc.stderr)
+  const inputReader = options.inputStream?.getReader()
+  const inputPump = (async () => {
+    if (!inputReader || typeof proc.stdin === "number" || !proc.stdin) return
+    try {
+      while (true) {
+        const { value, done } = await inputReader.read()
+        if (done) break
+        proc.stdin.write(value)
+        await proc.stdin.flush()
+      }
+      await proc.stdin.end()
+    } catch {
+      stop()
+    } finally {
+      inputReader.releaseLock()
+    }
+  })()
   if (options.input !== undefined && typeof proc.stdin !== "number" && proc.stdin) {
     try {
       proc.stdin.write(options.input)
@@ -132,10 +159,12 @@ export async function runProcess(
       stderr: err,
     }
   } finally {
-    clearTimeout(timeout)
+    if (timeout) clearTimeout(timeout)
     if (grace) clearTimeout(grace)
     options.signal.removeEventListener("abort", abort)
     kill("SIGKILL")
+    if (inputReader) await inputReader.cancel().catch(() => {})
+    await inputPump
     unregister()
   }
 }

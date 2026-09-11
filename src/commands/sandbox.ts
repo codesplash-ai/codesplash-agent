@@ -1,5 +1,6 @@
 import { join } from "node:path"
-import { dataDirectory } from "../core/config.ts"
+import { assertManagedPolicy } from "../core/config/policy.ts"
+import { dataDirectory, loadConfig } from "../core/config.ts"
 import type { NativeSandboxConfig } from "../engines/codesplash/sandbox/contracts.ts"
 import { createProfile } from "../engines/codesplash/sandbox/profile.ts"
 import { NativeSandbox } from "../engines/codesplash/sandbox/runtime.ts"
@@ -35,10 +36,22 @@ export function parseSandboxArguments(args: string[]) {
 }
 export async function runSandboxCommand(args: string[]): Promise<number> {
   const parsed = parseSandboxArguments(args)
-  const profile = createProfile(process.cwd(), parsed.mode, parsed.config)
+  const config = await loadConfig(undefined, [], { cwd: process.cwd() })
+  assertManagedPolicy(config, {
+    sandbox: parsed.mode,
+    approvalPolicy: config.codex.approvalPolicy,
+    permissionMode: config.permissions.mode,
+  })
+  const merged = { ...config.sandbox, ...parsed.config }
+  const ceiling = config.resolution?.constraints.allowedHosts
+  if (ceiling && merged.allowedHosts?.some((host) => !ceiling.includes(host)))
+    throw new Error("Requested network host prohibited by managed configuration")
+  const profile = createProfile(process.cwd(), parsed.mode, merged)
   const runtime = new NativeSandbox(
     profile,
     parsed.history ? join(dataDirectory(), "sandbox-events.jsonl") : undefined,
+    undefined,
+    config.resolution?.constraints,
   )
   const abort = new AbortController()
   const stop = () => abort.abort()

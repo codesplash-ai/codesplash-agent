@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { loadConfig, saveConfig } from "../../../src/core/config.ts"
 import { type AgentEvent, defaultConfig, type EngineSession } from "../../../src/core/index.ts"
 import { BranchStore } from "../../../src/core/session/branches.ts"
 import { MemorySessionState } from "../../../src/core/session/control.ts"
@@ -19,13 +20,13 @@ import { createPermissionRuntime } from "../../../src/engines/codesplash/permiss
 import { createProfile } from "../../../src/engines/codesplash/sandbox/profile.ts"
 import { appendTranscriptMessages, loadTranscript } from "../../../src/engines/codesplash/transcript.ts"
 
-async function fixture(durable = false) {
+async function fixture(durable = false, layered = false) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "codesplash-cwd-"))),
     from = join(root, "old"),
     to = join(root, "new")
   mkdirSync(from)
   mkdirSync(to)
-  const config = structuredClone(defaultConfig)
+  let config = structuredClone(defaultConfig)
   config.providers = [
     {
       id: "cwd-fixture",
@@ -46,6 +47,16 @@ async function fixture(durable = false) {
       ],
     },
   ]
+  if (layered) {
+    const path = join(root, "config.toml")
+    await saveConfig(config, path)
+    config = await loadConfig(path, [], {
+      cwd: from,
+      env: {},
+      dataDir: join(root, "data"),
+      workspaceTrusted: false,
+    })
+  }
   const requests: ProviderRequest[] = [],
     permissions: PermissionRuntimeFactoryOptions[] = [],
     events: AgentEvent[] = []
@@ -279,6 +290,38 @@ test("recorded directory change keeps storage identity and repairs interrupted t
     await f.close()
   }
 })
+test("directory preparation rejects source changes and preserves the previous usable runtime", async () => {
+  const f = await fixture(false, true)
+  try {
+    await writeTrustDecision(f.to, true, join(f.root, "data"))
+    mkdirSync(join(f.to, ".codesplash"))
+    const path = join(f.to, ".codesplash", "config.toml")
+    writeFileSync(path, 'theme="dark"')
+    const preview = await f.controller.changeDirectory({ path: f.to }),
+      started = f.slow()
+    const changing = f.controller.changeDirectory({
+      path: f.to,
+      context: "clear",
+      apply: true,
+      revision: preview.revision,
+    })
+    const settled = changing.then(
+      () => undefined,
+      (error: unknown) => error,
+    )
+    await started
+    writeFileSync(path, 'theme="light"')
+    f.release()
+    expect(String(await settled)).toContain("configuration")
+    expect(f.session.directoryStatus?.().cwd).toBe(f.from)
+    await turn(f.session, "still usable")
+    expect(f.requests.length).toBeGreaterThan(0)
+  } finally {
+    f.release()
+    await f.close()
+  }
+})
+
 test("directory preparation fences concurrent queue edits and close settles the transition", async () => {
   const f = await fixture()
   try {

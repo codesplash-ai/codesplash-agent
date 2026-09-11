@@ -218,6 +218,8 @@ export type ToolPermission =
     }
 
 export type ToolOutcome = {
+  /** Validated attachments follow the paired text results in native message history. */
+  images?: ImageBlock[]
   /** Model-facing result text; tools truncate via truncateToolOutput before returning. */
   text: string
   isError?: boolean
@@ -238,6 +240,9 @@ export interface HarnessTool {
   /** Internal preparation operations are never exposed to the model. */
   readonly hidden?: boolean
   readonly permissionName?: string
+  /** External effects cannot be restored by a workspace checkpoint. */
+  readonly effects?: "workspace" | "external" | "workspace-and-external"
+  readonly allowPersistentApproval?: boolean
   readonly name: string
   readonly description: string
   readonly inputSchema: Record<string, unknown>

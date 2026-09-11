@@ -2,7 +2,7 @@
  * Assembles the built-in tool set and provides name-indexed lookup for the loop. This file is the
  * one tools/ module allowed to import its siblings.
  */
-import type { HarnessTool, ToolSpec } from "../contracts.ts"
+import type { HarnessTool, ToolCallBlock, ToolSpec } from "../contracts.ts"
 import { readToolOutputTool } from "../tool-output-store.ts"
 import { applyPatchTool } from "./apply-patch.ts"
 import { bashTool } from "./bash.ts"
@@ -19,8 +19,12 @@ import { createWebSearchTool } from "./web-search.ts"
 import { writeFileTool } from "./write.ts"
 
 export type ToolRegistry = {
+  readonly generation: string
   specs(): ToolSpec[]
-  get(name: string): HarnessTool | undefined
+  /** Resolve deferred targets before validation, batching and permissions. */
+  resolve?(call: ToolCallBlock): { call: ToolCallBlock; tool: HarnessTool }
+  get(name: string, expectedGeneration?: string): HarnessTool | undefined
+  source(name: string): { id: string; generation: string } | undefined
 }
 
 export function builtinTools(): HarnessTool[] {
@@ -43,13 +47,14 @@ export function builtinTools(): HarnessTool[] {
   ]
 }
 
-export function createToolRegistry(tools: HarnessTool[]): ToolRegistry {
+export function createToolRegistry(tools: HarnessTool[], generation = "builtin"): ToolRegistry {
   const byName = new Map<string, HarnessTool>()
   for (const tool of tools) {
     if (byName.has(tool.name)) throw new Error(`Duplicate tool name: ${tool.name}`)
     byName.set(tool.name, tool)
   }
   return {
+    generation,
     specs: () =>
       [...byName.values()]
         .filter((tool) => !tool.hidden)
@@ -59,6 +64,11 @@ export function createToolRegistry(tools: HarnessTool[]): ToolRegistry {
           description: tool.description,
           inputSchema: tool.inputSchema,
         })),
-    get: (name) => byName.get(name),
+    get: (name, expectedGeneration) => {
+      if (expectedGeneration !== undefined && expectedGeneration !== generation)
+        throw new Error("Tool selection belongs to a stale runtime generation")
+      return byName.get(name)
+    },
+    source: (name) => (byName.has(name) ? { id: "builtin", generation } : undefined),
   }
 }

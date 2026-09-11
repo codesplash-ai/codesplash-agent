@@ -48,7 +48,7 @@ export async function collectDoctorReport(cwd = process.cwd()): Promise<DoctorRe
     new CodesplashDriver().probe(),
     inspectProject(cwd).catch(() => undefined),
     // A broken config file must not break diagnostics; the probe line already reports engines.
-    loadConfig().catch(() => structuredClone(defaultConfig)),
+    loadConfig(undefined, [], { cwd }).catch(() => structuredClone(defaultConfig)),
   ])
   const configPath = configFilePath()
 
