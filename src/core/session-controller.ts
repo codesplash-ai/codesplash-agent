@@ -112,6 +112,58 @@ export class SessionController {
     await this.#consumePromise
   }
 
+  async tasks(request: import("./orchestration/contracts.ts").TaskRequest): Promise<unknown> {
+    if (this.#closed || !this.#session.tasks) throw new Error("Tasks are unavailable for this engine")
+    return this.#session.tasks(request)
+  }
+  async spawnAgent(
+    input: import("../engines/codesplash/orchestration/children.ts").SpawnAgentInput,
+  ): Promise<unknown> {
+    if (this.#closed || !this.#session.spawnAgent)
+      throw new Error("Child agents are unavailable for this engine")
+    return this.#session.spawnAgent(input)
+  }
+  async teams(input: import("./orchestration/teams.ts").TeamRequest): Promise<unknown> {
+    if (this.#closed || !this.#session.teams) throw new Error("Team controls unavailable")
+    return this.#session.teams(input)
+  }
+  async schedules(input: import("./orchestration/scheduler.ts").ScheduleRequest): Promise<unknown> {
+    if (this.#closed || !this.#session.schedules) throw new Error("Scheduler controls unavailable")
+    return this.#session.schedules(input)
+  }
+  async goals(input: import("./orchestration/automation.ts").GoalRequest): Promise<unknown> {
+    if (this.#closed || !this.#session.goals) throw new Error("Goal controls unavailable")
+    return this.#session.goals(input)
+  }
+  async workflows(input: import("./orchestration/automation.ts").WorkflowRequest): Promise<unknown> {
+    if (this.#closed || !this.#session.workflows) throw new Error("Workflow controls unavailable")
+    return this.#session.workflows(input)
+  }
+  async worktrees(input: import("./orchestration/worktrees.ts").WorktreeRequest): Promise<unknown> {
+    if (this.#closed || !this.#session.worktrees) throw new Error("Worktree controls unavailable")
+    return this.#session.worktrees(input)
+  }
+  async peers(input: import("./orchestration/peers.ts").PeerRequest): Promise<unknown> {
+    if (this.#closed || !this.#session.peers) throw new Error("Peer controls unavailable")
+    return this.#session.peers(input)
+  }
+  async agentDefinitions(): Promise<unknown> {
+    if (this.#closed || !this.#session.agentDefinitions)
+      throw new Error("Agent definitions are unavailable for this engine")
+    return this.#session.agentDefinitions()
+  }
+  monitorTask(id: string, cursor = 0) {
+    if (this.#closed || !this.#session.monitorTask) throw new Error("Task monitoring is unavailable")
+    return this.#session.monitorTask(id, cursor)
+  }
+  async runCommand(
+    command: string,
+    includeContext = false,
+    snapshot?: import("../engines/codesplash/orchestration/shell-state.ts").ShellSelection,
+  ): Promise<unknown> {
+    if (this.#closed || !this.#session.runCommand) throw new Error("Native commands are unavailable")
+    return this.#session.runCommand(command, includeContext, snapshot)
+  }
   async mcpCommand(command: string): Promise<unknown> {
     if (this.#closed || !this.#session.mcpCommand)
       throw new Error("MCP management is unavailable for this engine")

@@ -25,6 +25,9 @@ import type {
   TranscriptItem,
 } from "../core/index.ts"
 import { defaultSessionPolicy, isPermissionMode, suspendToShell } from "../core/index.ts"
+import { taskCommand } from "../core/orchestration/command.ts"
+import { intervalMs } from "../core/orchestration/scheduler.ts"
+import type { TeamRequest } from "../core/orchestration/teams.ts"
 import type { BranchView } from "../core/session/branches.ts"
 import type { AcceptedPrompt, InputIntent, InputItem } from "../core/session/input-queue.ts"
 import { emptyOutcomes, outcomeSummary } from "../core/session/outcomes.ts"
@@ -36,10 +39,16 @@ import { completeMentionDraft, trailingMention } from "./file-mentions.ts"
 import { InputPanel, inputDraftText } from "./input-panel.tsx"
 import { McpFormPanel } from "./mcp-form.tsx"
 import { RecoveryPanel } from "./recovery-panel.tsx"
+import { TaskPanel } from "./task-panel.tsx"
+import { TeamPanel } from "./team-panel.tsx"
 
 export type CodexSessionAction = "home" | "reconnect" | "new" | "resume-picker" | "quit"
 
 export type SlashCommandName =
+  | "teams"
+  | "dashboard"
+  | "loop"
+  | "tasks"
   | "cd"
   | "session-info"
   | "recap"
@@ -104,6 +113,10 @@ const slashCommandNames: readonly SlashCommandName[] = [
   "resume",
   "engine",
   "model",
+  "teams",
+  "dashboard",
+  "tasks",
+  "loop",
   "mcp",
   "hooks",
   "plugins",
@@ -235,6 +248,10 @@ export const slashCommandHelp: ReadonlyArray<{ command: string; description: str
     command: "/checkpoints · /checkpoint-diff ID · /restore ID [PATH…]",
     description: "Inspect eligible file snapshots and preview restore",
   },
+  {
+    command: "/teams · /dashboard · /tasks · /loop · !command · !!command",
+    description: "Live tasks; run a command with or without model context",
+  },
   { command: "/help", description: "Toggle this overlay (also F1)" },
   { command: "/quit", description: "Quit the app" },
 ]
@@ -250,6 +267,7 @@ export const keyboardHelpEntries: ReadonlyArray<{ keys: string; action: string }
   { keys: "Ctrl+O", action: "Toggle the conversation outline" },
   { keys: "⌥↑ / ⌥↓", action: "Jump between outline sections" },
   { keys: "Ctrl+R", action: "Reconnect after a recoverable error" },
+  { keys: "Ctrl+B", action: "Let the current command continue in the background" },
   { keys: "Ctrl+Z", action: "Suspend to the shell (fg resumes)" },
   { keys: "F1", action: "Toggle keyboard help" },
   { keys: "Ctrl+Q / Ctrl+C", action: "Back to the welcome screen" },
@@ -535,6 +553,8 @@ type PermissionsOverlayRules =
   | { phase: "ready"; rules: PermissionRuleView[]; selectedGrant: number; notice?: string }
 
 type OverlayState =
+  | { kind: "teams" }
+  | { kind: "tasks" }
   | { kind: "recovery"; tree: BranchView }
   | { kind: "input"; tab: "queue" | "history" | "stash" }
   | { kind: "help" }
@@ -853,6 +873,78 @@ export function CodexSessionApp({
         case "quit":
           onAction("quit")
           return
+        case "teams":
+        case "dashboard":
+          if (!command.argument || command.argument === "list") setOverlay({ kind: "teams" })
+          else
+            void runCommand(async () => {
+              const argument = command.argument!.trim(),
+                split = argument.indexOf(" "),
+                action = split < 0 ? argument : argument.slice(0, split),
+                value = split < 0 ? "" : argument.slice(split + 1)
+              let request: TeamRequest
+              if (action === "create") request = { action, spec: JSON.parse(value) }
+              else if (action === "coordinator")
+                request = { action, team: value === "off" ? undefined : value }
+              else if (action === "panes" || action === "delete") request = { action, team: value }
+              else if (action === "close-panes") request = { action }
+              else
+                throw new Error(
+                  "Usage: /teams [list|create JSON|coordinator TEAM/off|panes TEAM|close-panes|delete TEAM]",
+                )
+              const result = (await controller.teams(request)) as { text: string; isError?: boolean }
+              if (result.isError) throw new Error(result.text)
+              setOverlay({ kind: "teams" })
+            })
+          return
+        case "loop":
+          void runCommand(async () => {
+            const argument = command.argument?.trim() ?? "list"
+            const unpack = (raw: unknown) => {
+              const result = raw as { text: string; isError?: boolean }
+              if (result.isError) throw new Error(result.text)
+              return JSON.parse(result.text)
+            }
+            let result: unknown
+            if (argument === "list" || argument === "stop")
+              result = unpack(await controller.schedules({ action: argument }))
+            else {
+              const match = /^(\S+)\s+([\s\S]+)$/.exec(argument)
+              if (!match) throw new Error("Usage: /loop list|stop|<interval e.g. 5m> <prompt>")
+              intervalMs(match[1])
+              result = unpack(
+                await controller.schedules({
+                  action: "create",
+                  enabled: true,
+                  spec: {
+                    name: `loop-${crypto.randomUUID().slice(0, 8)}`,
+                    interval: match[1]!,
+                    prompt: match[2]!,
+                    limits: { tokens: 65536, timeoutMs: 120000, rounds: 1 },
+                    maxOccurrences: 4,
+                    totalTokens: 262144,
+                    expiresAfterMs: 86400000,
+                  },
+                }),
+              )
+              const status = unpack(await controller.schedules({ action: "list" })) as { worker: boolean }
+              if (!status.worker) unpack(await controller.schedules({ action: "start", durationMs: 3600000 }))
+            }
+            setOverlay({
+              kind: "resources",
+              title: "Recurring prompts",
+              text: JSON.stringify(result, null, 2),
+            })
+          })
+          return
+        case "tasks":
+          if (!command.argument || command.argument === "list") setOverlay({ kind: "tasks" })
+          else
+            void runCommand(async () => {
+              const result = await controller.tasks(taskCommand(command.argument ?? ""))
+              setOverlay({ kind: "resources", title: "Task control", text: JSON.stringify(result, null, 2) })
+            })
+          return
         case "mcp":
           void runCommand(async () => {
             const result = await controller.mcpCommand(command.argument ?? "status")
@@ -1132,6 +1224,11 @@ export function CodexSessionApp({
       return
     }
 
+    if (key.ctrl && key.name === "b") {
+      key.preventDefault()
+      void controller.tasks({ action: "background" }).catch((error) => setCommandError(String(error)))
+      return
+    }
     if (key.ctrl && key.name === "s" && controller.inputQueue) {
       key.preventDefault()
       void runCommand(async () => saveCurrentDraft())
@@ -1504,6 +1601,22 @@ export function CodexSessionApp({
             const sourceText = textareaRef.current?.plainText ?? "",
               captured = draftRevision.current
             if (!sourceText.trim()) return
+            if (sourceText.startsWith("!")) {
+              const excluded = sourceText.startsWith("!!")
+              void runCommand(async () => {
+                const result = await controller.runCommand(
+                  sourceText.slice(excluded ? 2 : 1).trim(),
+                  !excluded,
+                )
+                setOverlay({
+                  kind: "resources",
+                  title: excluded ? "Command · excluded from model context" : "Command",
+                  text: JSON.stringify(result, null, 2),
+                })
+                if (draftRevision.current === captured) textareaRef.current?.clear()
+              })
+              return
+            }
             const command = parseSlashCommand(sourceText)
             const intent: InputIntent =
               command?.name === "steer"
@@ -1597,6 +1710,31 @@ export function CodexSessionApp({
       {editingInput ? (
         <text fg={palette.accent}>Editing queued input · Enter saves · Esc keeps this draft</text>
       ) : null}
+      {overlay?.kind === "teams" && (
+        <TeamPanel
+          controller={controller}
+          palette={palette}
+          onClose={() => setOverlay(undefined)}
+          onAction={async (request) => {
+            if (request.action === "dispatch") setOverlay(undefined)
+            try {
+              const result = (await controller.teams(request)) as { text: string; isError?: boolean }
+              if (result.isError) throw new Error(result.text)
+            } catch (error) {
+              setOverlay({
+                kind: "resources",
+                title: "Team action failed",
+                text: error instanceof Error ? error.message : String(error),
+              })
+              return
+            }
+            setOverlay({ kind: "teams" })
+          }}
+        />
+      )}
+      {overlay?.kind === "tasks" && (
+        <TaskPanel controller={controller} palette={palette} onClose={() => setOverlay(undefined)} />
+      )}
       {overlay?.kind === "input" && controller.inputQueue && state.inputQueue ? (
         <InputPanel
           queue={controller.inputQueue}
@@ -1642,7 +1780,14 @@ function SessionOverlay({
   state: AppViewState
   permissions?: SessionPermissionsUi
 }) {
-  if (!overlay || overlay.kind === "input" || overlay.kind === "recovery") return null
+  if (
+    !overlay ||
+    overlay.kind === "teams" ||
+    overlay.kind === "tasks" ||
+    overlay.kind === "input" ||
+    overlay.kind === "recovery"
+  )
+    return null
 
   const frame = {
     position: "absolute" as const,

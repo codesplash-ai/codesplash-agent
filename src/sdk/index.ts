@@ -52,3 +52,35 @@ export async function trustIntegration(
   requireBun()
   return (await import("./review.ts")).trust(options, kind, id, fingerprint)
 }
+
+export type {
+  AutomationLimits,
+  AutomationRecord,
+  GoalRequest,
+  WorkflowDefinition,
+  WorkflowRequest,
+  WorkflowStep,
+} from "../core/orchestration/automation.ts"
+export type { TaskRequest } from "../core/orchestration/contracts.ts"
+export type { OutputPage } from "../core/orchestration/output.ts"
+export type { PeerMember, PeerMessage, PeerRequest } from "../core/orchestration/peers.ts"
+export type {
+  ScheduleOccurrence,
+  ScheduleRecord,
+  ScheduleRequest,
+  ScheduleSpec,
+} from "../core/orchestration/scheduler.ts"
+export type { TaskRecord, TaskStatus } from "../core/orchestration/tasks.ts"
+export type {
+  TeamDashboard,
+  TeamMember,
+  TeamRecord,
+  TeamRequest,
+  TeamRow,
+  TeamSpec,
+  TeamView,
+} from "../core/orchestration/teams.ts"
+export type { WorktreeRecord, WorktreeRequest } from "../core/orchestration/worktrees.ts"
+export type { SpawnAgentInput } from "../engines/codesplash/orchestration/children.ts"
+export type { AgentDefinition, ResolvedAgent } from "../engines/codesplash/orchestration/definitions.ts"
+export type { ShellSelection } from "../engines/codesplash/orchestration/shell-state.ts"

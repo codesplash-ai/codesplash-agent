@@ -34,8 +34,7 @@ export function validateManifest(raw: unknown, root: string): PluginManifest {
     !/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(raw.version)
   )
     throw new Error("Plugin requires schemaVersion/API 1, id and exact semantic version")
-  if ("lsp" in raw)
-    throw new Error("Plugin LSP components are unsupported; agent definitions are inactive until M7")
+  if ("lsp" in raw) throw new Error("Plugin LSP components are unsupported")
   if (
     Object.keys(raw).some(
       (key) =>

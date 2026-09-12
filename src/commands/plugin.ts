@@ -239,7 +239,7 @@ export async function runPluginCommand(
     ...staged,
     installed: action !== "validate",
     message:
-      "No lifecycle scripts executed during installation. Executable components require separate fingerprint review. Agents remain inactive until M7.",
+      "No lifecycle scripts executed during installation. Executable components require separate fingerprint review. Enabled, verified agent definitions use native child admission.",
   })
   return 0
 }

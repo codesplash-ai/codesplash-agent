@@ -141,7 +141,7 @@ export class CheckpointStore {
     if (before.steps.length >= 1000) throw new Error("Checkpoint limit reached; prune unreferenced steps")
     const snapshot = await this.capture(signal),
       id = crypto.randomUUID()
-    this.update(before.revision, "step-start", (state) => {
+    this.#publishCapture(before, "step-start", (state) => {
       state.steps.push({
         id,
         label: this.policy.sanitize(label).slice(0, 200),
@@ -156,11 +156,28 @@ export class CheckpointStore {
     this.#owned()
     const before = this.view(),
       snapshot = await this.capture(signal)
-    this.update(before.revision, "step-finish", (state) => {
+    this.#publishCapture(before, "step-finish", (state) => {
       const step = state.steps.find((step) => step.id === id)
       if (!step || step.after) throw new Error("Unknown or already completed checkpoint step")
       step.after = snapshot
     })
+  }
+  #publishCapture(
+    before: ReturnType<CheckpointStore["view"]>,
+    operation: string,
+    change: (state: CheckpointState) => void,
+  ): void {
+    // Background task/usage/input journals may advance the shared control revision while Git
+    // captures files. Only an unchanged checkpoint state can be merged into the fresh revision.
+    const current = this.view()
+    const relevant = ({
+      revision: _revision,
+      unavailable: _unavailable,
+      ...state
+    }: ReturnType<CheckpointStore["view"]>) => JSON.stringify(state)
+    if (relevant(before) !== relevant(current))
+      throw new Error("Checkpoint state changed during capture; review before continuing")
+    this.update(current.revision, operation, change)
   }
   bindContext(context: string): void {
     this.update(this.view().revision, "context-bind", (state) => {

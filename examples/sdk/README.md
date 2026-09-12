@@ -35,6 +35,8 @@ into an application that has installed `codesplash-agent`. Each example prints `
 | 06-provider-auth.ts | Host provider/auth callback, credential redaction and unpriced usage |
 | 07-ui-extension.ts | Owned status/widget/composer/dialog callbacks |
 | 08-git-workflow.ts | Read-only Git status tool with fixed argv, deadline and output limit |
+| 09-background-command.ts | Sandboxed PTY, approved stdin, bounded monitor, task wait and owned shutdown |
+| 10-child-agent.ts | Fresh scoped child, task wait, usage accounting and identity-checked resume |
 
 ## Ownership and inputs
 
@@ -54,7 +56,8 @@ uncertain status is explicit; a completed API call does not assert that every to
 reuse the revision-checked M5 controls. Supply the snapshot revision when modifying it. Resume
 holds recovered pending input for explicit review; uncertain effects require explicit acknowledgment
 before retry. A resumed queue containing only finished inputs can accept a new prompt immediately.
-No detached work, automatic retries of uncertain effects, or agent/subagent execution is added.
+Queue recovery does not automatically spawn children or retry uncertain effects. Use the explicit
+`spawnAgent` and task controls below for owned child execution.
 
 `subscribe` streams events; `subscribeState` observes copied reducer state; both return unsubscribe.
 Exceptions in observers are isolated. `events()` creates an async iterator; call its `return()` if
@@ -109,3 +112,43 @@ for owned composer updates and a responder for dialogs. Status/widget text arriv
 The distributed SDK runs as JavaScript under Bun. The standalone CLI has separate compiled runtime
 assets and acceptance. Compiling an arbitrary embedding application is not a supported SDK packaging
 path: its entry point does not implement the CLI's internal sandbox worker dispatch.
+
+## Background commands
+
+`runCommand(command, includeContext = false, snapshot?)` uses native approvals and a sandboxed PTY.
+It returns a tool result whose text contains the task ID, state and an output page; a command still
+running after one second becomes a background task. `tasks({action: "stdin", id, text})` requests
+permission for input, and `output`, `wait`, `kill`, `resize`, `forget` and `list` use the same owner.
+`monitorTask(id, cursor?)` yields bounded sanitized pages with absolute byte cursors and loss markers;
+call `return()` when leaving a monitor. Eight monitors and 32 waits may be active per owner.
+Waits are at most 30 seconds and cancellation retains mutation admission until the process stops.
+Closing the session stops its commands. Persisted intent never reconnects to an old PID.
+
+Use `includeContext: false` for user commands excluded from model history and model task-output tools.
+Explicit user task controls can still inspect them. These commands remain visible to the user and
+recorded in a history-enabled session. A shell snapshot is an explicitly reviewed `{path,fingerprint}`
+created with `codesplash shell-state capture`, then `review` and `trust`. Capture imports selected
+environment variables and a definitions file; it never runs startup files. Snapshot replay keeps the
+sandbox boundary and requires a readable source and a matching trust receipt.
+
+11. `11-worktrees-peers.ts` creates a disposable Git worktree, forks actual parent context into a
+scoped child, queues a peer message, explicitly resumes the child and removes the inactive tree.
+
+- `12-goal.ts`: explicit bounded goal, real read-only verifier evidence, cumulative token ledger.
+- `13-workflow.ts`: reviewed native workflow with parallel children, join and sandboxed command.
+
+Goals/workflows retain journals in the session's configured persistence (memory by default). Limits
+pause instead of claiming completion. Review uncertain effects before retrying; resume skips successful
+steps. These examples use disposable local providers and explicit approval callbacks.
+- `14-scheduler.ts`: disabled schedule creation, reviewed enable, explicit manual native occurrence,
+  durable usage receipt and lifetime cap. Automatic workers use the same path at the configured cadence.
+
+15. `15-teams.ts` creates a bounded native team, dispatches a real child, peeks at durable identity
+and usage, queues a message without starting work, explicitly resumes, and selects/leaves persisted
+coordinator mode. Optional tmux panes use read-only views of the same owner; they never open another
+SDK session. Inclusive parent usage is not summed with descendant usage for root totals.
+
+16. `16-orchestration-integration.ts` runs parallel team writers through native mutation ownership,
+executes a workflow command, then journals one explicit scheduled child in the same owner. It checks
+real file content, completion and cumulative usage. The package smoke runs all sixteen examples.
+Task completion uses existing `item.updated` events; context-excluded work never enters model notices.

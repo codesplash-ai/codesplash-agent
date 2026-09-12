@@ -16,6 +16,7 @@ import { startNetworkBroker } from "./network-broker.ts"
 import { runProcess } from "./process.ts"
 
 export type SupervisorInput = {
+  terminal?: import("./terminal-protocol.ts").TerminalSize
   profile: SandboxProfile
   argv: string[]
   input?: string

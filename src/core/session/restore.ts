@@ -1,4 +1,5 @@
 import { basename, dirname, join, relative } from "node:path"
+import { workspaceMutations } from "../orchestration/mutations.ts"
 import { type CheckpointStore, type FileSnapshot, type SnapshotFile, snapshotPath } from "./checkpoints.ts"
 import { SafeParent } from "./secure-path.ts"
 
@@ -104,7 +105,10 @@ export class RestoreService {
       })
     return { checkpoint: step.id, revision: view.revision, direction, rows, excluded }
   }
-  async apply(preview: RestorePreview): Promise<RestoreJournal> {
+  async apply(preview: RestorePreview, signal = AbortSignal.timeout(30000)): Promise<RestoreJournal> {
+    return workspaceMutations.run([this.store.policy.cwd], signal, () => this.#apply(preview))
+  }
+  async #apply(preview: RestorePreview): Promise<RestoreJournal> {
     if (this.journal()) throw new Error("A restore already requires recovery or acknowledgment")
     const fresh = this.preview(
       preview.checkpoint,
@@ -133,7 +137,10 @@ export class RestoreService {
     })
     return this.#run()
   }
-  async recover(action: "finish" | "rollback"): Promise<RestoreJournal> {
+  async recover(action: "finish" | "rollback", signal = AbortSignal.timeout(30000)): Promise<RestoreJournal> {
+    return workspaceMutations.run([this.store.policy.cwd], signal, () => this.#recover(action))
+  }
+  async #recover(action: "finish" | "rollback"): Promise<RestoreJournal> {
     const journal = this.journal()
     if (!journal) throw new Error("No interrupted restore")
     if (journal.status === "completed" || journal.status === "rolled-back") {

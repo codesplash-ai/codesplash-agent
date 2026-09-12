@@ -28,7 +28,7 @@ test("hook configuration is inert, literal and bounded with reviewed result capa
     { token: "DO_NOT_COPY" },
     { environment: ["NODE_OPTIONS"] },
     { async: true },
-    { events: ["subagent.start"] },
+    { events: ["subagent.unknown"] },
     { matchTools: ["(a+)+$"] },
     { matchTools: ["a**"] },
     { allowDefaultApproval: true },
@@ -111,7 +111,7 @@ test("hook resolver profiles narrow budgets, enforce managed declarations and ro
     const plain = config(rawHandler)
     await saveConfig(plain, path)
     expect((await loadConfig(path)).hooks).toEqual(plain.hooks)
-    expect(HOOK_EVENTS.length).toBe(22)
+    expect(HOOK_EVENTS.length).toBe(24)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

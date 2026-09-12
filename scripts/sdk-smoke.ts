@@ -149,6 +149,14 @@ void consumer;
     "06-provider-auth.ts",
     "07-ui-extension.ts",
     "08-git-workflow.ts",
+    "09-background-command.ts",
+    "10-child-agent.ts",
+    "11-worktrees-peers.ts",
+    "12-goal.ts",
+    "13-workflow.ts",
+    "14-scheduler.ts",
+    "15-teams.ts",
+    "16-orchestration-integration.ts",
   ]) {
     assert.match(await run([process.execPath, join(root, "examples", file)]), /SDK_EXAMPLE_OK/)
     console.log(`Packed SDK example passed: ${file}`)
@@ -157,7 +165,7 @@ void consumer;
   console.log(
     `Packed native shell and checkpoint restore passed; Bun ${Bun.version}; Node ${(await run([node, "--version"])).trim()}`,
   )
-  console.log("SDK_PACKAGE_SMOKE_OK: fresh install, strict types, assets, Node boundary, eight examples")
+  console.log("SDK_PACKAGE_SMOKE_OK: fresh install, strict types, assets, Node boundary, sixteen examples")
 } finally {
   await rm(root, { recursive: true, force: true })
 }

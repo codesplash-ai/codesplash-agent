@@ -1057,3 +1057,93 @@ test("Linux desktop session metadata does not redact ids while real short secret
     }
   }
 })
+
+test("cancelled mutation callbacks retain checkpoint and cross-loop admission until settlement", async () => {
+  const { mkdtemp, rm, realpath } = await import("node:fs/promises")
+  const { tmpdir } = await import("node:os")
+  const { join } = await import("node:path")
+  const cwd = await realpath(await mkdtemp(join(tmpdir(), "cs-loop-mutation-")))
+  let release!: () => void, started!: () => void
+  const gate = new Promise<void>((r) => {
+    release = r
+  })
+  const entered = new Promise<void>((r) => {
+    started = r
+  })
+  const order: string[] = []
+  const firstTool = fakeTool({
+    name: "write_first",
+    run: async (_, context) => {
+      const actual = gate.then(() => {
+        order.push("actual-settled")
+      })
+      context.holdMutationUntil?.(actual)
+      started()
+      await new Promise<void>((_, reject) =>
+        context.signal.addEventListener("abort", () => reject(context.signal.reason), { once: true }),
+      )
+      return { text: "", label: "" }
+    },
+  })
+  const secondTool = fakeTool({
+    name: "write_second",
+    run: async () => {
+      order.push("second-write")
+      return { text: "", label: "" }
+    },
+  })
+  const loopFor = (tool: HarnessTool, name: string) =>
+    new CodesplashLoop({
+      cwd,
+      policy: POLICY,
+      registry: createToolRegistry([tool]),
+      events: new CodesplashEventFactory(name),
+      emit: () => {},
+      beforeMutation: async () => {
+        order.push(`${name}-before`)
+        return name
+      },
+      afterMutation: async () => {
+        order.push(`${name}-after`)
+      },
+    })
+  const providerFor = (name: string) =>
+    scriptedProvider([
+      [
+        { type: "tool_call", id: "call", name, input: {} },
+        { type: "done", stopReason: "tool_use" },
+      ],
+      [{ type: "done", stopReason: "end_turn" }],
+    ])
+  const first = loopFor(firstTool, "first"),
+    second = loopFor(secondTool, "second")
+  let firstRun: Promise<void> | undefined, secondRun: Promise<void> | undefined
+  try {
+    firstRun = first.runTurn(turnRequest(providerFor(firstTool.name)))
+    await entered
+    first.interrupt()
+    await firstRun
+    expect(order).toEqual(["first-before"])
+    secondRun = second.runTurn(turnRequest(providerFor(secondTool.name)))
+    // A disjoint claim can pass while the competing workspace remains held.
+    const { workspaceMutations } = await import("../../../src/core/orchestration/mutations.ts")
+    await workspaceMutations.run([`${cwd}-other`], AbortSignal.timeout(1000), async () => {})
+    expect(order).toEqual(["first-before"])
+    release()
+    await secondRun
+    expect(order).toEqual([
+      "first-before",
+      "actual-settled",
+      "first-after",
+      "second-before",
+      "second-write",
+      "second-after",
+    ])
+  } finally {
+    release()
+    first.interrupt()
+    second.interrupt()
+    await Promise.allSettled([firstRun, secondRun])
+    await rm(cwd, { recursive: true, force: true })
+  }
+})

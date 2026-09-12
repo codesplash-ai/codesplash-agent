@@ -371,3 +371,105 @@ test("SDK invalid form responses fall back to cancellation without stranding a c
     await f.close()
   }
 })
+
+test("SDK native commands use approvals and exclude private passthrough from subsequent model context", async () => {
+  const f = await fixture(),
+    requests: string[] = []
+  const local = provider()
+  local.stream = async function* (request) {
+    requests.push(JSON.stringify(request.messages))
+    yield { type: "text_delta", text: "checked" }
+    yield { type: "done", stopReason: "end_turn" }
+  }
+  const session = await createAgentSession({
+    ...f.options,
+    workspaceTrusted: true,
+    providers: [local],
+    respond: async () => ({ choice: "accept" }),
+  })
+  try {
+    const privateResult = (await session.runCommand("printf PRIVATE_PASSTHROUGH_M7", false)) as {
+      text: string
+      isError?: boolean
+    }
+    expect(privateResult.isError, privateResult.text).toBeFalsy()
+    expect(privateResult.text).toContain("PRIVATE_PASSTHROUGH_M7")
+    const visibleResult = (await session.runCommand("printf INCLUDED_PASSTHROUGH_M7", true)) as {
+      text: string
+      isError?: boolean
+    }
+    expect(visibleResult.isError).toBeFalsy()
+    await session.prompt("Check context")
+    expect(requests.at(-1)).toContain("INCLUDED_PASSTHROUGH_M7")
+    expect(requests.at(-1)).not.toContain("PRIVATE_PASSTHROUGH_M7")
+    const tasks = (await session.tasks({ action: "list" })) as Array<{ id: string; status: string }>
+    expect(tasks).toHaveLength(2)
+    expect(tasks.every((t) => t.status === "completed")).toBe(true)
+  } finally {
+    await session.close()
+    await f.close()
+  }
+})
+
+test("SDK can supply approved stdin to a private background command and refuses mode changes while live", async () => {
+  const f = await fixture(),
+    session = await createAgentSession({
+      ...f.options,
+      workspaceTrusted: true,
+      providers: [provider()],
+      respond: async () => ({ choice: "accept" }),
+    })
+  try {
+    const run = (await session.runCommand('read value; printf "PRIVATE_INPUT:%s\\n" "$value"', false)) as {
+      text: string
+      isError?: boolean
+    }
+    expect(run.isError, run.text).toBeFalsy()
+    const id = JSON.parse(run.text).task.id as string
+    await expect(session.setPermissionMode("plan")).rejects.toThrow("active tasks")
+    const stdin = (await session.tasks({ action: "stdin", id, text: "marker\n" })) as {
+      text: string
+      isError?: boolean
+    }
+    expect(stdin.isError, stdin.text).toBeFalsy()
+    const results = (await session.tasks({
+      action: "wait",
+      ids: [id],
+      all: true,
+      timeoutMs: 3000,
+    })) as Array<{ task: { status: string }; output: { text: string } }>
+    expect(results[0]!.task.status).toBe("completed")
+    expect(results[0]!.output.text).toContain("PRIVATE_INPUT:marker")
+  } finally {
+    await session.close()
+    await f.close()
+  }
+})
+
+test("SDK command tasks obey explicit tool denial and headless approval defaults", async () => {
+  const f = await fixture()
+  try {
+    for (const denied of [false, true]) {
+      const session = await createAgentSession({
+        ...f.options,
+        config: {
+          ...f.options.config,
+          overrides: ["memory.enabled=false", ...(denied ? ['permissions.deny=["exec_command"]'] : [])],
+        },
+        workspaceTrusted: true,
+        providers: [provider()],
+        ...(denied ? { respond: async () => ({ choice: "accept" }) } : {}),
+      })
+      try {
+        const result = (await session.runCommand("printf forbidden > forbidden.txt")) as { isError?: boolean }
+        expect(result.isError).toBe(true)
+        expect(await Bun.file(join(f.root, "forbidden.txt")).exists()).toBe(false)
+        expect(await session.tasks({ action: "list" })).toEqual([])
+      } finally {
+        await session.close()
+      }
+    }
+  } finally {
+    await f.close()
+  }
+})

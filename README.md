@@ -409,8 +409,7 @@ Read the changed files, identify affected behavior, and run the relevant checks.
 `disable-model-invocation: true`, the model can load the skill through its `skill` tool.
 Only metadata enters the initial prompt; invocation loads the body. Frontmatter uses a flat
 subset of YAML (strings, booleans and multiline strings), and skill bodies are limited to 6 KiB.
-Skill instructions grant no permissions. `context: fork` is recognized but requires the future
-subagent milestone. `/create-skill name` previews a scaffold; adding `--write` creates it.
+Skill instructions grant no permissions. `context: fork` executes an owned native child with fresh context and the parent’s permission ceilings. `/create-skill name` previews a scaffold; adding `--write` creates it.
 
 User-wide counterparts live under `context/` inside the CodeSplash configuration directory:
 `context/AGENTS.md`, `context/commands/*.md`, and `context/skills/<name>/SKILL.md`. For duplicate
@@ -445,7 +444,7 @@ codesplash create-skill verify --write
 
 Import maps supported rules, commands and skills, records source hashes, and reports unsupported
 settings fields without their values. It never overwrites existing files, migrates credentials,
-or activates MCP. General settings/session migration and forked execution remain later work.
+or activates MCP. Supported agent definitions import disabled and require fingerprint review before activation.
 `debug prompt` uses the governed loader too; reads that need approval require an interactive session.
 
 #### Custom providers (BYOK)
@@ -622,7 +621,7 @@ refuse durable login. Logout removes local credentials and does not revoke remot
 ### Native lifecycle hooks
 
 Hooks run reviewed command or HTTP handlers at live session, input, turn, tool, permission,
-compaction and resource/config/directory/branch boundaries. History replay never runs handlers.
+compaction, child lifecycle and resource/config/directory/branch boundaries. History replay never runs handlers.
 Declare handlers in user or trusted project configuration; they are disabled by default:
 
 ```toml
@@ -671,7 +670,9 @@ before final permissions, target extraction, checkpoints and execution. `allowDe
 applies only to an ordinary default prompt; explicit ask/deny and dangerous floors remain binding.
 `allowContinuation` enables `turn.stop` requests within `[hooks.continuation]`: at most eight,
 120 seconds, and a token allowance (default 32768). Foreground input, interruption, provider failures
-and harness limits take precedence. No prompt/agent hook engines or M7 subagent events are enabled.
+and harness limits take precedence. Native children dispatch `subagent.start` and `subagent.stop`
+with their task and agent origin through the same reviewed hook runtime. Prompt/agent hook engines
+are not supported.
 
 `async = true` supports observation only, with at most four owned async handlers. `once = "turn"`
 or `"session"` applies per handler fingerprint and event. Intent receipts prevent replay of uncertain
@@ -936,7 +937,7 @@ A native plugin is a dedicated directory with one `codesplash-plugin.json`:
 
 `hooks` and `mcp` are named native handler/server tables. Use `${PLUGIN_ROOT}/file`
 for package paths in process arguments; command names such as `bun` resolve normally.
-`agents` may list `agents/name.md` metadata, which remains inactive until M7.
+`agents` lists native `agents/name.md` child definitions. A selected plugin must pass its existing integrity checks before a definition can run.
 LSP declarations are rejected explicitly. Native manifests are required; foreign
 plugin APIs are not automatically converted.
 
@@ -1003,4 +1004,169 @@ inactive source references until explicit review and installation.
 
 The package exports `createAgentSession` for Bun applications, with native tools/providers,
 approvals, events, explicit recording/resume and session controls. Imports are inert; session
-execution requires Bun >=1.3.14 on macOS/Linux. See the [SDK guide and eight runnable local examples](examples/sdk/README.md).
+execution requires Bun >=1.3.14 on macOS/Linux. See the [SDK guide and runnable local examples](examples/sdk/README.md).
+
+### Native background commands
+
+Use `!command` in the native composer to execute through approvals and include its result in model
+context. `!!command` excludes the command and output from model context while keeping it visible in
+the local transcript. `/tasks` opens a live task/output view; Ctrl+B lets a foreground command continue
+in the background. `/tasks stdin ID "hello\n"`, `resize ID COLS ROWS`, `output ID`, `kill ID` and
+`wait any|all IDS` control the owned terminal. Closing the session stops its commands. A persisted task
+record never resumes an old process. Background writes retain workspace mutation/checkpoint admission
+until they stop; use the model's `exec_command` readOnly option for enforced read-only concurrency.
+
+Shell state is explicit: `codesplash shell-state capture SNAPSHOT --shell bash --env LANG
+--definitions DEFINITIONS` imports selected environment values and alias/function source without
+executing startup files. Review with `shell-state review SNAPSHOT`, then trust the exact
+`--fingerprint HASH`. The native exec_command snapshot option and SDK runCommand accept that path
+and fingerprint; changed files lose trust, credential/startup environment names are refused and
+replay stays sandboxed. The snapshot must be in the session's authorized read roots.
+
+
+### Native child agents
+
+`agent` starts a fresh child session; `list_agents` lists definitions. The built-in `explore` and
+`plan` roles enforce read-only access. `general` inherits the parent's available authority. Children
+share bounded task admission with commands, and `task_output`, `task_wait`, `task_kill` and `/tasks`
+handle their output and lifecycle. Child approvals include their origin; closing the parent stops its
+children. Tokens and cost estimates include child work.
+
+Definitions live in `.codesplash/agents/name.md`, the user `context/agents` directory, verified plugins,
+or `[agents.definitions.NAME]` configuration. Names can be qualified as `project/name`, `user/name`,
+`config/name`, `builtin/name` or `plugin/id/name`. Unqualified names prefer project, config, user, then
+built-in definitions. Definition settings only narrow parent access. MCP defaults to none; select
+`all`, `none`, `only:server-a,server-b` or `except:server-a` in Markdown. Configuration uses `mcp.only`
+or `mcp.except` arrays. Tools use exact names; Markdown lists are comma-separated.
+
+```sh
+codesplash agents list --trust
+codesplash agents create reviewer --write
+codesplash agents show project/reviewer --trust
+codesplash agents enable project/reviewer --fingerprint <reviewed-hash> --trust
+```
+
+Creation and import leave definitions disabled. Review the prompt, model and scope before enabling.
+SDK `spawnAgent({ agent: "explore", prompt: "Inspect the parser", background: true })` returns an owned
+task; use `tasks({ action: "wait", ids: [id], all: true, timeoutMs: 10000 })` to wait. `resume: id`
+continues the same definition/persona/model/cwd identity; changed sources or authority refuse resume.
+Recorded child transcripts survive parent restart; no-history children remain in memory. Uncertain
+execution requires explicit `reviewUncertain: true` and a new prompt. It never resumes an old PID.
+
+Each child defaults to 65,536 tokens and 120 seconds, narrowed by ancestor budgets. Output requests
+reserve estimated input and bounded output before provider dispatch; unknown usage stops further
+requests. Nested spawns at full capacity fail explicitly so parents cannot deadlock waiting for a slot.
+
+Native orchestration also supports explicit context forks, owned Git worktrees and local peers.
+Use `spawnAgent({ agent: "explore", prompt: "…", context: "fork", worktree: id })` for an independent
+context snapshot in an existing owned worktree. `directive` adds bounded instructions. Resume and
+`peers({ action: "followup", target, prompt })` preserve the recorded context and capability identity.
+`send_message`, `wait_agent` and `interrupt_agent` operate the root's peer graph. Queued messages
+arrive as attributed data at a provider boundary; an idle peer waits for an explicit followup.
+
+```sh
+codesplash worktree create HEAD --apply --trust
+codesplash worktree list
+codesplash worktree preview WORKTREE_ID
+codesplash worktree apply WORKTREE_ID --fingerprint REVIEWED_HASH --apply --trust
+codesplash worktree recover WORKTREE_ID
+codesplash worktree rollback WORKTREE_ID --apply --trust
+codesplash worktree remove WORKTREE_ID --apply --trust
+codesplash worktree gc --apply --trust
+```
+
+Worktrees live in `.codesplash-worktrees/<id>` beneath the repository. Open a standalone native
+session with `codesplash run --engine codesplash --path WORKTREE_PATH --trust`; it holds ownership until close.
+SDK `worktrees()` exposes the same lifecycle. Creation lists excluded credential/configuration or
+denied paths and marks those entries intentionally absent in Git's index. Host operations use raw
+objects and guarded file writes without running repository hooks or filters. Per-file ask rules
+remain separate: read-ask paths are omitted and write-ask paths cannot be applied through this control. Limits are 16 owned
+trees, 5,000 tracked files, 64 MiB snapshots, 256 MiB per tree, and 128 changed files of at most 2 MiB
+per apply. Symlink/submodule checkouts require separate manual isolation. Apply refuses diverged
+files; source and recovery refs remain available. Interrupted replacement supports explicit
+`rollback`, preserving concurrent external edits. Removal refuses active, dirty, ignored or hidden
+content. Recovery refs are retained after removal.
+
+For cross-session data, `peers({ action: "endpoint" })` exposes an explicitly approved private Unix
+endpoint while its owner lives. Another session can use `send_message` with that endpoint. External
+senders are labeled as capability holders; sender claims in payloads do not grant user authority.
+CLI `codesplash peer listen --duration 60` opens a temporary data-only mailbox and prints its endpoint;
+`codesplash peer send ENDPOINT root 'message'` sends to it. Endpoints authenticate each bounded
+message, disappear on close, and never start provider work automatically. These local controls use
+macOS/Linux facilities and do not require Docker. See SDK example 11 for a complete local flow.
+
+Native goals and workflows use bounded, owned background tasks. `session.goals({action:"create",
+objective,limits:{tokens,timeoutMs,rounds}})` records an explicit goal; `start` runs worker/verifier/
+strategist rounds. `get`, `pause` and `resume` expose cumulative budgets and evidence. Verification
+requires successful observed read-only tools; budget exhaustion and unknown usage pause work.
+SDK persistence stores these journals with the session; the default ephemeral SDK keeps them in memory.
+
+`codesplash workflows create NAME --write` creates a disabled JSON definition. Inspect with
+`workflows show NAME`, then `workflows enable NAME --fingerprint SOURCE_SHA --apply` after reviewing
+its exact source. Definitions contain prompt, command, verification and parallel-join steps with
+explicit dependencies and token/time limits. `session.workflows` supports reviewed inline definitions
+or saved names, listing, pause/resume, per-step review and forgetting inactive resolved runs. Successful
+steps are skipped on resume; failed or uncertain effects require explicit review before another attempt.
+Saved source, model, configuration and workspace identity are rechecked. Root task retention/capacity
+limits can pause a run; inspecting/forgetting completed task records remains explicit.
+
+`codesplash automation goal OBJECTIVE --tokens 200000 --timeout-ms 120000 --rounds 3 --apply --trust`
+and `automation workflow NAME --fingerprint HASH --apply --trust` run finite local owners, recording
+sessions for later `automation inspect SESSION` or `automation resume SESSION RECORD --apply --trust`.
+Use `--store ROOT` to select the session store. Requests default to decline; `--approve` explicitly
+approves requests for that bounded invocation. SDK responders or the interactive session can review
+individual requests instead. Closing the owner stops work; persistence does not install a daemon.
+`workflows import SOURCE --name NAME [--write]` previews/imports native JSON or a literal one-agent
+Grok Rhai script as disabled work. Other Rhai constructs require manual translation and are never evaluated.
+
+`session.schedules` provides create/list/enable/delete/review, start/stop of a finite worker, and an
+explicit manual `run`. Schedules persist separately under the selected data directory; configured
+history-disabled policy refuses scheduling. Creation is disabled by default. Review its fingerprint
+before enabling, and explicitly start an owner to run future occurrences. Intervals range from one
+minute to seven days; the supported UTC cron subset is `*/N * * * *` where N divides 60. Every schedule
+has per-run token/time limits, an occurrence cap, a lifetime token ceiling and expiry. Missed intervals
+coalesce into one occurrence. A private workspace lease prevents two owners from dispatching it.
+
+Use `codesplash scheduler create SPEC.json --write`, `scheduler list`, and
+`scheduler enable ID --fingerprint HASH --apply --trust`. `scheduler worker --duration-ms 3600000
+--apply --trust` owns future occurrences for up to one hour; `scheduler run ID --apply --trust` explicitly
+runs one occurrence now using the same budgets and journal. Requests default to decline; `--approve`
+authorizes them for that invocation. `scheduler review OCCURRENCE --apply` acknowledges checked effects
+before future enable; uncertain occurrences are never automatically replayed. `scheduler import
+native|grok|claude SOURCE --budgets BUDGETS.json [--write]` translates supported recurring prompt semantics
+as disabled work; unsupported calendar/owner settings require manual review.
+
+`/loop 5m PROMPT` creates a reviewed recurring prompt with four occurrences, 65,536 tokens and two
+minutes per occurrence, a 262,144-token lifetime ceiling, one-day expiry and a one-hour local owner.
+`/loop list` shows status; `/loop stop` stops that owner. A schedule with `watch:"src"` waits for coalesced
+file changes and its cadence. Hidden/dependency/credential and denied paths are excluded. Notifications
+are suppressed while owned work is active and briefly after settlement to prevent feedback; external
+edits during that window may require another edit or an explicit manual occurrence. Watch errors or
+oversized batches pause the schedule for review. Closing the owner stops execution; no daemon is installed.
+
+Named teams use the same native child sessions, task budgets and approval rules. `/teams` (or
+`/dashboard`) shows live member status, inclusive usage, parent edges and output. Select a member
+and press **R** to queue a data reply, **D** to explicitly dispatch/resume work, or **K** to interrupt.
+Create a roster with `/teams create {"name":"review","members":[{"name":"reader","agent":"builtin/explore","role":"reviewer","prompt":"Inspect the workspace"}]}`.
+`/teams coordinator review` persists a main-session mode restricted to orchestration tools;
+`/teams coordinator off` leaves it. Delegated workers retain their original scoped permissions.
+
+`/teams panes review` opens optional read-only tmux views on a private, task-owned server;
+`/teams close-panes` closes them. Attach from another terminal with the displayed socket:
+`tmux -S SOCKET attach`. These views do not own another agent session. Missing tmux leaves the
+in-process dashboard available. Closing the owner stops its children and panes; reopening restores
+rosters and topology without starting work. Teams are capped at eight per root and sixteen identities
+per team, including nested delegates. Member usage includes descendants; root totals count it once.
+
+For a finite recorded CLI owner, use `codesplash teams run roster.json --apply --trust --approve
+--duration-ms 120000 [--panes] [--model ID] [--store ROOT]`. It dispatches each named member once and
+exits when the work settles or the deadline is reached (maximum one hour). `--approve` authorizes
+requests only for that invocation; omitting it declines requests. `codesplash teams inspect SESSION`
+reads the durable roster. SDK `session.teams(...)` exposes the same controls; example 15 exercises
+reply versus dispatch and stable member identity.
+
+Owned task completion also appears in the normal event feed with bounded, sanitized output.
+Model-visible task statuses are delivered as data at the next provider boundary; they never start
+a turn automatically. Context-excluded commands remain excluded from those model notices.
+The SDK includes sixteen runnable local examples; example 16 combines parallel team writes,
+a workflow command and a scheduled child in one session. `codesplash agent` is an alias for `agents`.

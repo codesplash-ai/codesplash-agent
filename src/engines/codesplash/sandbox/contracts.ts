@@ -36,6 +36,14 @@ export type ExecutionResult = {
 }
 
 export interface SandboxRuntime {
+  openTerminal?(
+    argv: string[],
+    options: import("./terminal.ts").TerminalOptions,
+    signal: AbortSignal,
+    output: (bytes: Uint8Array) => void,
+    mode?: PermissionMode,
+    readOnly?: boolean,
+  ): Promise<import("./terminal.ts").SandboxTerminal>
   /** Reviewed external handlers use fixed grants and literal JSON stdin, never temporary grants. */
   executeFixed?(
     argv: string[],
@@ -63,6 +71,7 @@ export interface SandboxRuntime {
   endTurn(): void
   resetGrants?(): void
   close(): Promise<void>
+  outputSanitizer?(): { push(text: string, final?: boolean): string }
   sanitize?(value: string): string
   status?(): string
 }

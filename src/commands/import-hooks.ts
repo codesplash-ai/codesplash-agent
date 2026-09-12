@@ -66,7 +66,7 @@ export function previewHookSettings(preview: SettingsPreview, raw: unknown, exis
     if (!events || !Array.isArray(value) || value.length > 64) {
       unsupported(
         `hooks.${name}`,
-        "Unsupported event or declaration shape; subagent and reasoning events remain inactive",
+        "Unsupported foreign event or declaration shape; adapt it to a supported native hook event",
       )
       continue
     }

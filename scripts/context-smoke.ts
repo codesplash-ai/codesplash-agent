@@ -56,9 +56,10 @@ try {
   await mkdir(config)
   for (let i = 1; i <= 32; i++)
     await writeFile(join(cwd, `fixture-${i}.txt`), `Fixture ${i}\n${"bounded evidence\n".repeat(3000)}`)
+  // Keep room for the complete native tool catalog; 32 large reads still force real compaction.
   await writeFile(
     join(config, "config.toml"),
-    `schemaVersion = 1\n[providers.context-smoke]\nprotocol = "openai"\nbaseUrl = "http://127.0.0.1:${server.port}"\nrequiresKey = false\nkeyEnvVar = "CONTEXT_SMOKE_UNUSED"\n[[providers.context-smoke.models]]\nid = "context-smoke"\ncontextWindow = 24000\nmaxOutputTokens = 1024\n`,
+    `schemaVersion = 1\n[providers.context-smoke]\nprotocol = "openai"\nbaseUrl = "http://127.0.0.1:${server.port}"\nrequiresKey = false\nkeyEnvVar = "CONTEXT_SMOKE_UNUSED"\n[[providers.context-smoke.models]]\nid = "context-smoke"\ncontextWindow = 32768\nmaxOutputTokens = 1024\n`,
   )
   const environment = {
     ...process.env,

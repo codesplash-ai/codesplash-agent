@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createPermissionRuntime } from "../../../src/engines/codesplash/permissions.ts"
 import { childEnvironment, SecretSanitizer } from "../../../src/engines/codesplash/sandbox/env-policy.ts"
+import { hardenLinuxMounts } from "../../../src/engines/codesplash/sandbox/linux-mounts.ts"
 import {
   canonicalHost,
   createProfile,
@@ -15,6 +16,53 @@ import { NativeSandbox } from "../../../src/engines/codesplash/sandbox/runtime.t
 import { writeFileTool } from "../../../src/engines/codesplash/tools/write.ts"
 
 describe("native sandbox contracts", () => {
+  test("Linux configuration masks retain directory shape when another owner creates the mountpoint", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codesplash-mount-race-"))
+    const config = join(root, ".codesplash")
+    const sentinel = join(root, "denied")
+    const wrapper = [
+      "bwrap",
+      "--ro-bind",
+      "/",
+      "/",
+      "--bind",
+      root,
+      root,
+      "--ro-bind",
+      "/dev/null",
+      config,
+      "--",
+      "/bin/sh",
+      "-c",
+      'test -d "$1" && ! touch "$1/blocked" && printf protected',
+      "probe",
+      config,
+    ]
+    const policy = { allowWrite: [root], denyWrite: [config] }
+    try {
+      await writeFile(sentinel, "")
+      const absent = hardenLinuxMounts(wrapper, policy, sentinel)
+      await mkdir(config)
+      const appeared = hardenLinuxMounts(wrapper, policy, sentinel)
+      for (const argv of [absent, appeared]) {
+        const source = argv[argv.indexOf(config) - 1]!
+        expect((await stat(source)).isDirectory()).toBe(true)
+        if (process.platform === "linux") {
+          const child = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe" })
+          const [out, err, code] = await Promise.all([
+            new Response(child.stdout).text(),
+            new Response(child.stderr).text(),
+            child.exited,
+          ])
+          expect(code, err).toBe(0)
+          expect(out).toBe("protected")
+          expect(await Bun.file(join(config, "blocked")).exists()).toBe(false)
+        }
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
   test("filters credentials and shell startup injection without altering parent env", () => {
     const source = {
       PATH: "/usr/bin:/bin",

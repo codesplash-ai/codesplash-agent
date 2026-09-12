@@ -99,8 +99,62 @@ export class NativeSandbox implements SandboxRuntime {
     this.#secretValues.clear()
     await this.#log.flush()
   }
+  outputSanitizer(): SecretSanitizer {
+    return new SecretSanitizer([...this.#secretValues], true)
+  }
   sanitize(value: string): string {
     return redactSensitiveText(new SecretSanitizer([...this.#secretValues]).redact(value))
+  }
+  async openTerminal(
+    argv: string[],
+    options: import("./terminal.ts").TerminalOptions,
+    signal: AbortSignal,
+    output: (bytes: Uint8Array) => void,
+    mode: PermissionMode = "default",
+    readOnly = false,
+  ): Promise<import("./terminal.ts").SandboxTerminal> {
+    if (this.#closed) throw new Error("Sandbox session closed")
+    if (this.#streams.size + this.#streamOpenings.size >= 16)
+      throw new Error("Sandbox terminal/process limit reached")
+    const profile = {
+      ...this.profile,
+      ...(mode === "plan" || readOnly ? { mode: "read-only" as const, writeRoots: [] } : {}),
+    }
+    const decoder = new TextDecoder(),
+      sanitizer = new SecretSanitizer([...this.#secretValues], true)
+    const opening = (async () => {
+      const { openSandboxTerminal } = await import("./terminal.ts")
+      const terminal = await openSandboxTerminal(
+        profile,
+        argv,
+        options,
+        AbortSignal.any([signal, this.#streamAbort.signal]),
+        (bytes) => {
+          const text = sanitizer.push(decoder.decode(bytes, { stream: true }))
+          if (text) output(Buffer.from(text))
+        },
+        [...this.#secretValues],
+      )
+      if (this.#closed) {
+        await terminal.close()
+        throw new Error("Sandbox session closed")
+      }
+      this.#streams.add(terminal)
+      void terminal.finished
+        .finally(() => {
+          this.#streams.delete(terminal)
+          const tail = sanitizer.push(decoder.decode(), true)
+          if (tail) output(Buffer.from(tail))
+        })
+        .catch(() => {})
+      return terminal
+    })()
+    this.#streamOpenings.add(opening)
+    try {
+      return await opening
+    } finally {
+      this.#streamOpenings.delete(opening)
+    }
   }
   async openDuplex(
     argv: string[],

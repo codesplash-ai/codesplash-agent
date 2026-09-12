@@ -238,3 +238,33 @@ test("retention protects pinned and branch-bound checkpoints and collects abando
     f.close()
   }
 })
+test("checkpoint captures tolerate unrelated orchestration revisions but reject checkpoint edits", async () => {
+  const f = await checkpointFixture()
+  try {
+    writeFileSync(join(f.cwd, "file.txt"), "before")
+    const capture = f.store.capture.bind(f.store)
+    f.store.capture = async (signal) => {
+      const snapshot = await capture(signal)
+      const before = f.store.state.read()
+      f.store.state.update(before.revision, "task/usage", (state) => {
+        state.values.testUsage = Number(state.values.testUsage ?? 0) + 1
+      })
+      return snapshot
+    }
+    const id = await f.store.begin("background command")
+    writeFileSync(join(f.cwd, "file.txt"), "after")
+    await f.store.end(id)
+    expect(f.store.step(id!).after).toBeDefined()
+    expect(f.store.state.read().state.values.testUsage).toBe(2)
+    f.store.capture = async (signal) => {
+      const snapshot = await capture(signal)
+      f.store.pin(id!, true, f.store.view().revision)
+      return snapshot
+    }
+    await expect(f.store.begin("changed checkpoint state")).rejects.toThrow("Checkpoint state changed")
+    expect(f.store.view().steps).toHaveLength(1)
+    expect(f.store.view().pins).toEqual([id!])
+  } finally {
+    f.close()
+  }
+})

@@ -333,31 +333,41 @@ export class ExtensionRuntime {
           run: async (input, context) => {
             checked(input)
             tool.permission(input, context)
-            return this.#invoke(owner, context.signal, async (signal) => {
-              await this.#reviewCurrent(owner, signal)
-              let progressCount = 0
-              const outcome = await definition.run(structuredClone(input), {
-                cwd: context.cwd,
-                signal,
-                progress: (text) => {
-                  this.#assert(owner)
-                  signal.throwIfAborted()
-                  if (++progressCount > 256 || typeof text !== "string" || text.length > 16384)
-                    throw new Error("Extension progress limit exceeded")
-                  context.progress?.(this.sanitize(text))
-                },
-              })
-              signal.throwIfAborted()
-              this.#assert(owner)
-              boundedJson(outcome, 4 * 1024 * 1024, 20000)
-              if (typeof outcome.text !== "string" || typeof outcome.label !== "string" || outcome.planSteps)
-                throw new Error("Invalid extension tool outcome")
-              return {
-                ...outcome,
-                text: this.sanitize(outcome.text),
-                label: this.sanitize(outcome.label).slice(0, 512),
-              }
-            })
+            return this.#invoke(
+              owner,
+              context.signal,
+              async (signal) => {
+                await this.#reviewCurrent(owner, signal)
+                let progressCount = 0
+                const outcome = await definition.run(structuredClone(input), {
+                  cwd: context.cwd,
+                  signal,
+                  progress: (text) => {
+                    this.#assert(owner)
+                    signal.throwIfAborted()
+                    if (++progressCount > 256 || typeof text !== "string" || text.length > 16384)
+                      throw new Error("Extension progress limit exceeded")
+                    context.progress?.(this.sanitize(text))
+                  },
+                })
+                signal.throwIfAborted()
+                this.#assert(owner)
+                boundedJson(outcome, 4 * 1024 * 1024, 20000)
+                if (
+                  typeof outcome.text !== "string" ||
+                  typeof outcome.label !== "string" ||
+                  outcome.planSteps
+                )
+                  throw new Error("Invalid extension tool outcome")
+                return {
+                  ...outcome,
+                  text: this.sanitize(outcome.text),
+                  label: this.sanitize(outcome.label).slice(0, 512),
+                }
+              },
+              false,
+              context.holdMutationUntil,
+            )
           },
         }
         byName.set(name, tool)
@@ -600,6 +610,7 @@ export class ExtensionRuntime {
     parentSignal: AbortSignal,
     operation: (signal: AbortSignal) => Promise<T>,
     staging = false,
+    holdUntil?: (pending: Promise<unknown>) => void,
   ): Promise<T> {
     this.#assert(owner, staging)
     if (owner.pending.size >= 16) throw new Error("Extension callback concurrency limit exceeded")
@@ -623,6 +634,7 @@ export class ExtensionRuntime {
       return this.#scope.run(signal, () => operation(signal))
     })
     owner.pending.add(pending)
+    holdUntil?.(pending)
     void pending.finally(() => owner.pending.delete(pending)).catch(() => {})
     try {
       const result = await Promise.race([pending, cancelled])

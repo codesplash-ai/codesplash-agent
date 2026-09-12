@@ -2,7 +2,7 @@ import { redactSensitiveText } from "../../../core/redaction.ts"
 
 const SAFE_NAMES = new Set(["LANG", "LC_ALL", "LC_CTYPE", "TERM", "COLORTERM", "TZ"])
 const INJECTION =
-  /^(?:BASH_ENV|ENV|IFS|SHELLOPTS|BASHOPTS|CDPATH|GLOBIGNORE|NODE_OPTIONS|NODE_PATH|BUN_OPTIONS|PYTHONPATH|PYTHONSTARTUP|RUBYOPT|PERL5OPT|PERL5LIB|GIT_CONFIG.*|GIT_SSH.*|LD_.*|DYLD_.*|.*PROXY)$/i
+  /^(?:BASH_ENV|ENV|ZDOTDIR|IFS|SHELLOPTS|BASHOPTS|CDPATH|GLOBIGNORE|NODE_OPTIONS|NODE_PATH|BUN_OPTIONS|PYTHONPATH|PYTHONSTARTUP|RUBYOPT|PERL5OPT|PERL5LIB|GIT_CONFIG.*|GIT_SSH.*|LD_.*|DYLD_.*|.*PROXY)$/i
 export const SENSITIVE_NAME = /(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|AUTHORIZATION|COOKIE|SESSION)/i
 
 export function validateEnvironmentName(name: string): void {
@@ -51,13 +51,43 @@ export class SecretSanitizer {
   #coveredPrefix = 0
   readonly #secrets: string[]
   readonly #reserve: number
-  constructor(values: readonly string[]) {
+  readonly #prefixes?: Array<{ text: string; failure: Uint32Array; matched: number }>
+  constructor(values: readonly string[], eager = false) {
     this.#secrets = [...new Set(values.filter(Boolean))].sort((a, b) => b.length - a.length)
     this.#reserve = Math.max(1, ...this.#secrets.map((s) => s.length)) - 1
+    if (eager) {
+      if (this.#secrets.length > 256 || this.#secrets.reduce((n, text) => n + text.length, 0) > 128 * 1024)
+        throw new Error("Interactive redaction patterns exceed the bounded budget")
+      this.#prefixes = this.#secrets.map((text) => {
+        const failure = new Uint32Array(text.length)
+        for (let i = 1, j = 0; i < text.length; i++) {
+          while (j && text[i] !== text[j]) j = failure[j - 1] ?? 0
+          if (text[i] === text[j]) j++
+          failure[i] = j
+        }
+        return { text, failure, matched: 0 }
+      })
+    }
   }
   push(chunk: string, final = false): string {
     this.#pending += chunk
-    const end = final ? this.#pending.length : Math.max(0, this.#pending.length - this.#reserve)
+    let reserve = this.#reserve
+    if (this.#prefixes) {
+      reserve = 0
+      for (const pattern of this.#prefixes) {
+        for (let i = 0; i < chunk.length; i++) {
+          while (pattern.matched && chunk[i] !== pattern.text[pattern.matched])
+            pattern.matched = pattern.failure[pattern.matched - 1] ?? 0
+          if (chunk[i] === pattern.text[pattern.matched]) pattern.matched++
+          if (pattern.matched === pattern.text.length)
+            pattern.matched = pattern.failure[pattern.matched - 1] ?? 0
+        }
+        reserve = Math.max(reserve, pattern.matched)
+      }
+    }
+    // PTYs release text which cannot begin a secret immediately; a possible secret prefix
+    // remains buffered. The legacy fixed-suffix mode stays unchanged for other transports.
+    const end = final ? this.#pending.length : Math.max(0, this.#pending.length - reserve)
     if (end === 0) return ""
     const ranges = this.#ranges(this.#pending, this.#coveredPrefix)
     let output = "",

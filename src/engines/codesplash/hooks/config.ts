@@ -99,7 +99,7 @@ export function validateHookConfig(raw: unknown): HookConfig {
       throw new Error("Hook kind must be command or http")
     const events = array(value.events, "events", 32)
     if (!events.length || events.some((event) => !HOOK_EVENTS.includes(event as HookEventName)))
-      throw new Error("Unsupported hook event; subagent events require M7")
+      throw new Error("Unsupported hook event")
     const matchTools = array(value.matchTools ?? [], "matchTools", 16),
       matchSources = array(value.matchSources ?? [], "matchSources", 16)
     if (

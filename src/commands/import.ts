@@ -5,6 +5,7 @@ import { writeResources } from "../engines/codesplash/inputs/authoring.ts"
 import { resourceCandidate, resourceMetadata } from "../engines/codesplash/inputs/catalog.ts"
 import { resourcePaths, safeRead } from "../engines/codesplash/inputs/io.ts"
 import { frontmatter } from "../engines/codesplash/inputs/syntax.ts"
+import { parseAgentMarkdown } from "../engines/codesplash/orchestration/definitions.ts"
 
 export type ImportPreview = {
   vendor: "claude" | "cursor"
@@ -32,6 +33,75 @@ export async function previewImport(
   const paths = await resourcePaths(source)
   const rules: Array<{ path: string; text: string }> = []
   for (const path of paths) {
+    if (vendor === "claude" && /^(?:\.claude\/)?agents\/[a-z0-9-]+\.md$/.test(path)) {
+      const text = await safeRead(source, path, undefined, 65536)
+      const hash = createHash("sha256").update(text).digest("hex")
+      preview.sourceHashes[path] = hash
+      try {
+        const name = path.split("/").at(-1)!.slice(0, -3)
+        const { fields, body } = frontmatter(text)
+        const supported = ["name", "description", "tools", "disallowedTools", "model", "permissionMode"]
+        if (Object.keys(fields).some((key) => !supported.includes(key)))
+          throw new Error("Unsupported agent settings require manual review")
+        const mapping: Record<string, string> = {
+          Read: "read_file",
+          Write: "write_file",
+          Edit: "edit_file",
+          Glob: "glob",
+          Grep: "grep",
+          Bash: "bash",
+          WebFetch: "web_fetch",
+          WebSearch: "web_search",
+          Task: "agent",
+        }
+        const lines = [
+          "---",
+          `name: ${name}`,
+          `description: ${JSON.stringify(fields.description ?? name)}`,
+          "enabled: false",
+        ]
+        for (const [key, target] of [
+          ["tools", "tools"],
+          ["disallowedTools", "denyTools"],
+        ] as const)
+          if (fields[key] !== undefined) {
+            if (typeof fields[key] !== "string") throw new Error("Unsupported agent tools")
+            const names = fields[key]
+              .split(",")
+              .map((value) => value.trim())
+              .filter(Boolean)
+            if (names.some((name) => !mapping[name])) throw new Error("Unsupported agent tool mapping")
+            lines.push(`${target}: ${names.map((name) => mapping[name]).join(", ")}`)
+          }
+        if (fields.model !== undefined) {
+          // Vendor aliases do not identify a native provider/model unambiguously.
+          if (typeof fields.model !== "string" || !fields.model.includes("/"))
+            throw new Error("Select a native provider/model after import")
+          lines.push(`model: ${JSON.stringify(fields.model)}`)
+        }
+        const modes: Record<string, string> = {
+          default: "default",
+          plan: "plan",
+          acceptEdits: "accept-edits",
+        }
+        const mode = fields.permissionMode ?? "default"
+        if (typeof mode !== "string" || !modes[mode]) throw new Error("Unsupported agent permission mode")
+        lines.push(`mode: ${modes[mode]}`, "mcp: none", "---", body)
+        const translated = lines.join("\n")
+        parseAgentMarkdown(translated, name)
+        preview.files.push({
+          source: path,
+          path: `.codesplash/agents/${name}.md`,
+          text: translated,
+          sha256: createHash("sha256").update(translated).digest("hex"),
+        })
+      } catch (error) {
+        preview.unsupported.push(
+          `${path}: ${error instanceof Error ? error.message : "Unsupported agent definition"}`,
+        )
+      }
+      continue
+    }
     const normalized = vendor === "claude" && /^(commands|skills)\//.test(path) ? `.claude/${path}` : path
     const candidate = resourceCandidate(normalized, false, {
       claudeRules: true,
@@ -53,8 +123,9 @@ export async function previewImport(
       continue
     }
     if (metadata.fork) {
-      preview.unsupported.push(`${path}: forked execution requires M7`)
-      continue
+      preview.unsupported.push(
+        `${path}: forked resource saved with .disabled suffix; review and rename to .md before invocation`,
+      )
     }
     if (candidate.kind === "rule") {
       rules.push({ path, text: frontmatter(text).body })
@@ -64,8 +135,8 @@ export async function previewImport(
       source: path,
       path:
         candidate.kind === "skill"
-          ? `.codesplash/skills/${candidate.name}/SKILL.md`
-          : `.codesplash/commands/${candidate.name}.md`,
+          ? `.codesplash/skills/${candidate.name}/SKILL.md${metadata.fork ? ".disabled" : ""}`
+          : `.codesplash/commands/${candidate.name}.md${metadata.fork ? ".disabled" : ""}`,
       text,
       sha256: createHash("sha256").update(text).digest("hex"),
     })
@@ -99,7 +170,7 @@ export async function previewImport(
     }
   }
   preview.unsupported.push(
-    "Authentication, sessions/history, settings behavior and MCP execution are not migrated.",
+    "Agent definitions import disabled and require fingerprint review/activation. Authentication, sessions/history, settings behavior and MCP execution are not migrated.",
   )
   return preview
 }

@@ -1,5 +1,5 @@
-import { existsSync, statSync } from "node:fs"
-import { basename } from "node:path"
+import { existsSync, mkdirSync, statSync } from "node:fs"
+import { basename, dirname, join } from "node:path"
 import { contains } from "./profile.ts"
 
 /** Harden the pinned backend's generated bwrap argv; never parse workload shell text. */
@@ -38,6 +38,23 @@ export function hardenLinuxMounts(
     if (count === undefined || end + count >= argv.length) throw new Error("Unexpected bwrap option")
     const args = argv.slice(end, end + count + 1)
     const destination = argv[end + count] ?? ""
+    // A missing project configuration root is a directory. Upstream's /dev/null
+    // placeholder makes it a host file while the command runs, breaking concurrent
+    // configuration reads with ENOTDIR. Preserve its directory shape with an empty
+    // read-only bind; upstream still owns and cleans the empty mount point.
+    // The wrapper captured absence earlier. Another supervisor may have created
+    // the directory since then, so its current existence cannot select file shape.
+    if (
+      flag === "--ro-bind" &&
+      args[1] === "/dev/null" &&
+      basename(destination) === ".codesplash" &&
+      policy.denyWrite?.includes(destination)
+    ) {
+      if (!deniedFile) throw new Error("Missing Linux read-denial sentinel")
+      const empty = join(dirname(deniedFile), "empty-project-config")
+      mkdirSync(empty, { recursive: true, mode: 0o700 })
+      args[1] = empty
+    }
     // Upstream can emit a /dev/null mountpoint for an absent child after its
     // protected parent is already read-only. That mount cannot be created and
     // is redundant: the literal parent denial prevents creating the child.

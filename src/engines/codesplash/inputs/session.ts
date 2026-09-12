@@ -46,6 +46,7 @@ export class ContextInputs {
     readonly config: ContextInputConfig = {},
     readonly sanitize: (text: string) => string = (text) => text,
     readonly plugins: PluginResourceRoot[] = [],
+    readonly forks = false,
   ) {}
 
   async #read(run: ContextToolRunner, root: string, path: string, user: boolean): Promise<string> {
@@ -131,7 +132,7 @@ export class ContextInputs {
       ))
     const fresh = resourceMetadata(resource, text)
     if (!fresh) throw new Error(`Resource is no longer active: ${resource.path}`)
-    if (fresh.fork) throw new Error("Forked skills require M7 subagents; use an inline skill")
+    if (fresh.fork && !this.forks) throw new Error("Forked skills require a native subagent runtime")
     return frontmatter(text).body
   }
 
@@ -208,12 +209,21 @@ export class ContextInputs {
     )
     const fresh = resourceMetadata(resource, text)
     if (model && fresh?.disabled) throw new Error(`Skill ${name} allows explicit user invocation only`)
-    if (fresh?.fork) throw new Error("Forked skills require M7 subagents; use an inline skill")
+    if (fresh?.fork && !this.forks) throw new Error("Forked skills require a native subagent runtime")
     const expanded = substitute(
       await this.#imports(frontmatter(text).body, resource, run),
       commandArgs(argumentsText),
     )
     if (Buffer.byteLength(expanded) > 6 * 1024) throw new Error("Expanded skill exceeds 6 KiB")
+    if (fresh?.fork) {
+      const task = await run("agent", {
+        agent: "general",
+        prompt: `[Skill ${name} from ${resource.path}]\n${expanded}`,
+        background: true,
+      })
+      if (task.isError) throw new Error(task.text)
+      return `[Forked skill ${name} task]\n${task.text}`
+    }
     return `[Skill ${name} from ${resource.path}]\n${expanded}\n[End skill]`
   }
 
@@ -249,6 +259,11 @@ export class ContextInputs {
     parts.push(substitute(source.slice(offset), args))
     const text = `[Command /${resource.name} from ${resource.path}]\n${parts.join("")}\n[End command]`
     if (Buffer.byteLength(text) > INPUT_TOTAL_BYTES) throw new Error("Expanded command exceeds 48 KiB")
+    if (resource.fork) {
+      const task = await run("agent", { agent: "general", prompt: text, background: true })
+      if (task.isError) throw new Error(task.text)
+      return { text: `[Forked command /${resource.name} task]\n${task.text}`, files: [] }
+    }
     return { text, files: mentions(source.replace(/!`[^`]+`/g, "")) }
   }
 
@@ -322,7 +337,7 @@ export class ContextInputs {
       })
     }
     const metadata = this.catalog.resources
-      .filter((r) => r.kind === "skill" && !r.disabled && !r.fork)
+      .filter((r) => r.kind === "skill" && !r.disabled && (!r.fork || this.forks))
       .map((r) => `${r.name}: ${r.description} (${r.path})`)
       .join("\n")
     if (Buffer.byteLength(metadata) > 16 * 1024) throw new Error("Skill metadata exceeds 16 KiB")

@@ -10,7 +10,12 @@ import { verifySelection } from "../plugins/store.ts"
 import { contains, physicalPath } from "../sandbox/profile.ts"
 import { INPUT_FILE_BYTES } from "./contracts.ts"
 
-export async function safeRead(root: string, path: string, signal?: AbortSignal): Promise<string> {
+export async function safeRead(
+  root: string,
+  path: string,
+  signal?: AbortSignal,
+  limit = INPUT_FILE_BYTES,
+): Promise<string> {
   const base = await realpath(root)
   const absolute = resolve(base, path)
   if (!contains(base, absolute)) throw new Error("Context resource leaves its source root")
@@ -24,16 +29,16 @@ export async function safeRead(root: string, path: string, signal?: AbortSignal)
     const info = await file.stat()
     if (!info.isFile() || info.nlink !== 1)
       throw new Error("Context resources must be regular, singly-linked files")
-    if (info.size > INPUT_FILE_BYTES) throw new Error("Context resource exceeds 24 KiB")
+    if (info.size > limit) throw new Error(`Context resource exceeds ${limit / 1024} KiB`)
     signal?.throwIfAborted()
-    const bytes = Buffer.alloc(INPUT_FILE_BYTES + 1)
+    const bytes = Buffer.alloc(limit + 1)
     let size = 0
     while (size < bytes.length) {
       const read = await file.read(bytes, size, bytes.length - size, null)
       if (!read.bytesRead) break
       size += read.bytesRead
     }
-    if (size > INPUT_FILE_BYTES) throw new Error("Context resource exceeds 24 KiB")
+    if (size > limit) throw new Error(`Context resource exceeds ${limit / 1024} KiB`)
     signal?.throwIfAborted()
     return bytes.subarray(0, size).toString("utf8")
   } finally {
@@ -42,6 +47,9 @@ export async function safeRead(root: string, path: string, signal?: AbortSignal)
 }
 
 const SOURCE_DIRECTORIES = [
+  ".codesplash/agents",
+  ".claude/agents",
+  "agents",
   ".codesplash/commands",
   ".codesplash/skills",
   ".claude/commands",
@@ -130,13 +138,21 @@ export function contextReadTool(
       const plugin = plugins().find((entry) => entry.root === root)
       if (!path || (userRoot && root !== userRoot && !plugin)) throw new Error("Invalid context source")
       const lock = plugin ? await verifySelection(plugin, "plugin", context.signal) : undefined
-      const text = await safeRead(root, path, context.signal)
+      const text = await safeRead(
+        root,
+        path,
+        context.signal,
+        /^(?:\.codesplash\/)?agents\/[a-z0-9-]+\.md$/.test(path) ? 65536 : INPUT_FILE_BYTES,
+      )
       if (
         lock &&
         lock.files.find((file) => file.path === relative(root, resolve(root, path)))?.sha256 !== digest(text)
       )
         throw new Error("Plugin resource changed while reading")
-      return { text: JSON.stringify({ text: context.sanitizeOutput?.(text) ?? text }), label: path }
+      return {
+        text: JSON.stringify({ text: context.sanitizeOutput?.(text) ?? text, fingerprint: digest(text) }),
+        label: path,
+      }
     },
   }
 }

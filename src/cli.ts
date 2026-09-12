@@ -67,6 +67,14 @@ Commands:
   memory         Inspect and manage repository memory; automatic learning is opt-in
   create-skill   Preview a native skill scaffold; --write creates it without overwriting
   mcp            Manage native MCP servers, trust, connection checks and OAuth login
+  shell-state    Capture, review and trust explicit shell definitions
+  peer           Send data to or listen on an authenticated local peer mailbox
+  worktree       Create, inspect, apply and clean up owned Git worktrees
+  agents         List, show, create and enable reviewed native child definitions (alias: agent)
+  workflows      Create, review, enable and import saved native workflows
+  automation     Run bounded goals/workflows; inspect or resume durable journals
+  teams          Run finite native teams, inspect rosters and view optional tmux panes
+  scheduler      Review recurring prompts, inspect occurrences and run a finite local worker
   hooks          Review native lifecycle handlers, trust and execution receipts
   plugin         Install, inspect and activate pinned plugins/marketplaces
   extensions     Review and trust native TS/JS extensions
@@ -978,6 +986,11 @@ async function main(): Promise<void> {
     await (await import("./engines/codesplash/sandbox/supervisor.ts")).supervisorMain()
     return
   }
+  if (args[0] === "--internal-sandbox-pty-supervisor") {
+    const { terminalSupervisorMain } = await import("./engines/codesplash/sandbox/terminal-worker.ts")
+    await terminalSupervisorMain()
+    return
+  }
   if (args[0] === "--internal-sandbox-stream-supervisor") {
     await (await import("./engines/codesplash/sandbox/supervisor.ts")).streamSupervisorMain()
     return
@@ -1008,6 +1021,38 @@ async function main(): Promise<void> {
   }
   if (args[0] === "plugin") {
     process.exitCode = await (await import("./commands/plugin.ts")).runPluginCommand(args.slice(1))
+    return
+  }
+  if (args[0] === "peer") {
+    process.exitCode = await (await import("./commands/peer.ts")).runPeerCommand(args.slice(1))
+    return
+  }
+  if (args[0] === "worktree") {
+    process.exitCode = await (await import("./commands/worktree.ts")).runWorktreeCommand(args.slice(1))
+    return
+  }
+  if (args[0] === "teams") {
+    process.exitCode = await (await import("./commands/teams.ts")).runTeamsCommand(args.slice(1))
+    return
+  }
+  if (args[0] === "scheduler") {
+    process.exitCode = await (await import("./commands/scheduler.ts")).runSchedulerCommand(args.slice(1))
+    return
+  }
+  if (args[0] === "workflows") {
+    process.exitCode = await (await import("./commands/workflows.ts")).runWorkflowsCommand(args.slice(1))
+    return
+  }
+  if (args[0] === "automation") {
+    process.exitCode = await (await import("./commands/automation.ts")).runAutomationCommand(args.slice(1))
+    return
+  }
+  if (args[0] === "agents" || args[0] === "agent") {
+    process.exitCode = await (await import("./commands/agents.ts")).runAgentsCommand(args.slice(1))
+    return
+  }
+  if (args[0] === "shell-state") {
+    process.exitCode = await (await import("./commands/shell-state.ts")).runShellStateCommand(args.slice(1))
     return
   }
   if (args[0] === "extensions") {

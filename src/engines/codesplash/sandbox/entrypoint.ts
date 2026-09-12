@@ -2,7 +2,9 @@ import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 /** Works in source, tsc output, and Bun's compiled virtual filesystem. */
-export function internalCommand(role: "supervisor" | "stream-supervisor" | "worker"): string[] {
+export function internalCommand(
+  role: "supervisor" | "stream-supervisor" | "pty-supervisor" | "worker",
+): string[] {
   if (import.meta.url.includes("/$bunfs/")) return [process.execPath, `--internal-sandbox-${role}`]
   const extension = import.meta.url.endsWith(".ts") ? "ts" : "js"
   const cli = resolve(dirname(fileURLToPath(import.meta.url)), `../../..`, `cli.${extension}`)

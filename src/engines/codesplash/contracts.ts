@@ -179,6 +179,8 @@ export type PermissionDecision =
  * engines/codesplash/permissions.ts; kept here so contracts-only modules can depend on it.
  */
 export interface PermissionRuntime {
+  /** Fixed host context reads, never model-dispatchable; still subject to ancestor/config denials. */
+  decideContextRead?(toolName: string, targets: PermissionTargets | undefined): PermissionDecision
   readonly mode: PermissionMode
   setMode(mode: PermissionMode): void
   decide(toolName: string, targets: PermissionTargets | undefined, isReadOnly: boolean): PermissionDecision
@@ -191,6 +193,10 @@ export interface PermissionRuntime {
 /* ------------------------------------ tools ------------------------------------ */
 
 export type ToolContext = {
+  /** False only for explicit user command passthrough excluded from model context. */
+  modelContext?: boolean
+  /** Trusted runtime fence: retain mutation admission until this actual callback settles. */
+  holdMutationUntil?: (pending: Promise<unknown>) => void
   progress?: (text: string) => void
   cwd: string
   policy: SessionPolicy
@@ -248,6 +254,8 @@ export interface HarnessTool {
   /** External effects cannot be restored by a workspace checkpoint. */
   readonly effects?: "workspace" | "external" | "workspace-and-external"
   readonly allowPersistentApproval?: boolean
+  /** Pure deterministic floor, including during deferred catalog checks. */
+  alwaysAsk?(input: unknown): boolean
   readonly name: string
   readonly description: string
   readonly inputSchema: Record<string, unknown>

@@ -1,5 +1,7 @@
 /** Versioned host hook data. Protocol credentials and provider reasoning are never fields. */
 export const HOOK_EVENTS = [
+  "subagent.start",
+  "subagent.stop",
   "session.start",
   "session.resume",
   "session.end",
@@ -77,6 +79,7 @@ export type HookActivity = {
 }
 
 const gates = new Set<HookEventName>([
+  "subagent.start",
   "session.start",
   "session.resume",
   "input.admit",

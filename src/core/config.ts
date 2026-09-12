@@ -7,11 +7,13 @@ import type { ContextInputConfig } from "../engines/codesplash/inputs/contracts.
 import { type McpConfig, mcpConfigTable, validateMcpConfig } from "../engines/codesplash/mcp/config.ts"
 import { validateMemoryConfig } from "../engines/codesplash/memory/config.ts"
 import type { MemoryConfig } from "../engines/codesplash/memory/contracts.ts"
+import { type AgentsConfig, validateAgentsConfig } from "../engines/codesplash/orchestration/definitions.ts"
 import { type PluginConfig, validatePlugins } from "../engines/codesplash/plugins/config.ts"
 import type { NativeSandboxConfig } from "../engines/codesplash/sandbox/contracts.ts"
 import { validateEnvironmentName } from "../engines/codesplash/sandbox/env-policy.ts"
 import type { ConfigResolution, ConfigResolutionOptions } from "./config/contracts.ts"
 import { checkConfigBounds } from "./config/source.ts"
+import { type OrchestrationConfig, validateOrchestration } from "./orchestration/config.ts"
 import { redactSensitiveText } from "./redaction.ts"
 import { stringifyToml, type TomlTable } from "./toml.ts"
 
@@ -89,6 +91,8 @@ export type AgentConfig = {
   context?: ContextInputConfig
   sandbox?: NativeSandboxConfig
   mcp?: McpConfig
+  orchestration?: OrchestrationConfig
+  agents?: AgentsConfig
   plugins?: PluginConfig
   pluginResources?: import("../engines/codesplash/plugins/resolve.ts").PluginResourceRoot[]
   extensions?: ExtensionConfig
@@ -470,6 +474,20 @@ export function validateConfig(parsed: unknown, path: string): AgentConfig {
     }
   }
 
+  if (parsed.agents !== undefined) {
+    try {
+      config.agents = validateAgentsConfig(parsed.agents)
+    } catch (error) {
+      problems.push(error instanceof Error ? error.message : "Invalid agents configuration")
+    }
+  }
+  if (parsed.orchestration !== undefined) {
+    try {
+      config.orchestration = validateOrchestration(parsed.orchestration)
+    } catch (error) {
+      problems.push(error instanceof Error ? error.message : "Invalid orchestration configuration")
+    }
+  }
   if (parsed.plugins !== undefined) {
     try {
       config.plugins = validatePlugins(parsed.plugins)
@@ -799,6 +817,8 @@ export async function saveConfig(config: AgentConfig, path = configFilePath()): 
     }
   if (config.context) table.context = { ...config.context }
   if (config.sandbox) table.sandbox = { ...config.sandbox }
+  if (config.orchestration) table.orchestration = { ...config.orchestration }
+  if (config.agents) table.agents = structuredClone(config.agents) as unknown as TomlTable
   if (config.plugins) table.plugins = JSON.parse(JSON.stringify(config.plugins)) as TomlTable
   if (config.extensions) table.extensions = JSON.parse(JSON.stringify(config.extensions)) as TomlTable
   if (config.hooks) table.hooks = JSON.parse(JSON.stringify(config.hooks)) as TomlTable

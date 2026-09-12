@@ -1,4 +1,5 @@
 import type { HarnessTool } from "../contracts.ts"
+import type { ChildBudget } from "../orchestration/scope.ts"
 import type { MemoryConfig } from "./contracts.ts"
 import { memoryHash } from "./identity.ts"
 import { validVector } from "./retrieval.ts"
@@ -23,6 +24,7 @@ export const embeddingKey = (config: NonNullable<MemoryConfig["embedding"]>) =>
 export function embeddingTool(
   config?: MemoryConfig["embedding"],
   onUsage: (tokens: number, cost: number | undefined) => void = () => {},
+  budget?: ChildBudget,
 ): HarnessTool {
   return {
     name: "memory_embed",
@@ -51,6 +53,8 @@ export function embeddingTool(
       if (!context.fetchNetwork) throw new Error("Memory embeddings require the governed network transport")
       const key = process.env[config.keyEnvVar]
       if (!key) throw new Error(`Set ${config.keyEnvVar} for memory embeddings`)
+      const settleBudget = budget?.reserveAuxiliary(Buffer.byteLength(JSON.stringify(texts)))
+      let budgetUsage: number | undefined
       const abort = new AbortController(),
         cancel = () => abort.abort(context.signal.reason)
       context.signal.addEventListener("abort", cancel, { once: true })
@@ -94,6 +98,7 @@ export function embeddingTool(
           usage?: { prompt_tokens?: number }
         }
         const usage = value.usage?.prompt_tokens
+        if (typeof usage === "number" && Number.isSafeInteger(usage) && usage >= 0) budgetUsage = usage
         if (typeof usage === "number" && Number.isSafeInteger(usage) && usage >= 0)
           onUsage(usage, config.inputPerMTok === undefined ? undefined : (usage * config.inputPerMTok) / 1e6)
         else onUsage(0, undefined)
@@ -112,6 +117,7 @@ export function embeddingTool(
           })
         return { text: JSON.stringify({ vectors }), label: "Memory embeddings" }
       } finally {
+        settleBudget?.(budgetUsage)
         clearTimeout(timer)
         context.signal.removeEventListener("abort", cancel)
       }

@@ -151,7 +151,7 @@ test("skill catalog includes metadata only and explicit invocation honors fork a
     join(f.cwd, ".codesplash/skills/check/SKILL.md"),
     "---\ndescription: Verify\ncontext: fork\n---\nBody",
   )
-  await expect(f.inputs.invoke("check", "", f.run)).rejects.toThrow("M7")
+  await expect(f.inputs.invoke("check", "", f.run)).rejects.toThrow("native subagent runtime")
 })
 test("imports are approved and bounded; arguments cannot introduce imports or shell", async () => {
   const f = await resolver({

@@ -13,6 +13,7 @@ import {
   validateConfig,
 } from "../config.ts"
 import { HOOK_EVENTS } from "../hooks.ts"
+import { narrowOrchestration, type OrchestrationConfig } from "../orchestration/config.ts"
 import { redactSensitiveText } from "../redaction.ts"
 import { digest } from "../session/files.ts"
 import { readTrustDecision } from "../trust.ts"
@@ -355,7 +356,15 @@ export async function resolveConfig(
   const managedPath = join(dirname(userPath), "managed.toml")
   const policySource = readConfigSource(managedPath)
   const constraints = managed(policySource.raw)
+  const requestedOrchestration = structuredClone(effective.orchestration) as
+    | Partial<OrchestrationConfig>
+    | undefined
   add("managed", constraints.required ?? {}, managedPath, policySource.fingerprint)
+  if (requestedOrchestration !== undefined || constraints.required?.orchestration !== undefined)
+    effective.orchestration = narrowOrchestration(
+      requestedOrchestration,
+      constraints.required?.orchestration as Partial<OrchestrationConfig> | undefined,
+    )
   if (options.pluginSnapshot) effective.plugins = structuredClone(options.pluginSnapshot)
   if (isTable(constraints.required?.plugins) && isTable(effective.plugins))
     merge(effective.plugins, constraints.required.plugins)

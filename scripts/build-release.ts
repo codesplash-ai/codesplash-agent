@@ -140,6 +140,12 @@ async function main(): Promise<void> {
     await run([process.execPath, "scripts/hooks-smoke.ts", binaryPath])
     await run([process.execPath, "scripts/extensions-smoke.ts", binaryPath])
     await run([process.execPath, "scripts/plugins-smoke.ts", binaryPath])
+    await run([process.execPath, "scripts/terminal-smoke.ts", binaryPath])
+    await run([process.execPath, "scripts/children-smoke.ts", binaryPath])
+    await run([process.execPath, "scripts/orchestration-smoke.ts", binaryPath])
+    await run([process.execPath, "scripts/automation-smoke.ts", binaryPath])
+    await run([process.execPath, "scripts/scheduler-smoke.ts", binaryPath])
+    await run([process.execPath, "scripts/teams-smoke.ts", binaryPath])
     await run([process.execPath, "scripts/sdk-smoke.ts"])
   }
 

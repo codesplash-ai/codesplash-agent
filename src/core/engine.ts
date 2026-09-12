@@ -179,6 +179,26 @@ export interface EngineSession {
   setPermissionMode?(mode: PermissionMode): Promise<void>
   /** User-invoked rule edits only; engines reject these while tools/turns are active. */
   editPermissionRule?(command: string): Promise<void>
+  tasks?(request: import("./orchestration/contracts.ts").TaskRequest): Promise<unknown>
+  spawnAgent?(
+    input: import("../engines/codesplash/orchestration/children.ts").SpawnAgentInput,
+  ): Promise<unknown>
+  teams?(input: import("./orchestration/teams.ts").TeamRequest): Promise<unknown>
+  schedules?(input: import("./orchestration/scheduler.ts").ScheduleRequest): Promise<unknown>
+  goals?(input: import("./orchestration/automation.ts").GoalRequest): Promise<unknown>
+  workflows?(input: import("./orchestration/automation.ts").WorkflowRequest): Promise<unknown>
+  worktrees?(input: import("./orchestration/worktrees.ts").WorktreeRequest): Promise<unknown>
+  peers?(input: import("./orchestration/peers.ts").PeerRequest): Promise<unknown>
+  agentDefinitions?(): Promise<unknown>
+  monitorTask?(
+    id: string,
+    cursor?: number,
+  ): AsyncIterableIterator<import("./orchestration/output.ts").OutputPage>
+  runCommand?(
+    command: string,
+    includeContext?: boolean,
+    snapshot?: import("../engines/codesplash/orchestration/shell-state.ts").ShellSelection,
+  ): Promise<unknown>
   mcpCommand?(command: string): Promise<unknown>
   hooksCommand?(command: string): Promise<unknown>
   pluginsCommand?(command: string): Promise<unknown>

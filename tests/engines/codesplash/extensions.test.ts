@@ -389,3 +389,76 @@ test("closing an idle provider stream drains its finalizer before removing snaps
     await f.close()
   }
 })
+
+test("trusted tool cancellation exposes the original callback settlement fence", async () => {
+  const f = await fixture(toolSource)
+  let release!: () => void, started!: () => void
+  const gate = new Promise<void>((r) => {
+      release = r
+    }),
+    entered = new Promise<void>((r) => {
+      started = r
+    })
+  const runtime = new ExtensionRuntime({
+    config: validateConfig({}, "fixture"),
+    cwd: f.root,
+    dataDir: f.root,
+    hostExtensions: [
+      {
+        id: "owned",
+        factory: (api) => {
+          api.registerTool({
+            name: "write",
+            description: "Owned writer",
+            inputSchema: { type: "object" },
+            async run() {
+              started()
+              await gate
+              return { text: "settled", label: "Write" }
+            },
+          })
+        },
+      },
+    ],
+  })
+  try {
+    await runtime.stage()
+    runtime.activate(f.host)
+    const registry = runtime.registry(createToolRegistry([])),
+      tool = registry.get(registry.specs()[0]!.name)!
+    const abort = new AbortController(),
+      pending: Promise<unknown>[] = []
+    const run = tool
+      .run(
+        {},
+        {
+          cwd: f.root,
+          policy: { sandbox: "workspace-write", approvalPolicy: "on-request" },
+          signal: abort.signal,
+          holdMutationUntil: (promise) => {
+            pending.push(promise)
+          },
+        },
+      )
+      .catch(() => "cancelled")
+    await entered
+    abort.abort()
+    expect(await run).toBe("cancelled")
+    expect(pending).toHaveLength(1)
+    let settled = false
+    void pending[0]!
+      .finally(() => {
+        settled = true
+      })
+      .catch(() => {})
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    release()
+    await Promise.allSettled(pending)
+    expect(settled).toBe(true)
+  } finally {
+    release()
+    await runtime.close()
+    await f.close()
+  }
+})
