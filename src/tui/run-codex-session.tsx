@@ -167,6 +167,7 @@ export type CodexRunOutcome = "home" | "quit" | "new" | "resume-picker"
 export const codexKeyboardOptions = {
   disambiguate: true,
   alternateKeys: true,
+  events: true,
   allKeysAsEscapes: true,
 } satisfies KittyKeyboardOptions
 
@@ -452,6 +453,7 @@ export async function runCodexSession(
           historyLocation,
           engine,
           permissionsUi,
+          options.config ?? defaultConfig,
         )
         if (action !== "reconnect") return action
       } finally {
@@ -506,6 +508,7 @@ async function renderCodexSession(
   historyLocation: string | undefined,
   engine: HarnessEngineId,
   permissions: SessionPermissionsUi | undefined,
+  config: AgentConfig,
 ): Promise<CodexSessionAction> {
   const renderer = await createCliRenderer({
     exitOnCtrlC: false,
@@ -528,6 +531,7 @@ async function renderCodexSession(
 
     createRoot(renderer).render(
       <CodexSessionApp
+        config={config}
         controller={controller}
         palette={brandThemes[theme]}
         project={project}

@@ -116,6 +116,17 @@ export class SessionController {
     if (this.#closed || !this.#session.tasks) throw new Error("Tasks are unavailable for this engine")
     return this.#session.tasks(request)
   }
+  get canSideQuery(): boolean {
+    return !!this.#session.sideQuery
+  }
+  async sideQuery(
+    request: { kind: "question" | "suggestion"; question?: string },
+    signal?: AbortSignal,
+  ): Promise<string> {
+    if (this.#closed || !this.#session.sideQuery)
+      throw new Error("Side questions are unavailable for this engine")
+    return this.#session.sideQuery(request, signal)
+  }
   async spawnAgent(
     input: import("../engines/codesplash/orchestration/children.ts").SpawnAgentInput,
   ): Promise<unknown> {

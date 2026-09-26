@@ -437,6 +437,7 @@ function own(
     contextResources: controller.contextResources.bind(controller),
     memoryCommand: controller.memoryCommand.bind(controller),
     sessionPresentation: controller.sessionPresentation.bind(controller),
+    sideQuery: controller.sideQuery.bind(controller),
     sessionRecovery: controller.sessionRecovery.bind(controller),
     changeDirectory: controller.changeDirectory.bind(controller),
     exportHistory: controller.exportHistory.bind(controller),

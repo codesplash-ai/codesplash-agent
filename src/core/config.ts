@@ -13,6 +13,7 @@ import type { NativeSandboxConfig } from "../engines/codesplash/sandbox/contract
 import { validateEnvironmentName } from "../engines/codesplash/sandbox/env-policy.ts"
 import type { ConfigResolution, ConfigResolutionOptions } from "./config/contracts.ts"
 import { checkConfigBounds } from "./config/source.ts"
+import { type TuiConfig, validateTuiConfig } from "./config/tui.ts"
 import { type OrchestrationConfig, validateOrchestration } from "./orchestration/config.ts"
 import { redactSensitiveText } from "./redaction.ts"
 import { stringifyToml, type TomlTable } from "./toml.ts"
@@ -82,6 +83,7 @@ export type AgentConfig = {
   schemaVersion: 1
   models?: Partial<Record<"codesplash" | "codex" | "claude", string>>
   theme: ThemePreference
+  tui?: TuiConfig
   history: { enabled: boolean }
   codex: { sandbox: ConfigSandboxMode; approvalPolicy: ApprovalPolicy }
   permissions: PermissionsConfig
@@ -274,6 +276,7 @@ export function validateConfig(parsed: unknown, path: string): AgentConfig {
 
   const problems: string[] = []
   const config = structuredClone(defaultConfig)
+  if (parsed.tui !== undefined) config.tui = validateTuiConfig(parsed.tui)
 
   if (parsed.schemaVersion !== undefined && parsed.schemaVersion !== 1) {
     problems.push(`schemaVersion: got ${JSON.stringify(parsed.schemaVersion)}, expected 1`)
@@ -808,6 +811,7 @@ export async function saveConfig(config: AgentConfig, path = configFilePath()): 
     codex: { sandbox: config.codex.sandbox, approvalPolicy: config.codex.approvalPolicy },
   }
   if (config.models) table.models = { ...config.models }
+  if (config.tui) table.tui = { ...config.tui }
   const permissions = permissionsTable(config.permissions)
   if (permissions) table.permissions = permissions
   if (config.memory)

@@ -152,3 +152,5 @@ SDK session. Inclusive parent usage is not summed with descendant usage for root
 executes a workflow command, then journals one explicit scheduled child in the same owner. It checks
 real file content, completion and cumulative usage. The package smoke runs all sixteen examples.
 Task completion uses existing `item.updated` events; context-excluded work never enters model notices.
+
+17. `17-side-question.ts`: tool-free side answer, isolated transcript and usage accounting.

@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Terminal experience (M8)
+
+- Add fuzzy command palette/completion, external draft editing, contextual hot-reloaded keybindings
+  and optional Vim editing; adapt mouse/clipboard behavior to terminal capabilities.
+- Add user themes, bounded Mermaid/math rendering, explicit image preview, thinking controls,
+  transcript search and switchable native scrollback.
+- Add focus-gated notifications, terminal titles, configurable status segments and reviewed
+  status commands, motion controls, sleep inhibition and an optional terminal pet.
+- Add tabbed settings with provenance, integration management, bundled docs/release notes,
+  dismissible onboarding and contextual tips.
+- Add bounded native side questions and opt-in prompt suggestions with usage accounting and
+  foreground cancellation; side answers stay outside the main conversation. Expose SDK `sideQuery`.
+- Add reviewed recorder/transcriber dictation with hold/toggle, diagnostics, cancellation and
+  draft-conflict handling. Realtime audio remains exploratory, with no support claimed.
+
 ### Durable memory (CodeSplash native engine)
 
 - Add `/remember`, `/memory` and `codesplash memory` for repository facts, reviewed candidates,

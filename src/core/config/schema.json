@@ -1757,6 +1757,69 @@
         }
       },
       "required": ["definitions"]
+    },
+    "tui": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mouseScroll": { "enum": ["linear", "accelerated"] },
+        "copyOnSelect": { "type": "boolean" },
+        "notificationIdleMs": { "type": "integer", "minimum": 0, "maximum": 60000 },
+        "vim": {
+          "type": "boolean"
+        },
+        "notifications": {
+          "type": "boolean"
+        },
+        "title": {
+          "type": "boolean"
+        },
+        "reducedMotion": {
+          "type": "boolean"
+        },
+        "spinner": {
+          "type": "boolean"
+        },
+        "sleepInhibitor": {
+          "type": "boolean"
+        },
+        "suggestions": {
+          "type": "boolean"
+        },
+        "tips": {
+          "type": "boolean"
+        },
+        "onboarding": {
+          "type": "boolean"
+        },
+        "mouse": {
+          "enum": ["auto", "on", "off"]
+        },
+        "clipboard": {
+          "enum": ["auto", "native", "osc52"]
+        },
+        "screen": {
+          "enum": ["alternate", "inline"]
+        },
+        "thinking": {
+          "enum": ["show", "collapse", "hide"]
+        },
+        "pet": {
+          "enum": ["none", "cat"]
+        },
+        "theme": {
+          "type": "string",
+          "pattern": "^(?:[a-zA-Z0-9][a-zA-Z0-9_-]{0,63})?$"
+        },
+        "statusSegments": {
+          "type": "array",
+          "maxItems": 7,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["model", "context", "state", "project", "tokens", "cost", "clock"]
+          }
+        }
+      }
     }
   }
 }

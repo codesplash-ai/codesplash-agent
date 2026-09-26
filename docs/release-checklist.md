@@ -20,13 +20,16 @@ Run top to bottom for every tagged release. A release ships only when every box 
 - [ ] Manual dogfood checklists from Milestones 2–4 (implementation-plan.md checkpoints) executed
       against a real authenticated session: restart+resume, Ctrl+Z/fg, external SIGTERM, resize,
       full-access confirmation, every slash command, `/model` switch, rate-limit display.
+- [ ] M8 terminal walkthrough: palette/editor, settings provenance, docs/integrations, remap/Vim,
+      inline/alternate mode, copy/images, side-question cancellation and reviewed dictation.
+      Record actual terminal/microphone coverage; protocol fixtures do not prove device support.
 - [ ] Claude handoff exercised with the real CLI: launch, slash command, quit, resume via picker.
 
 ## Artifacts
 
 - [ ] Version bumped in `package.json` **and** `src/version.ts` (test enforces sync), CHANGELOG
       entry written, tag matches `v<version>`.
-- [ ] `bun run release:build` locally: archive contains agent/LICENSE/README, `.sha256` verifies,
+- [ ] `bun run release:build` locally: archive contains codesplash/LICENSE/README/THIRD_PARTY_NOTICES and sandbox-runtime, `.sha256` verifies,
       extracted binary passes `--version`, `--doctor`, and an open/quit TUI smoke.
 - [ ] Reproducibility spot-check: rebuild with the pinned toolchain (Bun 1.3.14, frozen lockfile)
       and confirm the binary behaves identically; checksums published alongside artifacts.
@@ -36,8 +39,9 @@ Run top to bottom for every tagged release. A release ships only when every box 
 - [ ] Install from each advertised channel (brew, npm, release tarball).
 - [ ] `agent --doctor` reports sensible findings with no engines installed.
 - [ ] Install provider CLIs, log in, launch both surfaces from the harness.
-- [ ] Uninstall; verify nothing remains except (optionally) config/data dirs and that **no
-      credential material exists anywhere the app wrote** (grep config/data dirs).
+- [ ] Uninstall; verify nothing remains except the documented optional config/data directories.
+      Verify credentials occur only in the native engine’s documented credential/secret stores,
+      never in session events, exported bundles, logs or terminal integration output.
 
 ## Publishing prerequisites (one-time; see README + release.yml)
 

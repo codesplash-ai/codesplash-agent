@@ -152,19 +152,33 @@ async function main(): Promise<void> {
   await Bun.write(join(outDirectory, "LICENSE"), Bun.file(join(projectRoot, "LICENSE")))
   await Bun.write(join(outDirectory, "README.md"), Bun.file(join(projectRoot, "README.md")))
 
+  await Bun.write(
+    join(outDirectory, "THIRD_PARTY_NOTICES.md"),
+    Bun.file(join(projectRoot, "THIRD_PARTY_NOTICES.md")),
+  )
+
   const archivePath = join(outDirectory, archiveName)
   if (isWindows) {
     await run(
       [
         "powershell",
         "-Command",
-        `Compress-Archive -Path ${binaryName},LICENSE,README.md,sandbox-runtime -DestinationPath ${archiveName}`,
+        `Compress-Archive -Path ${binaryName},LICENSE,README.md,THIRD_PARTY_NOTICES.md,sandbox-runtime -DestinationPath ${archiveName}`,
       ],
       outDirectory,
     )
   } else {
     await run(
-      ["tar", "-czf", archiveName, binaryName, "LICENSE", "README.md", "sandbox-runtime"],
+      [
+        "tar",
+        "-czf",
+        archiveName,
+        binaryName,
+        "LICENSE",
+        "README.md",
+        "THIRD_PARTY_NOTICES.md",
+        "sandbox-runtime",
+      ],
       outDirectory,
     )
   }

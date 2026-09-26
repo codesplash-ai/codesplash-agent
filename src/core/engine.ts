@@ -147,6 +147,10 @@ export interface EngineSession {
   readonly events: AsyncIterable<AgentEvent>
   readonly inputQueue?: InputQueue
   sessionPresentation?(request: import("./session/presentation.ts").PresentationRequest): Promise<unknown>
+  sideQuery?(
+    request: { kind: "question" | "suggestion"; question?: string },
+    signal?: AbortSignal,
+  ): Promise<string>
   directoryStatus?(): import("./session/working-directory.ts").DirectoryStatus
   changeDirectory?(
     request: import("./session/working-directory.ts").DirectoryRequest,

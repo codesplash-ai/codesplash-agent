@@ -56,6 +56,7 @@ export type AgentSession = Pick<
   | "contextResources"
   | "memoryCommand"
   | "sessionPresentation"
+  | "sideQuery"
   | "sessionRecovery"
   | "changeDirectory"
   | "exportHistory"

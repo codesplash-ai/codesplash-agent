@@ -1,10 +1,23 @@
+import { type ParsedSlashCommand, parseSlashCommand, slashCommandHelp } from "./commands.ts"
+
+export {
+  type ParsedSlashCommand,
+  parseSlashCommand,
+  type SlashCommandName,
+  slashCommandHelp,
+} from "./commands.ts"
+
+import { dirname, join } from "node:path"
 import {
   bg,
   type CursorStyleOptions,
   fg,
+  LinearScrollAccel,
+  MacOSScrollAccel,
   RGBA,
   type ScrollBoxOptions,
   type ScrollBoxRenderable,
+  type Selection,
   StyledText,
   SyntaxStyle,
   type TextareaOptions,
@@ -12,6 +25,8 @@ import {
 } from "@opentui/core"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { tuiDefaults } from "../core/config/tui.ts"
+import { type AgentConfig, configDirectory, defaultConfig } from "../core/config.ts"
 import type {
   AppViewState,
   ContextInspection,
@@ -29,145 +44,45 @@ import { taskCommand } from "../core/orchestration/command.ts"
 import { intervalMs } from "../core/orchestration/scheduler.ts"
 import type { TeamRequest } from "../core/orchestration/teams.ts"
 import type { BranchView } from "../core/session/branches.ts"
+import { atomic, bytes } from "../core/session/files.ts"
 import type { AcceptedPrompt, InputIntent, InputItem } from "../core/session/input-queue.ts"
 import { emptyOutcomes, outcomeSummary } from "../core/session/outcomes.ts"
 import { awayRecap, presentationArguments } from "../core/session/presentation.ts"
 import { recoveryCommand } from "../core/session/recovery-command.ts"
 import { extractImageAttachments } from "./attachments.ts"
-import type { BrandPalette } from "./brand.ts"
+import { Attention } from "./attention.tsx"
+import { type BrandPalette, brandThemes } from "./brand.ts"
+import { CommandPalette } from "./command-palette.tsx"
+import { commandSuggestions } from "./commands.ts"
+import { ConfirmPanel } from "./confirm-panel.tsx"
+import { DocsPanel } from "./docs-panel.tsx"
+import { editDraft } from "./editor.ts"
 import { completeMentionDraft, trailingMention } from "./file-mentions.ts"
+import { readPreviewImage, showItermImage } from "./images.ts"
 import { InputPanel, inputDraftText } from "./input-panel.tsx"
+import { IntegrationsPanel } from "./integrations-panel.tsx"
+import { Keymap, keyToken, readKeybindings, VimComposer } from "./keybindings.ts"
 import { McpFormPanel } from "./mcp-form.tsx"
 import { RecoveryPanel } from "./recovery-panel.tsx"
+import { terminalMarkdown } from "./rich-text.ts"
+import { TranscriptScrollback } from "./scrollback.ts"
+import { SearchPanel } from "./search-panel.tsx"
+import { SettingsPanel } from "./settings-panel.tsx"
+import { SidePanel } from "./side-panel.tsx"
 import { TaskPanel } from "./task-panel.tsx"
 import { TeamPanel } from "./team-panel.tsx"
+import { clipboardText, copyText, terminalProfile } from "./terminal.ts"
+import {
+  reviewTerminalIntegrations,
+  type TerminalReview,
+  terminalText,
+  trustTerminalIntegrations,
+} from "./terminal-integrations.ts"
+import { loadUserTheme } from "./themes.ts"
+import { contextualTip, onboardingText, recordTipVisit } from "./tips.ts"
+import { VoiceCapture, voiceDiagnostics } from "./voice.ts"
 
 export type CodexSessionAction = "home" | "reconnect" | "new" | "resume-picker" | "quit"
-
-export type SlashCommandName =
-  | "teams"
-  | "dashboard"
-  | "loop"
-  | "tasks"
-  | "cd"
-  | "session-info"
-  | "recap"
-  | "rename"
-  | "outcomes"
-  | "pwd"
-  | "export"
-  | "help"
-  | "new"
-  | "resume"
-  | "engine"
-  | "model"
-  | "mcp"
-  | "hooks"
-  | "plugins"
-  | "extensions"
-  | "permissions"
-  | "usage"
-  | "context"
-  | "compact"
-  | "commands"
-  | "skills"
-  | "personality"
-  | "create-skill"
-  | "remember"
-  | "memory"
-  | "history"
-  | "queue"
-  | "steer"
-  | "interject"
-  | "prompt-history"
-  | "stash"
-  | "acknowledge-fork"
-  | "gc-recovery"
-  | "tree"
-  | "fork"
-  | "rewind"
-  | "checkpoints"
-  | "checkpoint-diff"
-  | "restore"
-  | "recover-restore"
-  | "pin-branch"
-  | "pin-checkpoint"
-  | "prune-branches"
-  | "prune-checkpoints"
-  | "quit"
-
-export type ParsedSlashCommand =
-  | { name: SlashCommandName; argument?: string }
-  | { name: "unknown"; raw: string }
-
-const slashCommandNames: readonly SlashCommandName[] = [
-  "cd",
-  "session-info",
-  "recap",
-  "rename",
-  "outcomes",
-  "pwd",
-  "export",
-  "help",
-  "new",
-  "resume",
-  "engine",
-  "model",
-  "teams",
-  "dashboard",
-  "tasks",
-  "loop",
-  "mcp",
-  "hooks",
-  "plugins",
-  "extensions",
-  "permissions",
-  "usage",
-  "context",
-  "compact",
-  "commands",
-  "skills",
-  "personality",
-  "create-skill",
-  "remember",
-  "memory",
-  "history",
-  "queue",
-  "steer",
-  "interject",
-  "prompt-history",
-  "stash",
-  "acknowledge-fork",
-  "gc-recovery",
-  "tree",
-  "fork",
-  "rewind",
-  "checkpoints",
-  "checkpoint-diff",
-  "restore",
-  "recover-restore",
-  "pin-branch",
-  "pin-checkpoint",
-  "prune-branches",
-  "prune-checkpoints",
-  "quit",
-]
-
-/** Returns undefined for ordinary prompts; commands start with "/" and a known word. */
-export function parseSlashCommand(text: string): ParsedSlashCommand | undefined {
-  const trimmed = text.trim()
-  if (!trimmed.startsWith("/")) return undefined
-  const [word = "", ...rest] = trimmed.slice(1).split(/\s+/)
-  const name = word.toLowerCase() as SlashCommandName
-  if (!slashCommandNames.includes(name)) return { name: "unknown", raw: trimmed }
-  return {
-    name,
-    argument:
-      (["memory", "remember", "steer", "interject", "queue", "stash"].includes(name)
-        ? trimmed.slice(word.length + 1).trim()
-        : rest.join(" ")) || undefined,
-  }
-}
 
 /** Human-facing engine name for transcript headers and hints; the status line keeps the raw id. */
 export function engineDisplayName(engine: EngineId): string {
@@ -181,82 +96,10 @@ export function engineStatusLabel(engine: EngineId, model: string | undefined): 
   return `${engine}${model ? `/${model}` : ""}`
 }
 
-export const slashCommandHelp: ReadonlyArray<{ command: string; description: string }> = [
-  { command: "/session-info [--copy]", description: "Inspect session identity, policy, recovery and usage" },
-  {
-    command: "/recap [--since SEQUENCE] [--generate]",
-    description: "Local outcome recap; generation is explicit",
-  },
-  { command: "/rename TEXT|--auto|--generate", description: "Set or refresh the session title" },
-  { command: "/outcomes", description: "Inspect typed local turn outcomes" },
-  { command: "/pwd", description: "Show the effective working directory" },
-  {
-    command: "/cd PATH [--carry|--clear --apply --revision REVISION]",
-    description: "Preview or apply an idle directory change",
-  },
-  { command: "/new", description: "Start a fresh session in this project" },
-  { command: "/resume", description: "Open the session picker" },
-  { command: "/engine", description: "Back to the engine screen (welcome)" },
-  { command: "/model [name]", description: "List models, or switch for the next turn" },
-  {
-    command: "/mcp [status|enable ID|disable ID|reconnect ID]",
-    description: "Inspect MCP clients or change active connections while idle",
-  },
-  { command: "/permissions", description: "Show permission mode, rules, sandbox, and trust" },
-  {
-    command: "/plugins [status|reload]",
-    description: "Inspect pinned plugins and activate a reviewed generation",
-  },
-  {
-    command: "/extensions [status|reload|disable ID|run ID/COMMAND ARGUMENT]",
-    description: "Inspect trusted extensions and run their commands; Tab completes arguments",
-  },
-  {
-    command: "/hooks [status|show ID|reload|disable ID|receipts|acknowledge KEY]",
-    description: "Review lifecycle handlers, sharing, source trust and uncertain execution",
-  },
-  { command: "/usage", description: "Show token usage, context left, and estimated cost" },
-  { command: "/context", description: "Inspect model context and available input budget (CodeSplash)" },
-  { command: "/compact [instructions]", description: "Compact older model context (CodeSplash)" },
-  { command: "/remember text", description: "Save a repository memory explicitly" },
-  {
-    command: "/memory [list|show|search|edit|forget|accept|status|extract|consolidate]",
-    description: "Inspect and manage memory",
-  },
-  { command: "/commands · /skills", description: "List native templates or skills with source paths" },
-  { command: "/skill name [arguments]", description: "Load a skill explicitly" },
-  { command: "/personality neutral|concise|explanatory", description: "Set response style" },
-  { command: "/create-skill name [--write]", description: "Preview or create a skill scaffold" },
-  {
-    command: "/export --output FILE [--format json|markdown|html] [--redact]",
-    description: "Export sanitized portable history",
-  },
-  { command: "/history", description: "Show where this session is stored" },
-  { command: "/queue", description: "Inspect, edit, reorder and review acknowledged input" },
-  { command: "/steer text", description: "Steer at the next safe provider/tool boundary" },
-  { command: "/interject text", description: "Interrupt, settle cleanup, then admit this prompt" },
-  { command: "/prompt-history", description: "Recall accepted typed prompts; Ctrl+R" },
-  {
-    command: "/stash [list|save NAME TEXT|apply ID|pop ID|drop ID]",
-    description: "Explicit draft stashes; Ctrl+S saves the composer",
-  },
-  {
-    command: "/tree · /fork [NODE] · /rewind NODE",
-    description: "Preserved conversation branches; Esc-Esc backtracks",
-  },
-  {
-    command: "/checkpoints · /checkpoint-diff ID · /restore ID [PATH…]",
-    description: "Inspect eligible file snapshots and preview restore",
-  },
-  {
-    command: "/teams · /dashboard · /tasks · /loop · !command · !!command",
-    description: "Live tasks; run a command with or without model context",
-  },
-  { command: "/help", description: "Toggle this overlay (also F1)" },
-  { command: "/quit", description: "Quit the app" },
-]
-
 export const keyboardHelpEntries: ReadonlyArray<{ keys: string; action: string }> = [
+  { keys: "F4", action: "Hold to dictate (key-release terminals), or toggle recording" },
+  { keys: "Ctrl+P / Tab on /command", action: "Find commands and arguments; stage without sending" },
+  { keys: "Ctrl+G", action: "Edit the current draft in VISUAL / EDITOR" },
   { keys: "Enter", action: "Send the prompt" },
   { keys: "Shift+Enter / Ctrl+J", action: "Insert a newline" },
   { keys: "Esc", action: "Interrupt the running turn / close overlay" },
@@ -553,6 +396,15 @@ type PermissionsOverlayRules =
   | { phase: "ready"; rules: PermissionRuleView[]; selectedGrant: number; notice?: string }
 
 type OverlayState =
+  | { kind: "side"; question: string }
+  | { kind: "settings" }
+  | { kind: "integrations" }
+  | { kind: "docs"; releaseNotes: boolean }
+  | { kind: "onboarding" }
+  | { kind: "terminal-review"; review: TerminalReview }
+  | { kind: "search"; query: string }
+  | { kind: "image"; name: string; bytes: Uint8Array }
+  | { kind: "palette"; query: string; draft: string; revision: number; models: string[] }
   | { kind: "teams" }
   | { kind: "tasks" }
   | { kind: "recovery"; tree: BranchView }
@@ -566,6 +418,7 @@ type OverlayState =
   | { kind: "models"; state: ModelOverlayState }
 
 type CodexSessionAppProps = {
+  config?: AgentConfig
   controller: SessionController
   palette: BrandPalette
   project: ProjectPreflight
@@ -580,8 +433,9 @@ type CodexSessionAppProps = {
 }
 
 export function CodexSessionApp({
+  config,
   controller,
-  palette,
+  palette: basePalette,
   project: initialProject,
   policy = defaultSessionPolicy,
   historyLocation,
@@ -590,19 +444,163 @@ export function CodexSessionApp({
   onAction,
 }: CodexSessionAppProps) {
   const renderer = useRenderer()
+  const [palette, setPalette] = useState(basePalette)
+  const [builtInPalette, setBuiltInPalette] = useState(basePalette)
+  const [tui, setTui] = useState(() => ({ ...tuiDefaults, ...config?.tui }))
+  const keymap = useRef(new Keymap())
+  const vim = useRef(new VimComposer())
+  const [inputMode, setInputMode] = useState("INSERT")
+  const preferenceDirectory = config?.resolution
+    ? dirname(config.resolution.request.userPath)
+    : configDirectory()
   const { width: terminalWidth, height: terminalHeight } = useTerminalDimensions()
   const textareaRef = useRef<TextareaRenderable>(null)
   const activity = useRef({ time: Date.now(), sequence: controller.state.lastSequence })
-  const [awayNotice, setAwayNotice] = useState(false)
+  const [awayNotice, setAwayNotice] = useState("")
+  useEffect(() => {
+    if (!awayNotice) return
+    const timer = setTimeout(() => setAwayNotice(""), 15000)
+    return () => clearTimeout(timer)
+  }, [awayNotice])
+  const [suggestion, setSuggestion] = useState("")
+  const suggestionOwner = useRef<AbortController | undefined>(undefined)
+  const suggestionTurn = useRef<string | undefined>(undefined)
   const draftRevision = useRef(0)
+  const editorOwner = useRef<AbortController | undefined>(undefined)
+  const voiceOwner = useRef<VoiceCapture | undefined>(undefined)
+  const [voicePhase, setVoicePhase] = useState("")
+  useEffect(() => () => editorOwner.current?.abort(), [])
+  useEffect(() => () => voiceOwner.current?.cancel(), [])
   const resetCursorBlinkRef = useRef<() => void>(() => {})
   const scrollboxRef = useRef<ScrollBoxRenderable>(null)
   const [state, setState] = useState(controller.state)
   const [project, setProject] = useState(initialProject)
   const [commandError, setCommandError] = useState<string>()
+  const scrollback = useRef(new TranscriptScrollback())
+  useEffect(() => {
+    try {
+      setPalette(tui.theme ? loadUserTheme(preferenceDirectory, tui.theme) : builtInPalette)
+    } catch (error) {
+      setCommandError(`Theme unchanged: ${String(error)}`)
+    }
+  }, [builtInPalette, preferenceDirectory, tui.theme])
+  useEffect(() => {
+    if (tui.screen === "inline") {
+      renderer.footerHeight = Math.min(18, Math.max(6, renderer.terminalHeight - 3))
+      renderer.screenMode = "split-footer"
+      renderer.externalOutputMode = "capture-stdout"
+      try {
+        scrollback.current.append(renderer, state.transcript, tui.thinking)
+      } catch (error) {
+        setCommandError(`Scrollback: ${String(error)}`)
+      }
+    } else {
+      renderer.externalOutputMode = "passthrough"
+      renderer.screenMode = "alternate-screen"
+    }
+  }, [renderer, tui.screen, tui.thinking, state.transcript])
+  useEffect(() => {
+    if (!config) return
+    let previous = ""
+    const reload = () => {
+      try {
+        const bindings = readKeybindings(join(preferenceDirectory, "keybindings.json"))
+        const signature = JSON.stringify(bindings)
+        if (signature !== previous) {
+          keymap.current = new Keymap(bindings)
+          previous = signature
+        }
+      } catch (error) {
+        const message = String(error)
+        if (previous !== message) {
+          setCommandError(`Keybindings unchanged: ${message}`)
+          previous = message
+        }
+      }
+    }
+    reload()
+    const timer = setInterval(reload, 1500)
+    return () => clearInterval(timer)
+  }, [config, preferenceDirectory])
+  useEffect(() => {
+    renderer.useMouse = tui.mouse === "on" || (tui.mouse === "auto" && !terminalProfile().dumb)
+  }, [renderer, tui.mouse])
+  const scrollAcceleration = useMemo(
+    () => (tui.mouseScroll === "linear" ? new LinearScrollAccel() : new MacOSScrollAccel()),
+    [tui.mouseScroll],
+  )
+  useEffect(() => {
+    if (!tui.copyOnSelect) return
+    const selected = (selection: Selection) => {
+      if (selection.isDragging) return
+      queueMicrotask(() => {
+        const text = selection.getSelectedText()
+        if (text)
+          void copyText(text, { mode: tui.clipboard }).then(setCommandError, (error) =>
+            setCommandError(String(error)),
+          )
+      })
+    }
+    renderer.on("selection", selected)
+    return () => {
+      renderer.off("selection", selected)
+    }
+  }, [renderer, tui.copyOnSelect, tui.clipboard])
+  const tipVisitRecorded = useRef(false)
+  const [showStartupTip, setShowStartupTip] = useState(true)
+  useEffect(() => {
+    if (config && historyLocation && tui.tips && !tipVisitRecorded.current) {
+      tipVisitRecorded.current = true
+      setShowStartupTip(recordTipVisit(preferenceDirectory))
+    }
+  }, [config, historyLocation, preferenceDirectory, tui.tips])
   const [selectedOutlineId, setSelectedOutlineId] = useState<string>()
   const [outlineVisible, setOutlineVisible] = useState(false)
   const [overlay, setOverlay] = useState<OverlayState>()
+  useEffect(() => {
+    suggestionOwner.current?.abort()
+    setSuggestion("")
+    if (
+      !tui.suggestions ||
+      !controller.canSideQuery ||
+      state.turnStatus !== "completed" ||
+      state.pendingRequest ||
+      overlay ||
+      textareaRef.current?.plainText.trim()
+    )
+      return
+    const identity = state.transcript.filter((item) => item.kind === "message").at(-1)?.id
+    if (!identity || identity === suggestionTurn.current) return
+    suggestionTurn.current = identity
+    const owner = new AbortController(),
+      revision = draftRevision.current
+    suggestionOwner.current = owner
+    const timer = setTimeout(() => {
+      void controller
+        .sideQuery({ kind: "suggestion" }, owner.signal)
+        .then((text) => {
+          if (
+            !owner.signal.aborted &&
+            draftRevision.current === revision &&
+            !textareaRef.current?.plainText.trim()
+          )
+            setSuggestion(terminalText(text, 240))
+        })
+        .catch(() => {})
+    }, 750)
+    return () => {
+      clearTimeout(timer)
+      owner.abort()
+    }
+  }, [controller, tui.suggestions, state.turnStatus, state.pendingRequest, state.transcript, overlay])
+  useEffect(() => {
+    if (!config || !tui.onboarding) return
+    try {
+      bytes(join(preferenceDirectory, "onboarding.json"), 4096)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") setOverlay({ kind: "onboarding" })
+    }
+  }, [config, preferenceDirectory, tui.onboarding])
   const syntaxStyle = useMemo(() => createSyntaxStyle(palette), [palette])
   const styledComposerPlaceholder = useMemo(() => createComposerPlaceholder(palette), [palette])
   const scrollbarOptions = useMemo(() => createScrollbarOptions(palette), [palette])
@@ -641,7 +639,8 @@ export function CodexSessionApp({
     }
     const resetCursorBlink = () => {
       if (timeout) clearTimeout(timeout)
-      showCursor()
+      if (tui.reducedMotion) setCursorVisible(true)
+      else showCursor()
     }
 
     resetCursorBlinkRef.current = resetCursorBlink
@@ -651,7 +650,7 @@ export function CodexSessionApp({
       setCursorVisible(true)
       resetCursorBlinkRef.current = () => {}
     }
-  }, [])
+  }, [tui.reducedMotion])
 
   useEffect(() => {
     const unsubscribe = controller.subscribe(setState)
@@ -850,9 +849,137 @@ export function CodexSessionApp({
     )
   }, [permissions])
 
+  const startVoice = useCallback(() => {
+    if (voiceOwner.current || editorOwner.current) return
+    const capture = new VoiceCapture(),
+      before = textareaRef.current?.plainText ?? ""
+    voiceOwner.current = capture
+    void runCommand(async () => {
+      try {
+        const transcript = await capture.run(preferenceDirectory, project.cwd, setVoicePhase)
+        if (capture.phase === "cancelled") return
+        if (textareaRef.current?.plainText !== before) {
+          setOverlay({
+            kind: "resources",
+            title: "Dictation · draft changed and was preserved",
+            text: transcript,
+          })
+        } else textareaRef.current?.setText(`${before}${before.trim() ? " " : ""}${transcript}`)
+      } finally {
+        voiceOwner.current = undefined
+        setVoicePhase("")
+      }
+    })
+  }, [preferenceDirectory, project.cwd, runCommand])
+
   const runSlashCommand = useCallback(
     (command: ParsedSlashCommand) => {
       switch (command.name) {
+        case "voice":
+          if (command.argument === "start") startVoice()
+          else if (command.argument === "stop") voiceOwner.current?.stop()
+          else if (command.argument === "cancel") voiceOwner.current?.cancel()
+          else if (command.argument === "doctor")
+            void runCommand(async () => {
+              setOverlay({
+                kind: "resources",
+                title: "Voice diagnostics",
+                text: await voiceDiagnostics(preferenceDirectory, project.cwd),
+              })
+            })
+          else
+            setCommandError(
+              "Usage: /voice start|stop|cancel|doctor. Recording requires reviewed commands in /terminal.",
+            )
+          return
+        case "btw":
+          if (!command.argument) setCommandError("Usage: /btw QUESTION")
+          else {
+            suggestionOwner.current?.abort()
+            setOverlay({ kind: "side", question: command.argument })
+          }
+          return
+        case "suggest":
+          if (!suggestion) setCommandError("No suggestion available; enable opt-in suggestions in /config")
+          else if (textareaRef.current?.plainText.trim()) setCommandError("Stash the draft first")
+          else {
+            textareaRef.current?.setText(suggestion)
+            setSuggestion("")
+          }
+          return
+        case "config":
+          setOverlay({ kind: "settings" })
+          return
+        case "integrations":
+          setOverlay({ kind: "integrations" })
+          return
+        case "docs":
+        case "release-notes":
+          setOverlay({ kind: "docs", releaseNotes: command.name === "release-notes" })
+          return
+        case "onboarding":
+          setOverlay({ kind: "onboarding" })
+          return
+        case "terminal":
+          void runCommand(async () => {
+            setOverlay({ kind: "terminal-review", review: reviewTerminalIntegrations(preferenceDirectory) })
+          })
+          return
+        case "search":
+          setOverlay({ kind: "search", query: command.argument ?? "" })
+          return
+        case "thinking":
+          if (!["show", "collapse", "hide"].includes(command.argument ?? ""))
+            setCommandError("Usage: /thinking show|collapse|hide")
+          else setTui((current) => ({ ...current, thinking: command.argument as typeof current.thinking }))
+          return
+        case "screen":
+          if (!["alternate", "inline"].includes(command.argument ?? ""))
+            setCommandError("Usage: /screen alternate|inline")
+          else setTui((current) => ({ ...current, screen: command.argument as typeof current.screen }))
+          return
+        case "theme":
+          void runCommand(async () => {
+            const name = command.argument ?? "default"
+            if (name === "dark" || name === "light") {
+              setBuiltInPalette(brandThemes[name])
+              setTui((current) => ({ ...current, theme: "" }))
+              setPalette(brandThemes[name])
+            } else setPalette(name === "default" ? basePalette : loadUserTheme(preferenceDirectory, name))
+          })
+          return
+        case "image":
+          void runCommand(async () => {
+            if (!command.argument) throw new Error("Usage: /image PATH")
+            const preview = readPreviewImage(command.argument, project.cwd)
+            if (process.env.TERM_PROGRAM === "iTerm.app" && !process.env.TMUX) {
+              renderer.footerHeight = Math.min(18, Math.max(6, renderer.terminalHeight - 3))
+              renderer.screenMode = "split-footer"
+              setTui((current) => ({ ...current, screen: "inline" }))
+              showItermImage(renderer, preview.name, preview.bytes)
+            } else setOverlay({ kind: "image", ...preview })
+          })
+          return
+        case "copy":
+          void runCommand(async () => {
+            setCommandError(
+              await copyText(
+                clipboardText(
+                  controller.state.transcript,
+                  command.argument === undefined ? 1 : Number(command.argument),
+                ),
+                { mode: tui.clipboard },
+              ),
+            )
+          })
+          return
+        case "keys":
+          setOverlay({
+            kind: "resources",
+            title: "Keybindings",
+            text: `${join(preferenceDirectory, "keybindings.json")}\nVersion 1 · hot reload every 1.5s · Escape/Ctrl+C reserved\n${keymap.current.bindings.map((row) => `${row.context}: ${row.keys} → ${row.action}`).join("\n")}`,
+          })
+          return
         case "unknown":
           if (engine === "codesplash") void runCommand(() => controller.send({ text: command.raw }))
           else setCommandError(`Unknown command ${command.raw.split(/\s+/)[0]} — try /help`)
@@ -1070,7 +1197,7 @@ export function CodexSessionApp({
               )
             if (copy && !renderer.copyToClipboardOSC52(text))
               throw new Error("This terminal does not support clipboard copying")
-            setAwayNotice(false)
+            setAwayNotice("")
             setOverlay({ kind: "resources", title: `${command.name}${copy ? " · copied" : ""}`, text })
           })
           break
@@ -1209,232 +1336,373 @@ export function CodexSessionApp({
       project.cwd,
       renderer,
       state.hookActivities,
+      tui.clipboard,
+      preferenceDirectory,
+      basePalette,
+      suggestion,
+      startVoice,
     ],
   )
 
-  useKeyboard((key) => {
-    const now = Date.now(),
-      previous = activity.current
-    if (awayRecap(previous.time, now, !!state.pendingRequest, previous.sequence, state.lastSequence))
-      setAwayNotice(true)
-    activity.current = { time: now, sequence: state.lastSequence }
-    if (key.ctrl && (key.name === "c" || key.name === "q")) {
-      key.preventDefault()
-      onAction("home")
-      return
-    }
-
-    if (key.ctrl && key.name === "b") {
-      key.preventDefault()
-      void controller.tasks({ action: "background" }).catch((error) => setCommandError(String(error)))
-      return
-    }
-    if (key.ctrl && key.name === "s" && controller.inputQueue) {
-      key.preventDefault()
-      void runCommand(async () => saveCurrentDraft())
-      return
-    }
-    if (key.ctrl && key.name === "r" && !reconnectPending && controller.inputQueue) {
-      key.preventDefault()
-      setOverlay({ kind: "input", tab: "history" })
-      return
-    }
-    if (key.name === "tab" && !key.shift && state.pendingRequest && controller.inputQueue && !overlay) {
-      key.preventDefault()
-      setApprovalFocus((value) => !value)
-      return
-    }
-    if (key.name === "escape" && editingInput && !overlay) {
-      key.preventDefault()
-      setEditingInput(undefined)
-      setCommandError("Queue edit cancelled; draft retained")
-      return
-    }
-    if (key.ctrl && key.name === "z") {
-      key.preventDefault()
-      suspendToShell(renderer)
-      return
-    }
-
-    if (key.name === "f1") {
-      key.preventDefault()
-      setOverlay((current) => (current?.kind === "help" ? undefined : { kind: "help" }))
-      return
-    }
-
-    // Shift+Tab cycles the permission mode even with the /permissions overlay open, so the
-    // overlay's mode line updates live. Terminals encode it as CSI Z, parsed as shift+"tab".
-    if (key.name === "tab" && key.shift) {
-      key.preventDefault()
-      cyclePermissionMode()
-      return
-    }
-
-    if (
-      key.name === "tab" &&
-      !key.shift &&
-      !overlay &&
-      !state.pendingRequest &&
-      state.turnStatus !== "running" &&
-      engine === "codesplash"
-    ) {
-      const readDraft = () => ({
-        text: textareaRef.current?.plainText ?? "",
-        cursor: textareaRef.current?.cursorOffset ?? 0,
-        revision: draftRevision.current,
-      })
-      const extensionDraft = /^\/extensions run (\S+)(?: (.*))?$/.exec(readDraft().text)
-      if (extensionDraft) {
-        key.preventDefault()
-        const before = readDraft()
-        void runCommand(async () => {
-          const result = (await controller.extensionsCommand(
-            `complete ${extensionDraft[1]} ${extensionDraft[2] ?? ""}`,
-          )) as { completions: string[] }
-          const current = readDraft()
-          if (
-            current.text !== before.text ||
-            current.revision !== before.revision ||
-            controller.state.pendingRequest
+  const openPalette = () => {
+    const draft = textareaRef.current?.plainText ?? ""
+    setOverlay({
+      kind: "palette",
+      query: draft.startsWith("/") ? draft : "",
+      draft,
+      revision: draftRevision.current,
+      models: [],
+    })
+    if (controller.canSwitchModels)
+      void controller
+        .listModels()
+        .then((models) => {
+          setOverlay((current) =>
+            current?.kind === "palette" ? { ...current, models: models.map((model) => model.id) } : current,
           )
-            return
-          if (result.completions.length === 1)
-            textareaRef.current?.setText(`/extensions run ${extensionDraft[1]} ${result.completions[0]}`)
-          else
-            setOverlay({
-              kind: "resources",
-              title: "Extension completions",
-              text: result.completions.join("\n") || "No completions",
-            })
         })
+        .catch(() => {})
+  }
+  const openEditor = () => {
+    if (editorOwner.current || voiceOwner.current || overlay) return
+    const text = textareaRef.current?.plainText ?? "",
+      revision = draftRevision.current
+    const owner = new AbortController()
+    editorOwner.current = owner
+    void runCommand(async () => {
+      try {
+        const result = await editDraft({ text, cwd: project.cwd, renderer, signal: owner.signal })
+        if (owner.signal.aborted) return
+        if (draftRevision.current !== revision || textareaRef.current?.plainText !== text)
+          throw new Error("Draft changed while editor was open; current draft preserved")
+        textareaRef.current?.setText(result)
+      } finally {
+        editorOwner.current = undefined
+      }
+    })
+  }
+
+  useKeyboard(
+    (key) => {
+      if (key.eventType === "release") {
+        if (key.name === "f4") {
+          key.preventDefault()
+          voiceOwner.current?.stop()
+        }
         return
       }
-      if (trailingMention(readDraft())) {
+      if (key.name === "f4" && !overlay && (!state.pendingRequest || !approvalFocus)) {
         key.preventDefault()
-        void runCommand(() =>
-          completeMentionDraft(
-            readDraft,
-            (query) => controller.completeFileMention(query),
-            (text) => textareaRef.current?.setText(text),
-            () => controller.state.turnStatus !== "running" && !controller.state.pendingRequest,
-          ),
+        if (key.repeated) return
+        if (voiceOwner.current) voiceOwner.current.stop()
+        else startVoice()
+        return
+      }
+      if (key.name === "escape" && voiceOwner.current && !overlay) {
+        key.preventDefault()
+        voiceOwner.current.cancel()
+        return
+      }
+      const now = Date.now(),
+        previous = activity.current
+      if (awayRecap(previous.time, now, !!state.pendingRequest, previous.sequence, state.lastSequence))
+        setAwayNotice(
+          state.outcomes?.rows
+            .filter((row) => row.status !== "running" && row.lastSequence > previous.sequence)
+            .slice(-3)
+            .map(outcomeSummary)
+            .join(" · ") || "Session activity was recorded",
         )
-        return
-      }
-    }
-
-    if (overlay) {
-      if (key.name === "escape") {
+      activity.current = { time: now, sequence: state.lastSequence }
+      if (key.ctrl && key.name === "c") {
         key.preventDefault()
-        setOverlay(undefined)
+        onAction("home")
         return
       }
-      if (overlay.kind === "permissions" && overlay.rules?.phase === "ready" && permissions) {
-        const ready = overlay.rules
-        const grantCount = ready.rules.filter((rule) => rule.source === "grants").length
-        if (grantCount > 0 && (key.name === "up" || key.name === "down")) {
+
+      const ownedOverlay = !!(
+        overlay &&
+        [
+          "palette",
+          "search",
+          "settings",
+          "integrations",
+          "docs",
+          "onboarding",
+          "terminal-review",
+          "side",
+        ].includes(overlay.kind)
+      )
+      const context = overlay ? "overlay" : state.pendingRequest && approvalFocus ? "approval" : "composer"
+      if (
+        tui.vim &&
+        context === "composer" &&
+        textareaRef.current &&
+        vim.current.handle(key, textareaRef.current)
+      ) {
+        key.preventDefault()
+        setInputMode(vim.current.mode)
+        return
+      }
+      const action = keymap.current.resolve(keyToken(key), context, Date.now(), !ownedOverlay)
+      if (action === "pending" || action === "none") {
+        key.preventDefault()
+        return
+      }
+      if (action === "submit" || action === "newline") {
+        key.preventDefault()
+        if (context === "composer") {
+          if (action === "submit") textareaRef.current?.submit()
+          else textareaRef.current?.insertText("\n")
+        }
+        return
+      }
+      if (action === "home") {
+        key.preventDefault()
+        onAction("home")
+        return
+      }
+      if (action === "palette") {
+        key.preventDefault()
+        openPalette()
+        return
+      }
+      if (action === "editor") {
+        key.preventDefault()
+        openEditor()
+        return
+      }
+      if (key.name === "tab" && !key.shift && !overlay && (!state.pendingRequest || !approvalFocus)) {
+        const draft = textareaRef.current?.plainText ?? ""
+        if (draft.startsWith("/") && !draft.startsWith("/extensions run ")) {
+          const matches = commandSuggestions(draft)
+          if (matches.length === 1) {
+            key.preventDefault()
+            textareaRef.current?.setText(`${matches[0]!.value} `)
+            return
+          }
+          if (matches.length || draft.startsWith("/model ")) {
+            key.preventDefault()
+            openPalette()
+            return
+          }
+        }
+      }
+
+      if (action === "background") {
+        key.preventDefault()
+        void controller.tasks({ action: "background" }).catch((error) => setCommandError(String(error)))
+        return
+      }
+      if (action === "stash" && controller.inputQueue) {
+        key.preventDefault()
+        void runCommand(async () => saveCurrentDraft())
+        return
+      }
+      if (action === "history" && !reconnectPending && controller.inputQueue) {
+        key.preventDefault()
+        setOverlay({ kind: "input", tab: "history" })
+        return
+      }
+      if (key.name === "tab" && !key.shift && state.pendingRequest && controller.inputQueue && !overlay) {
+        key.preventDefault()
+        setApprovalFocus((value) => !value)
+        return
+      }
+      if (key.name === "escape" && editingInput && !overlay) {
+        key.preventDefault()
+        setEditingInput(undefined)
+        setCommandError("Queue edit cancelled; draft retained")
+        return
+      }
+      if (action === "suspend") {
+        key.preventDefault()
+        suspendToShell(renderer)
+        return
+      }
+
+      if (action === "help") {
+        key.preventDefault()
+        setOverlay((current) => (current?.kind === "help" ? undefined : { kind: "help" }))
+        return
+      }
+
+      // Shift+Tab cycles the permission mode even with the /permissions overlay open, so the
+      // overlay's mode line updates live. Terminals encode it as CSI Z, parsed as shift+"tab".
+      if (action === "permission") {
+        key.preventDefault()
+        cyclePermissionMode()
+        return
+      }
+
+      if (
+        key.name === "tab" &&
+        !key.shift &&
+        !overlay &&
+        !state.pendingRequest &&
+        state.turnStatus !== "running" &&
+        engine === "codesplash"
+      ) {
+        const readDraft = () => ({
+          text: textareaRef.current?.plainText ?? "",
+          cursor: textareaRef.current?.cursorOffset ?? 0,
+          revision: draftRevision.current,
+        })
+        const extensionDraft = /^\/extensions run (\S+)(?: (.*))?$/.exec(readDraft().text)
+        if (extensionDraft) {
           key.preventDefault()
-          const direction = key.name === "up" ? -1 : 1
-          setOverlay({
-            kind: "permissions",
-            rules: {
-              ...ready,
-              selectedGrant: Math.max(0, Math.min(grantCount - 1, ready.selectedGrant + direction)),
-            },
+          const before = readDraft()
+          void runCommand(async () => {
+            const result = (await controller.extensionsCommand(
+              `complete ${extensionDraft[1]} ${extensionDraft[2] ?? ""}`,
+            )) as { completions: string[] }
+            const current = readDraft()
+            if (
+              current.text !== before.text ||
+              current.revision !== before.revision ||
+              controller.state.pendingRequest
+            )
+              return
+            if (result.completions.length === 1)
+              textareaRef.current?.setText(`/extensions run ${extensionDraft[1]} ${result.completions[0]}`)
+            else
+              setOverlay({
+                kind: "resources",
+                title: "Extension completions",
+                text: result.completions.join("\n") || "No completions",
+              })
           })
           return
         }
-        if (key.name === "d" && grantCount > 0 && permissions.removeGrant) {
+        if (trailingMention(readDraft())) {
           key.preventDefault()
-          void deleteSelectedGrant(permissions, ready.rules, ready.selectedGrant).then(
-            (next) =>
-              setOverlay((current) =>
-                current?.kind === "permissions" && current.rules?.phase === "ready"
-                  ? { kind: "permissions", rules: { phase: "ready", ...next } }
-                  : current,
-              ),
-            (error) => setCommandError(error instanceof Error ? error.message : String(error)),
+          void runCommand(() =>
+            completeMentionDraft(
+              readDraft,
+              (query) => controller.completeFileMention(query),
+              (text) => textareaRef.current?.setText(text),
+              () => controller.state.turnStatus !== "running" && !controller.state.pendingRequest,
+            ),
           )
           return
         }
       }
-      if (overlay.kind === "models" && !overlay.state.loading && overlay.state.models.length > 0) {
-        if (key.name === "up" || key.name === "down") {
+
+      if (ownedOverlay) return
+      if (overlay) {
+        if (key.name === "escape") {
           key.preventDefault()
-          const direction = key.name === "up" ? -1 : 1
-          setOverlay({
-            kind: "models",
-            state: {
-              ...overlay.state,
-              selected: Math.max(
-                0,
-                Math.min(overlay.state.models.length - 1, overlay.state.selected + direction),
-              ),
-            },
-          })
+          setOverlay(undefined)
           return
         }
-        if (key.name === "return" || key.name === "enter") {
-          key.preventDefault()
-          const model = overlay.state.models[overlay.state.selected]
-          if (model) selectModel(model)
-          return
+        if (overlay.kind === "permissions" && overlay.rules?.phase === "ready" && permissions) {
+          const ready = overlay.rules
+          const grantCount = ready.rules.filter((rule) => rule.source === "grants").length
+          if (grantCount > 0 && (key.name === "up" || key.name === "down")) {
+            key.preventDefault()
+            const direction = key.name === "up" ? -1 : 1
+            setOverlay({
+              kind: "permissions",
+              rules: {
+                ...ready,
+                selectedGrant: Math.max(0, Math.min(grantCount - 1, ready.selectedGrant + direction)),
+              },
+            })
+            return
+          }
+          if (key.name === "d" && grantCount > 0 && permissions.removeGrant) {
+            key.preventDefault()
+            void deleteSelectedGrant(permissions, ready.rules, ready.selectedGrant).then(
+              (next) =>
+                setOverlay((current) =>
+                  current?.kind === "permissions" && current.rules?.phase === "ready"
+                    ? { kind: "permissions", rules: { phase: "ready", ...next } }
+                    : current,
+                ),
+              (error) => setCommandError(error instanceof Error ? error.message : String(error)),
+            )
+            return
+          }
         }
+        if (overlay.kind === "models" && !overlay.state.loading && overlay.state.models.length > 0) {
+          if (key.name === "up" || key.name === "down") {
+            key.preventDefault()
+            const direction = key.name === "up" ? -1 : 1
+            setOverlay({
+              kind: "models",
+              state: {
+                ...overlay.state,
+                selected: Math.max(
+                  0,
+                  Math.min(overlay.state.models.length - 1, overlay.state.selected + direction),
+                ),
+              },
+            })
+            return
+          }
+          if (key.name === "return" || key.name === "enter") {
+            key.preventDefault()
+            const model = overlay.state.models[overlay.state.selected]
+            if (model) selectModel(model)
+            return
+          }
+        }
+        return
       }
-      return
-    }
 
-    if (key.ctrl && key.name === "l") {
-      key.preventDefault()
-      jumpToLatest()
-      return
-    }
-
-    if (key.ctrl && key.name === "o") {
-      key.preventDefault()
-      toggleOutline()
-      return
-    }
-
-    if ((key.option || key.meta) && (key.name === "up" || key.name === "down")) {
-      key.preventDefault()
-      moveBetweenSections(key.name === "up" ? -1 : 1)
-      return
-    }
-
-    if (state.pendingRequest && approvalFocus) {
-      const choice = approvalChoiceForKey(key.name, state.pendingRequest)
-      if (choice) {
+      if (action === "latest") {
         key.preventDefault()
-        resolveRequest(choice)
+        jumpToLatest()
+        return
       }
-      return
-    }
 
-    if (key.name === "escape" && state.turnStatus === "running") {
-      key.preventDefault()
-      void runCommand(() => controller.interrupt())
-      return
-    }
+      if (action === "outline") {
+        key.preventDefault()
+        toggleOutline()
+        return
+      }
 
-    if (key.name === "escape" && !state.pendingRequest && state.turnStatus !== "running") {
-      key.preventDefault()
-      const now = Date.now()
-      if (now - lastEscape.current < 600) {
-        lastEscape.current = 0
-        void runCommand(async () => {
-          const result = await controller.sessionRecovery({ action: "tree" })
-          setOverlay({ kind: "recovery", tree: result.data as BranchView })
-        })
-      } else lastEscape.current = now
-      return
-    }
+      if ((key.option || key.meta) && (key.name === "up" || key.name === "down")) {
+        key.preventDefault()
+        moveBetweenSections(key.name === "up" ? -1 : 1)
+        return
+      }
 
-    if (key.ctrl && key.name === "r" && reconnectPending) {
-      key.preventDefault()
-      onAction("reconnect")
-    }
-  })
+      if (state.pendingRequest && approvalFocus) {
+        const choice = approvalChoiceForKey(key.name, state.pendingRequest)
+        if (choice) {
+          key.preventDefault()
+          resolveRequest(choice)
+        }
+        return
+      }
+
+      if (key.name === "escape" && state.turnStatus === "running") {
+        key.preventDefault()
+        void runCommand(() => controller.interrupt())
+        return
+      }
+
+      if (key.name === "escape" && !state.pendingRequest && state.turnStatus !== "running") {
+        key.preventDefault()
+        const now = Date.now()
+        if (now - lastEscape.current < 600) {
+          lastEscape.current = 0
+          void runCommand(async () => {
+            const result = await controller.sessionRecovery({ action: "tree" })
+            setOverlay({ kind: "recovery", tree: result.data as BranchView })
+          })
+        } else lastEscape.current = now
+        return
+      }
+
+      if (key.ctrl && key.name === "r" && reconnectPending) {
+        key.preventDefault()
+        onAction("reconnect")
+      }
+    },
+    { release: true },
+  )
 
   const context = formatContextRemaining(state)
   const git = formatGit(project)
@@ -1465,6 +1733,7 @@ export function CodexSessionApp({
       <box style={{ flexGrow: 1, minHeight: 0, width: "100%", flexDirection: "row" }}>
         <scrollbox
           ref={scrollboxRef}
+          scrollAcceleration={scrollAcceleration}
           stickyScroll
           stickyStart="bottom"
           verticalScrollbarOptions={scrollbarOptions}
@@ -1482,15 +1751,22 @@ export function CodexSessionApp({
               </text>
             </box>
           ) : (
-            state.transcript.map((item) => (
-              <TranscriptEntry
-                key={item.id}
-                item={item}
-                palette={palette}
-                syntaxStyle={syntaxStyle}
-                engineName={engineDisplayName(engine)}
-              />
-            ))
+            state.transcript
+              .filter(
+                (item) =>
+                  (tui.screen !== "inline" || item.status === "running") &&
+                  (item.kind !== "reasoning" || tui.thinking !== "hide"),
+              )
+              .map((item) => (
+                <TranscriptEntry
+                  key={item.id}
+                  item={item}
+                  palette={palette}
+                  syntaxStyle={syntaxStyle}
+                  engineName={engineDisplayName(engine)}
+                  thinking={tui.thinking}
+                />
+              ))
           )}
         </scrollbox>
 
@@ -1512,7 +1788,7 @@ export function CodexSessionApp({
         </text>
       </box>
 
-      {showPlanPanel(terminalHeight, state.plan.length) ? (
+      {tui.screen !== "inline" && showPlanPanel(terminalHeight, state.plan.length) ? (
         <box
           title="Plan"
           style={{
@@ -1552,9 +1828,11 @@ export function CodexSessionApp({
               .join("\n")}`}
           </text>
         ))}
-      {awayNotice && (
-        <text fg={palette.muted}>
-          While away, session activity was recorded. /recap shows the local summary.
+      {awayNotice && <text fg={palette.muted}>While away: {awayNotice}. /recap shows more.</text>}
+      {suggestion && <text fg={palette.muted}>Suggested next prompt: {suggestion} · /suggest stages it</text>}
+      {voicePhase && (
+        <text fg={palette.action}>
+          Microphone · {voicePhase} · F4 or /voice stop finishes · Esc cancels · never auto-sends
         </text>
       )}
       {(state.outcomes ?? emptyOutcomes()).rows.at(-1)?.status !== "running" &&
@@ -1590,6 +1868,7 @@ export function CodexSessionApp({
           keyBindings={composerKeyBindings}
           style={{ flexGrow: 1, height: "100%" }}
           onContentChange={() => {
+            suggestionOwner.current?.abort()
             draftRevision.current++
             resetCursorBlinkRef.current()
           }}
@@ -1670,6 +1949,7 @@ export function CodexSessionApp({
       <box style={{ height: 1, flexDirection: "row", justifyContent: "space-between" }}>
         <text fg={error ? palette.destructive : palette.muted}>
           {error ?? statusHelp(state, supportsReconnect)}
+          {tui.vim ? ` · ${inputMode}` : ""}
         </text>
         <box style={{ height: 1, flexDirection: "row" }}>
           <text fg={palette.accent}>
@@ -1690,6 +1970,24 @@ export function CodexSessionApp({
         </box>
       </box>
 
+      <Attention
+        settings={tui}
+        state={state}
+        project={project.name}
+        cwd={project.cwd}
+        directory={preferenceDirectory}
+        palette={palette}
+        enabled={!!config}
+      />
+      {tui.tips &&
+        (showStartupTip || state.pendingRequest || state.turnStatus === "running") &&
+        tui.screen !== "inline" &&
+        terminalHeight >= 28 && (
+          <text fg={palette.muted} style={{ height: 1 }}>
+            {contextualTip(state)}
+          </text>
+        )}
+
       <SessionOverlay
         overlay={overlay}
         palette={palette}
@@ -1698,6 +1996,139 @@ export function CodexSessionApp({
         state={state}
         permissions={permissions}
       />
+      {overlay?.kind === "palette" && (
+        <CommandPalette
+          initialQuery={overlay.query}
+          models={overlay.models}
+          palette={palette}
+          onClose={() => setOverlay(undefined)}
+          onSelect={(value) => {
+            if (
+              draftRevision.current !== overlay.revision ||
+              textareaRef.current?.plainText !== overlay.draft
+            ) {
+              setCommandError("Draft changed; command was not inserted")
+            } else if (overlay.draft.trim() && !overlay.draft.startsWith("/")) {
+              setCommandError("Stash the current draft with Ctrl+S before inserting a command")
+            } else textareaRef.current?.setText(value)
+            setOverlay(undefined)
+          }}
+        />
+      )}
+      {overlay?.kind === "terminal-review" && (
+        <ConfirmPanel
+          title="Trust terminal integrations"
+          palette={palette}
+          text={`These commands run as your user on this machine. Status receives redacted state on stdin. Voice runs only when explicitly started.\n\n${terminalText(JSON.stringify(overlay.review.config), 65536)}\n\nResolved executables: ${overlay.review.executables.join(", ")}\nFingerprint: ${overlay.review.fingerprint}\nCurrently trusted: ${overlay.review.trusted}`}
+          onClose={() => setOverlay(undefined)}
+          onConfirm={() => {
+            void runCommand(async () => {
+              trustTerminalIntegrations(preferenceDirectory, overlay.review.fingerprint)
+              setOverlay(undefined)
+            })
+          }}
+        />
+      )}
+      {overlay?.kind === "onboarding" && (
+        <ConfirmPanel
+          title="Getting started"
+          palette={palette}
+          text={onboardingText}
+          onClose={() => setOverlay(undefined)}
+          onConfirm={() => {
+            void runCommand(async () => {
+              atomic(
+                join(preferenceDirectory, "onboarding.json"),
+                JSON.stringify({ version: 1, completed: true }),
+              )
+              setOverlay(undefined)
+            })
+          }}
+        />
+      )}
+      {overlay?.kind === "settings" && (
+        <SettingsPanel
+          base={config ?? defaultConfig}
+          cwd={project.cwd}
+          palette={palette}
+          onClose={() => setOverlay(undefined)}
+          onChange={(next) => {
+            setTui({ ...tuiDefaults, ...next.tui })
+            setBuiltInPalette(next.theme === "system" ? basePalette : brandThemes[next.theme])
+          }}
+        />
+      )}
+      {overlay?.kind === "integrations" && (
+        <IntegrationsPanel
+          controller={controller}
+          palette={palette}
+          onClose={() => setOverlay(undefined)}
+          onStage={(text) => {
+            if (textareaRef.current?.plainText.trim())
+              setCommandError("Stash the draft with Ctrl+S before selecting a skill")
+            else textareaRef.current?.setText(text)
+            setOverlay(undefined)
+          }}
+        />
+      )}
+      {overlay?.kind === "docs" && (
+        <DocsPanel
+          releaseNotes={overlay.releaseNotes}
+          palette={palette}
+          syntaxStyle={syntaxStyle}
+          onClose={() => setOverlay(undefined)}
+        />
+      )}
+      {overlay?.kind === "side" && (
+        <SidePanel
+          controller={controller}
+          question={overlay.question}
+          palette={palette}
+          syntaxStyle={syntaxStyle}
+          onClose={() => setOverlay(undefined)}
+        />
+      )}
+      {overlay?.kind === "search" && (
+        <SearchPanel
+          transcript={state.transcript}
+          initialQuery={overlay.query}
+          palette={palette}
+          onClose={() => setOverlay(undefined)}
+          onSelect={(item) => {
+            setOverlay(undefined)
+            if (tui.screen === "inline") setTui((current) => ({ ...current, screen: "alternate" }))
+            if (item.kind === "reasoning") setTui((current) => ({ ...current, thinking: "show" }))
+            setTimeout(() => {
+              if (scrollboxRef.current)
+                scrollToTranscriptSection(scrollboxRef.current, transcriptAnchorId(item.id))
+              setSelectedOutlineId(item.id)
+            }, 0)
+          }}
+        />
+      )}
+      {overlay?.kind === "image" && (
+        <box
+          style={{
+            position: "absolute",
+            top: 1,
+            left: "10%",
+            width: "80%",
+            height: "80%",
+            zIndex: 40,
+            backgroundColor: palette.popover,
+            border: true,
+          }}
+        >
+          <text fg={palette.accent}>{overlay.name} · Esc closes · graphics or block fallback</text>
+          <image
+            source={overlay.bytes}
+            protocol="auto"
+            fit="fit"
+            style={{ flexGrow: 1 }}
+            onError={(error) => setCommandError(`Image: ${String(error)}`)}
+          />
+        </box>
+      )}
       {overlay?.kind === "recovery" ? (
         <RecoveryPanel
           controller={controller}
@@ -1782,6 +2213,15 @@ function SessionOverlay({
 }) {
   if (
     !overlay ||
+    overlay.kind === "palette" ||
+    overlay.kind === "terminal-review" ||
+    overlay.kind === "settings" ||
+    overlay.kind === "integrations" ||
+    overlay.kind === "docs" ||
+    overlay.kind === "onboarding" ||
+    overlay.kind === "side" ||
+    overlay.kind === "search" ||
+    overlay.kind === "image" ||
     overlay.kind === "teams" ||
     overlay.kind === "tasks" ||
     overlay.kind === "input" ||
@@ -2015,13 +2455,25 @@ function TranscriptEntry({
   palette,
   syntaxStyle,
   engineName = "Codex",
+  thinking = "show",
 }: {
   item: TranscriptItem
   palette: BrandPalette
   syntaxStyle: SyntaxStyle
   engineName?: string
+  thinking?: string
 }) {
   const anchorId = transcriptAnchorId(item.id)
+  const rendered = useMemo(
+    () => (item.status === "running" ? item.text : terminalMarkdown(item.text)),
+    [item.text, item.status],
+  )
+  if (item.kind === "reasoning" && thinking === "collapse")
+    return (
+      <text id={anchorId} fg={palette.muted}>
+        {engineName} thinking · {item.status} · /thinking show
+      </text>
+    )
 
   if (item.kind === "diff") {
     return (
@@ -2083,7 +2535,7 @@ function TranscriptEntry({
           </text>
         ) : (
           <markdown
-            content={item.text}
+            content={rendered}
             syntaxStyle={syntaxStyle}
             streaming={false}
             style={{ width: "100%" }}

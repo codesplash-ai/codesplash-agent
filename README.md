@@ -1,22 +1,128 @@
 # CodeSplash Agent
 
 **Your entire dev workday. One terminal.** A terminal harness that drives the AI coding agents you
-already pay for — OpenAI Codex natively, Claude Code through its official CLI — with your
-credentials staying exactly where they are.
+already pay for — OpenAI Codex natively, Claude Code through its official CLI — alongside the native CodeSplash engine for direct provider access.
 
 - **Codex, native.** Streamed responses, tool activity, live diffs, plans, interactive approvals,
   interrupt, crash recovery, and resumable sessions over the official `codex app-server` protocol.
 - **Claude Code, official.** One keypress hands your real terminal to the official `claude` CLI and
   restores the harness when you leave. The app never reimplements or touches Anthropic auth.
-- **Credentials stay on your machine.** The agent never reads, copies, proxies, or stores provider
-  credentials. It launches the official CLIs you installed and lets them own their own auth.
+- **Engine-specific authentication.** Codex and Claude own their CLI authentication. The native
+  CodeSplash engine uses configured provider keys and local credential/secret storage; keys are
+  sent only through the configured provider requests and explicit secret bindings.
 - **Durable sessions.** Conversations persist locally (coalesced events, `0600` permissions, no raw
   provider payloads) and resume across restarts — or run with `--no-history` and write nothing.
 
+## Terminal workspace
+
+Press **Ctrl+P** for a fuzzy command palette, or Tab after a slash command for completion.
+Selection stages a command; Enter in the composer runs it. **Ctrl+G** edits the draft in
+`$VISUAL`, then `$EDITOR`, then `vi` (`notepad` on Windows). A failed or cancelled editor
+preserves the draft. Quoted arguments are supported; shell operators are rejected.
+
+- `/config`: searchable Appearance, Input, Attention and Agent settings. Source provenance and
+  managed locks stay visible. Supported UI preferences save to the user source; higher layers still win.
+- `/integrations`: MCP, plugins, hooks, skills and extensions through their existing review controls.
+- `/docs`, `/release-notes`, `/onboarding`: bundled help and dismissible local setup guidance.
+- `/search TEXT`: navigate retained transcript text. `/thinking show|collapse|hide` changes its display.
+- `/screen inline|alternate`: switch between native terminal scrollback and the full-screen transcript.
+  Completed inline entries are emitted once per display session; switch back for the full retained text.
+- `/copy [N]`: copy the latest N completed assistant messages (1–100; 1 MiB maximum). Local native
+  clipboard commands are preferred; OSC 52 supports remote/tmux sessions. The terminal controls access.
+- `/image PATH`: preview a local image (8 MiB/16 MP maximum). Kitty/sixel/block rendering follows
+  terminal capabilities; iTerm2 uses its inline-file protocol. No image URL is fetched automatically.
+- `/btw QUESTION`: native-engine side question with visible context, no tools, no main-history writes,
+  a 30-second deadline and at most 512 output tokens. Usage counts toward the session. New foreground
+  input, interrupt or closing the panel cancels it. Unsupported engines report that capability.
+- `/suggest`: stage an opt-in next-prompt suggestion into an empty composer, without sending it.
+  After an absence, a short local outcome summary appears on return; `/recap` shows more.
+
+Closed Mermaid fences render as bounded terminal diagrams. LaTeX supports a Unicode subset
+(symbols, fractions, roots, powers and subscripts); unsupported syntax stays inspectable as text.
+Theme files live in `themes/NAME.json` under the user config directory, for example
+`{"extends":"dark","colors":{"accent":"#80c0ff"}}`; use `/theme NAME` or set `tui.theme`.
+
+Optional preferences in `config.toml` (defaults are conservative):
+
+```toml
+[tui]
+vim = false
+mouse = "auto"                # auto, on, off
+mouseScroll = "accelerated"   # accelerated, linear
+copyOnSelect = false          # copy completed mouse selections
+clipboard = "auto"            # auto, native, osc52
+screen = "alternate"          # alternate, inline
+thinking = "show"             # show, collapse, hide
+notifications = false         # generic notices only while the terminal is unfocused
+notificationIdleMs = 1000     # minimum time unfocused before a notification (0–60000)
+title = true
+reducedMotion = false
+spinner = true
+sleepInhibitor = false        # active turns only; unsupported hosts report a diagnostic
+pet = "none"                  # none, cat
+suggestions = false           # incurs a bounded native-provider call after eligible turns
+tips = true
+onboarding = true
+statusSegments = ["model", "context", "state"] # also project, tokens, cost, clock
+```
+
+`/keys` explains a versioned `keybindings.json` in the user config directory. It reloads during
+use; invalid edits preserve the last valid map. Contexts are `global`, `composer`, `approval` and
+`overlay`; chords contain up to three keys with a one-second deadline. Escape and Ctrl+C remain
+recovery keys. Specific contexts override global bindings; panels keep their own navigation and
+accept explicit overlay bindings for home, palette, help, suspend or none. Example:
+
+```json
+{"version":1,"bindings":[{"context":"global","keys":"ctrl+k ctrl+p","action":"palette"}]}
+```
+
+Startup tips appear once every three recorded sessions; active approval/turn hints remain contextual.
+The visit counter stores no conversation content and is not written under `--no-history`.
+
+Vim mode starts in INSERT. Escape enters NORMAL; supported editing keys include h/j/k/l, w/b,
+0/$, i/a/I/A, x, dd/cc, dw/cw, db/cb, d$/c$, d0/c0, u and Ctrl+R. Dot repeats
+the last supported deletion or inserted text/change. Approval panels retain their own controls.
+
+### Reviewed terminal commands and dictation
+
+Executable integrations live only in the user config directory's `terminal-integrations.json`.
+Use `/terminal` to review and accept their command/config fingerprint. Changed command, executable
+or absolute file-argument bytes require another review. These are user programs with normal OS
+access: review the program and its dependencies. The minimal inherited environment omits provider
+credentials. A status script receives JSON on stdin (`version`, `project`, `model`, `state`, `usage`),
+returns one short line on stdout, and has a one-second timeout. Runs never overlap.
+
+```json
+{"version":1,"statusLine":["/absolute/path/to/status-program"]}
+```
+
+Dictation requires your installed recorder and transcriber. Commands are argv arrays, not shell
+strings, with a literal `{audio}` placeholder. For example, with local FFmpeg and whisper.cpp:
+
+```json
+{
+  "version": 1,
+  "voice": {
+    "record": ["ffmpeg", "-y", "-f", "avfoundation", "-i", ":0", "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "{audio}"],
+    "transcribe": ["/absolute/path/to/whisper-cli", "-m", "/absolute/path/to/ggml-tiny.en.bin", "-nt", "-np", "-f", "{audio}"],
+    "diagnostic": ["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""]
+  }
+}
+```
+
+The recorder example is for macOS: choose the actual microphone index and grant OS microphone
+access. Linux can use FFmpeg's `pulse` input with `default`; device/backend availability varies.
+`/voice doctor` checks binaries, review state and the optional diagnostic command. F4 holds when
+the terminal reports key releases and toggles otherwise; `/voice start|stop|cancel` works in either
+case. Capture stops at 60 seconds; WAV files are capped at 16 MiB and removed afterward. Transcription
+has a two-minute deadline. Text is staged in the unchanged composer and never sent automatically;
+if the draft changed, the result is shown separately. Escape cancels. Realtime audio conversation
+is exploratory and is not implemented.
+
 ## Install
 
-Prerequisites: the agent is a harness, not the engines. Install and log in to the official CLIs you
-want to drive:
+For Codex or Claude, install and log in to the official CLI you want to drive. The native CodeSplash
+engine instead uses direct provider configuration:
 
 - [Codex CLI](https://developers.openai.com/codex) — supported version: **0.147.0**
   (`npm i -g @openai/codex@0.147.0`)

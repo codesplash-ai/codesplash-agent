@@ -610,6 +610,7 @@ class CodesplashSession implements EngineSession {
   #memoryText = ""
   #memoryEpoch = 0
   #ownedMaintenance = new OwnedMaintenance()
+  #sideQueries = new OwnedMaintenance()
   #lastTurnSucceeded = false
   #inputs: ContextInputs
   #inputPromise: Promise<unknown> | undefined
@@ -1362,6 +1363,35 @@ class CodesplashSession implements EngineSession {
       })
     throw new Error("Local recaps and outcomes are projected by the session controller")
   }
+  async sideQuery(
+    request: { kind: "question" | "suggestion"; question?: string },
+    signal?: AbortSignal,
+  ): Promise<string> {
+    this.#requireOpen()
+    if (request.kind !== "question" && request.kind !== "suggestion") throw new Error("Invalid side query")
+    if (request.kind === "question") {
+      await this.#sideQueries.cancelAndSettle()
+      this.#requireOpen()
+    }
+    if (request.kind === "suggestion" && (this.#loop.isTurnActive || this.inputQueue.next()))
+      throw new Error("Foreground work takes priority over suggestions")
+    const model = this.#model,
+      provider = this.#providers[model.provider],
+      messages = this.#loop.historySnapshot()
+    if (!provider) throw new Error("No provider for side query")
+    return this.#sideQueries.run(request.kind, async (owned) =>
+      generatePresentation({
+        ...request,
+        model,
+        provider,
+        messages,
+        signal: signal ? AbortSignal.any([owned, signal]) : owned,
+        sanitize: (text) => this.#sandbox.sanitize?.(text) ?? text,
+        onUsage: (usage) =>
+          usage ? this.#loop.recordAuxiliaryUsage(usage, model) : this.#loop.recordUnknownAuxiliaryUsage(),
+      }),
+    )
+  }
   async #childConfig(): Promise<AgentConfig> {
     const config = structuredClone(await this.resolveNative())
     const active = new Set(
@@ -1800,11 +1830,13 @@ class CodesplashSession implements EngineSession {
     await this.#interruptAndSettle()
   }
   async #interruptAndSettle(): Promise<void> {
+    this.#sideQueries.cancel()
     this.#admissionAbort?.abort(new Error("Input interrupted before provider admission"))
     this.#ownedMaintenance.cancel()
     this.#maintenanceAbort?.abort()
     this.#loop.interrupt()
     await this.#ownedMaintenance.settle()
+    await this.#sideQueries.settle()
     await this.#admissionSettled
     await this.#turnPromise?.catch(() => {})
     await this.#inputPromise?.catch(() => {})
@@ -2460,6 +2492,7 @@ class CodesplashSession implements EngineSession {
     this.#inputRunner.stop()
     this.#admissionAbort?.abort(new Error("Session closed"))
     this.#ownedMaintenance.cancel()
+    this.#sideQueries.cancel()
     this.#maintenanceAbort?.abort()
     this.#loop.interrupt()
     this.#extensionCommandAbort.abort()
@@ -2470,6 +2503,7 @@ class CodesplashSession implements EngineSession {
     await this.#turnPromise?.catch(() => {})
     await this.#inputPromise?.catch(() => {})
     await this.#ownedMaintenance.close()
+    await this.#sideQueries.close()
     await this.#inputRunner.settled()
     if (this.#hooksInitialized && !this.#suppressSessionEnd)
       await this.#loop.hook("session.end", AbortSignal.timeout(10000), { cwd: this.#cwd }).catch(() => {})
@@ -2775,6 +2809,7 @@ class CodesplashSession implements EngineSession {
   }
   async #cancelLearning(): Promise<void> {
     await this.#ownedMaintenance.cancelAndSettle()
+    await this.#sideQueries.cancelAndSettle()
   }
 
   #push(event: AgentEvent): void {
