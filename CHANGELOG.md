@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Server, IDE and remote clients (M9)
+
+- Add an authenticated native JSON-RPC daemon, generated protocol contracts, replay/snapshots,
+  expiring shared/exclusive writer leases, browser client and simultaneous terminal attachment.
+- Add ACP and MCP server adapters, a locally installable VS Code extension, fuzzy file pickers,
+  terminal citation links, reviewed managed language services, diagnostics, symbol queries and formatters.
+- Add opt-in sharing/revocation/URL import, TLS LAN listeners, optional mDNS and scoped TUI controls.
+- Add GitHub App/OIDC and Slack Socket Mode workers, GitHub/GitLab CI recipes and isolated PR import;
+  retain crash-uncertain delivery records to prevent repeated external effects.
+- Add streamed headless input, final JSON schema validation/atomic output files, selected native agents,
+  actual tool ceilings and cumulative estimated-dollar limits shared with the embedding SDK.
+- Explore a daemon-backed desktop/deep-link prototype; defer signed desktop distribution explicitly.
+
 ### Terminal experience (M8)
 
 - Add fuzzy command palette/completion, external draft editing, contextual hot-reloaded keybindings

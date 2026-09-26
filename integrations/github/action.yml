@@ -1,0 +1,32 @@
+name: CodeSplash
+description: Run an installed, pinned CodeSplash CLI with an explicit prompt file and optional GitHub App OIDC exchange.
+inputs:
+  prompt-file:
+    description: Path to the UTF-8 prompt; never interpolate issue text into shell commands.
+    required: true
+  oidc-exchange-url:
+    description: Optional operator-owned HTTPS GitHub App token exchange URL.
+    required: false
+  oidc-audience:
+    description: Audience pinned by the token-exchange service.
+    required: false
+    default: codesplash
+  output-file:
+    description: Result JSON file.
+    required: false
+    default: codesplash-result.json
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        CS_PROMPT_FILE: ${{ inputs.prompt-file }}
+        CS_OUTPUT_FILE: ${{ inputs.output-file }}
+        CS_EXCHANGE_URL: ${{ inputs.oidc-exchange-url }}
+        CS_OIDC_AUDIENCE: ${{ inputs.oidc-audience }}
+      run: |
+        set -euo pipefail
+        if [ -n "$CS_EXCHANGE_URL" ]; then
+          node "$GITHUB_ACTION_PATH/oidc.cjs"
+        fi
+        codesplash run --sandbox read-only --output-format json < "$CS_PROMPT_FILE" > "$CS_OUTPUT_FILE"

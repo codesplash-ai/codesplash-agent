@@ -1,0 +1,49 @@
+{
+  "name": "codesplash",
+  "displayName": "CodeSplash",
+  "description": "Attach VS Code context and file pickers to your local CodeSplash daemon.",
+  "version": "0.1.4",
+  "publisher": "codesplash-ai",
+  "license": "BUSL-1.1",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "main": "./extension.cjs",
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:codesplash.connect"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "codesplash.connect",
+        "title": "CodeSplash: Connect to Daemon"
+      },
+      {
+        "command": "codesplash.sendSelection",
+        "title": "CodeSplash: Send Selection and Open Tab Context"
+      },
+      {
+        "command": "codesplash.pickFile",
+        "title": "CodeSplash: Find File in Session"
+      },
+      {
+        "command": "codesplash.attach",
+        "title": "CodeSplash: Attach Terminal"
+      }
+    ],
+    "configuration": {
+      "title": "CodeSplash",
+      "properties": {
+        "codesplash.daemonRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Local daemon data directory. Leave empty to select it on connect.",
+          "scope": "machine"
+        }
+      }
+    }
+  }
+}

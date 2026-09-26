@@ -87,6 +87,7 @@ import type {
   ProviderId,
   ReasoningEffort,
 } from "./contracts.ts"
+import { DollarBudget, type DollarState, selectedRegistry, validateLimits } from "./execution.ts"
 import { type ExtensionHost, ExtensionRuntime } from "./extensions/runtime.ts"
 import { HookManager } from "./hooks/manager.ts"
 import { hookTrusted, reviewHook } from "./hooks/trust.ts"
@@ -96,6 +97,7 @@ import { readAttachedImage } from "./inputs/images.ts"
 import { contextReadTool, internalContextTools } from "./inputs/io.ts"
 import { ContextInputs, skillTool } from "./inputs/session.ts"
 import { fuzzyFiles, mentions } from "./inputs/syntax.ts"
+import { LanguageServices } from "./language/service.ts"
 import { CodesplashEventFactory, CodesplashLoop } from "./loop.ts"
 import { McpManager } from "./mcp/manager.ts"
 import { createMcpToolRegistry } from "./mcp/registry.ts"
@@ -415,7 +417,29 @@ export class CodesplashDriver implements EngineDriver {
     history?: ChatMessage[],
     prepared = false,
     scope?: ChildScope,
+    inheritedBudget?: DollarBudget,
   ): Promise<CodesplashSession> {
+    options = { ...options, execution: options.execution ? structuredClone(options.execution) : undefined }
+    validateLimits(options.execution)
+    const dollarBudget =
+      inheritedBudget ??
+      (options.execution?.maxBudgetUsd === undefined
+        ? undefined
+        : new DollarBudget(
+            options.execution.maxBudgetUsd,
+            options.initialUsage,
+            (state) => {
+              if (options.sessionState)
+                options.sessionState.update(
+                  options.sessionState.read().revision,
+                  "execution-budget",
+                  (draft) => {
+                    draft.values.executionBudget = state
+                  },
+                )
+            },
+            options.sessionState?.read().state.values.executionBudget as DollarState | undefined,
+          ))
     const resolveNative = async () => {
       if (!scope) return this.#config(options)
       const parent = await scope.resolveParent()
@@ -459,7 +483,8 @@ export class CodesplashDriver implements EngineDriver {
       const providers: Record<string, ProviderClient> = {}
       for (const runtime of registry.providers) {
         const provider = this.options.providers?.[runtime.id] ?? runtime.client
-        providers[runtime.id] = scope ? scope.budget.wrap(provider) : provider
+        const bounded = dollarBudget ? dollarBudget.wrap(provider) : provider
+        providers[runtime.id] = scope ? scope.budget.wrap(bounded) : bounded
       }
       // Resume: reload the provider-native history the transcript persisted. An empty or missing
       // file is simply a fresh session.
@@ -536,12 +561,18 @@ export class CodesplashDriver implements EngineDriver {
         extensions,
         resolveNative,
         (childOptions, launch, parentPermissions, parentProfile, resolveParent) =>
-          this.#openNative(childOptions, launch.history, false, {
-            ...launch,
-            parentPermissions,
-            parentProfile,
-            resolveParent,
-          }),
+          this.#openNative(
+            { ...childOptions, agent: undefined, execution: options.execution },
+            launch.history,
+            false,
+            {
+              ...launch,
+              parentPermissions,
+              parentProfile,
+              resolveParent,
+            },
+            dollarBudget,
+          ),
         scope,
       )
       try {
@@ -617,6 +648,9 @@ class CodesplashSession implements EngineSession {
   #contextSuffix = ""
   #inputSuffix = ""
   #personality: "neutral" | "concise" | "explanatory"
+  #selectedTask?: string
+  #selectedInterrupted = false
+  #language: LanguageServices
   #registry: ToolRegistry
   #mcp: McpManager
   #hooks: HookManager
@@ -978,9 +1012,17 @@ class CodesplashSession implements EngineSession {
         this.#systemPrompt = undefined
       },
     })
+    this.#language = new LanguageServices({
+      root: join(options.trustDataDirectory ?? dataDirectory(), "language-services"),
+      cwd: options.cwd,
+      sandbox,
+      permissions,
+      trusted: options.workspaceTrusted === true,
+    })
     this.#extensionBase = createToolRegistry(
       [
         ...builtinTools(),
+        this.#language.tool(),
         ...this.#commands.tools(),
         ...this.#children.tools(),
         ...this.#automation.tools(),
@@ -996,7 +1038,7 @@ class CodesplashSession implements EngineSession {
         memoryGate("memory_access_read", "memory_read"),
         memoryGate("memory_change", "memory_write", true),
         embeddingTool(
-          config.memory?.embedding,
+          options.execution?.maxBudgetUsd === undefined ? config.memory?.embedding : undefined,
           (tokens, cost) => this.#loop.recordEmbeddingUsage(tokens, cost),
           childScope?.budget,
         ),
@@ -1017,7 +1059,9 @@ class CodesplashSession implements EngineSession {
       this.#mcp,
     )
     if (childScope) this.#registry = scopedRegistry(this.#registry, permissions)
+    this.#registry = selectedRegistry(this.#registry, options.execution)
     this.#loop = new CodesplashLoop({
+      postEdit: (outcome, context) => this.#language.afterEdit(outcome, context),
       modelToolAllowed: (name) =>
         !(
           this.childScope?.definition.id === "builtin/coordinator" ||
@@ -1580,72 +1624,80 @@ class CodesplashSession implements EngineSession {
       const userContent: ContentBlock[] = input.text ? [{ type: "text", text: input.text }] : []
       this.#requireOpen()
       this.#turnEventStart = this.#factory.nextSequence
-      this.#turnPromise = this.#loop
-        .runTurn({
-          provider,
-          model: this.#model,
-          reasoningEffort: this.#reasoningEffort,
-          system: this.childScope
-            ? `${system}\n\n[Child role ${this.childScope.definition.id}]\n${this.childScope.definition.prompt}\n${this.childScope.identity.persona}\n${this.childScope.identity.directive ?? ""}`
-            : this.#teams.store.read().coordinator
-              ? `${system}\n\nYou are a coordinator for team ${this.#teams.store.read().coordinator}. Delegate work through teams/agent, inspect progress and queue messages. Your model tools are restricted to orchestration. Receiving a message never authorizes new work.`
-              : system,
-          userText: input.text,
-          userMessageId: inputId,
-          userContent,
-          takeTaskNotices: () => this.#commands.takeNotices(),
-          takePeerMessages: () => this.#children.takeMessages(),
-          hasSteering: () => Boolean(this.inputQueue.next("steering")),
-          hasForegroundInput: () => Boolean(this.inputQueue.next()),
-          takeSteering: async () => {
-            const item = this.inputQueue.next("steering")
-            if (!item) return undefined
-            let next: UserInput
-            try {
-              next = this.inputQueue.admit(item.id, false, "within-turn")
-              this.inputQueue.running(item.id)
-            } catch (error) {
-              this.inputQueue.finish(
-                item.id,
-                "blocked",
-                error instanceof Error ? error.message : String(error),
-              )
-              this.inputQueue.pause()
-              return undefined
-            }
-            this.#steering.add(item.id)
-            return {
-              id: item.id,
-              userText: next.text,
-              userContent: next.text ? [{ type: "text" as const, text: next.text }] : [],
-              system: await this.#systemPromptFor(),
-              prepare: (run: ContextToolRunner, signal: AbortSignal, admittedText?: string) =>
-                this.#prepareInput({ ...next, text: admittedText ?? next.text }, run, signal, item.id),
-            }
-          },
-          prepare: (run, signal, admittedText) =>
-            this.#prepareInput({ ...input, text: admittedText ?? input.text }, run, signal, inputId),
-          invokeSkill: async (value, run, signal) => {
-            if (!value || typeof value !== "object" || !("name" in value) || typeof value.name !== "string")
-              throw new Error("skill requires a name")
-            const args = "arguments" in value ? value.arguments : ""
-            if (typeof args !== "string") throw new Error("skill arguments must be a string")
-            const before = await this.#loop.hook(
-              "resource.before",
-              signal,
-              { text: args, cwd: this.#cwd },
-              { kind: "skill", toolName: value.name },
-            )
-            const result = await this.#inputs.invoke(value.name, args, run, true)
-            const after = await this.#loop.hook(
-              "resource.after",
-              signal,
-              { cwd: this.#cwd },
-              { kind: "skill", toolName: value.name },
-            )
-            return [result, ...(before?.context ?? []), ...(after?.context ?? [])].join("\n\n")
-          },
-        })
+      this.#turnPromise = (
+        this.options.agent
+          ? this.#runSelectedAgent(input)
+          : this.#loop.runTurn({
+              provider,
+              model: this.#model,
+              reasoningEffort: this.#reasoningEffort,
+              system: this.childScope
+                ? `${system}\n\n[Child role ${this.childScope.definition.id}]\n${this.childScope.definition.prompt}\n${this.childScope.identity.persona}\n${this.childScope.identity.directive ?? ""}`
+                : this.#teams.store.read().coordinator
+                  ? `${system}\n\nYou are a coordinator for team ${this.#teams.store.read().coordinator}. Delegate work through teams/agent, inspect progress and queue messages. Your model tools are restricted to orchestration. Receiving a message never authorizes new work.`
+                  : system,
+              userText: input.text,
+              userMessageId: inputId,
+              userContent,
+              takeTaskNotices: () => this.#commands.takeNotices(),
+              takePeerMessages: () => this.#children.takeMessages(),
+              hasSteering: () => Boolean(this.inputQueue.next("steering")),
+              hasForegroundInput: () => Boolean(this.inputQueue.next()),
+              takeSteering: async () => {
+                const item = this.inputQueue.next("steering")
+                if (!item) return undefined
+                let next: UserInput
+                try {
+                  next = this.inputQueue.admit(item.id, false, "within-turn")
+                  this.inputQueue.running(item.id)
+                } catch (error) {
+                  this.inputQueue.finish(
+                    item.id,
+                    "blocked",
+                    error instanceof Error ? error.message : String(error),
+                  )
+                  this.inputQueue.pause()
+                  return undefined
+                }
+                this.#steering.add(item.id)
+                return {
+                  id: item.id,
+                  userText: next.text,
+                  userContent: next.text ? [{ type: "text" as const, text: next.text }] : [],
+                  system: await this.#systemPromptFor(),
+                  prepare: (run: ContextToolRunner, signal: AbortSignal, admittedText?: string) =>
+                    this.#prepareInput({ ...next, text: admittedText ?? next.text }, run, signal, item.id),
+                }
+              },
+              prepare: (run, signal, admittedText) =>
+                this.#prepareInput({ ...input, text: admittedText ?? input.text }, run, signal, inputId),
+              invokeSkill: async (value, run, signal) => {
+                if (
+                  !value ||
+                  typeof value !== "object" ||
+                  !("name" in value) ||
+                  typeof value.name !== "string"
+                )
+                  throw new Error("skill requires a name")
+                const args = "arguments" in value ? value.arguments : ""
+                if (typeof args !== "string") throw new Error("skill arguments must be a string")
+                const before = await this.#loop.hook(
+                  "resource.before",
+                  signal,
+                  { text: args, cwd: this.#cwd },
+                  { kind: "skill", toolName: value.name },
+                )
+                const result = await this.#inputs.invoke(value.name, args, run, true)
+                const after = await this.#loop.hook(
+                  "resource.after",
+                  signal,
+                  { cwd: this.#cwd },
+                  { kind: "skill", toolName: value.name },
+                )
+                return [result, ...(before?.context ?? []), ...(after?.context ?? [])].join("\n\n")
+              },
+            })
+      )
         .catch((error) => {
           this.#lastInputCompletion = "failed"
           this.#push(
@@ -1716,6 +1768,53 @@ class CodesplashSession implements EngineSession {
     }
   }
 
+  async #runSelectedAgent(input: UserInput): Promise<void> {
+    const turnId = crypto.randomUUID(),
+      messageId = crypto.randomUUID()
+    this.#selectedInterrupted = false
+    const emit = (event: import("../../core/events.ts").AgentEventInput) =>
+      this.#push(this.#factory.event("agent/selected", { turnId }, event))
+    emit({ kind: "user.message", payload: { id: crypto.randomUUID(), text: input.text } })
+    emit({ kind: "turn.started", payload: {} })
+    let text = "",
+      status: "completed" | "failed" | "interrupted" = "failed"
+    try {
+      if (input.images?.length || input.files?.length)
+        throw new Error("Selected-agent prompts currently require text; include explicit file references")
+      const started = await this.#loop.runUserTool(
+        "agent",
+        { agent: this.options.agent, prompt: input.text, context: "fork", yieldMs: 0 },
+        false,
+      )
+      if (started.isError) throw new Error(started.text)
+      const value = JSON.parse(started.text) as { task?: { id?: string } }
+      if (!value.task?.id) throw new Error("Selected agent did not return a native task")
+      this.#selectedTask = value.task.id
+      if (this.#selectedInterrupted) this.#commands.tasks.interrupt(value.task.id)
+      for await (const page of this.#commands.monitor(value.task.id)) {
+        if (page.lost || Buffer.byteLength(text + page.text) > 1024 * 1024)
+          throw new Error("Selected-agent output exceeds retention limit")
+        text += page.text
+        if (page.text) emit({ kind: "message.delta", payload: { id: messageId, text: page.text } })
+      }
+      const task = this.#commands.output(value.task.id).task
+      status =
+        task?.status === "completed" ? "completed" : task?.status === "cancelled" ? "interrupted" : "failed"
+      this.#loop.recordDelegatedTurn(input.text, text)
+      emit({ kind: "message.completed", payload: { id: messageId, text } })
+    } catch (error) {
+      if (this.#selectedTask) this.#commands.tasks.interrupt(this.#selectedTask)
+      status = this.#selectedInterrupted ? "interrupted" : "failed"
+      emit({
+        kind: "error",
+        payload: { message: error instanceof Error ? error.message : String(error), recoverable: true },
+      })
+    } finally {
+      this.#selectedTask = undefined
+      emit({ kind: "turn.completed", payload: { status } })
+    }
+  }
+
   async exportHistory(options: import("../../core/session/portable.ts").ExportOptions) {
     return this.#inputOperation(async () => {
       await this.options.flushSessionEvents?.()
@@ -1761,6 +1860,8 @@ class CodesplashSession implements EngineSession {
     includeContext = false,
     snapshot?: import("./orchestration/shell-state.ts").ShellSelection,
   ): Promise<unknown> {
+    if (/^\/(?:share|unshare)(?:\s|$)/.test(command))
+      throw new Error("Session links are owned by the daemon; use codesplash serve and attach")
     return this.#inputOperation(
       () =>
         this.#loop.runUserTool(
@@ -1830,6 +1931,8 @@ class CodesplashSession implements EngineSession {
     await this.#interruptAndSettle()
   }
   async #interruptAndSettle(): Promise<void> {
+    this.#selectedInterrupted = true
+    if (this.#selectedTask) this.#commands.tasks.interrupt(this.#selectedTask)
     this.#sideQueries.cancel()
     this.#admissionAbort?.abort(new Error("Input interrupted before provider admission"))
     this.#ownedMaintenance.cancel()
@@ -2312,8 +2415,8 @@ class CodesplashSession implements EngineSession {
           this.#hooks = hooks
           this.#mcp = mcp
           this.#inputs = inputs
-          this.#registry = registry
-          this.#loop.replaceIntegrations(hooks, registry)
+          this.#registry = selectedRegistry(registry, this.options.execution)
+          this.#loop.replaceIntegrations(hooks, this.#registry)
           extensions.activate(this.#extensionHost())
           published = true
           this.#contextSuffix = ""
@@ -2498,6 +2601,7 @@ class CodesplashSession implements EngineSession {
     this.#extensionCommandAbort.abort()
     this.#extensions.suspend()
     await this.#hooks.suspend().catch(() => {})
+    await this.#language.close()
     await this.#mcp.close()
     await this.#admissionSettled?.catch(() => {})
     await this.#turnPromise?.catch(() => {})

@@ -154,3 +154,11 @@ real file content, completion and cumulative usage. The package smoke runs all s
 Task completion uses existing `item.updated` events; context-excluded work never enters model notices.
 
 17. `17-side-question.ts`: tool-free side answer, isolated transcript and usage accounting.
+
+## Execution contracts
+
+`18-execution-contracts.ts` exercises actual tool ceilings, cumulative priced model budgets and final
+JSON schema validation. Pass `execution: {allowedTools, excludedTools, maxBudgetUsd}`, `agent` and
+`outputSchema` to creation. Schema validation applies to `prompt`, accepts one active prompt at a time,
+and never retries effects. Low-level input-queue users validate their own results. Budget estimates
+share reservations with child work, fail closed on missing pricing/usage, and disable embeddings.

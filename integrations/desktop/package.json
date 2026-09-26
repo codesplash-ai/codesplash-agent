@@ -1,0 +1,10 @@
+{
+  "name": "codesplash-desktop-prototype",
+  "version": "0.1.4",
+  "private": true,
+  "description": "Exploratory daemon sidecar and deep-link handoff, not a distributed desktop release",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron ."
+  }
+}

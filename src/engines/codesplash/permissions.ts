@@ -87,6 +87,8 @@ const PATTERN_TOOL_NAMES = new Set([...FILE_TOOL_NAMES, "bash", "web_fetch"])
 
 /** Every tool name rules may reference; anything else warns once and the rule is ignored. */
 const KNOWN_TOOL_NAMES = new Set([
+  "lsp",
+  "formatter",
   "worktree",
   "goal",
   "workflow",

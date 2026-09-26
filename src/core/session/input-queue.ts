@@ -495,6 +495,7 @@ export class InputQueue {
   #capture(input: UserInput, id: string): { prompt: AcceptedPrompt; references: AttachmentReference[] } {
     if (
       typeof input.text !== "string" ||
+      (input.literal !== undefined && typeof input.literal !== "boolean") ||
       Buffer.byteLength(input.text) > 64 * 1024 ||
       (input.sourceText !== undefined &&
         (typeof input.sourceText !== "string" || Buffer.byteLength(input.sourceText) > 64 * 1024)) ||
@@ -536,7 +537,12 @@ export class InputQueue {
       references.push({ kind: "image", source: path, ...attachmentIdentity(path) })
       return path
     })
-    const files = [...new Set([...(input.files ?? []), ...(this.options.mentions?.(input.text) ?? [])])]
+    const files = [
+      ...new Set([
+        ...(input.files ?? []),
+        ...(input.literal ? [] : (this.options.mentions?.(input.text) ?? [])),
+      ]),
+    ]
     if (files.length + images.length > 16) throw new Error("At most 16 attachment references are allowed")
     for (const source of files) {
       if (typeof source !== "string" || source.length > 4096) throw new Error("Invalid file reference")
@@ -546,6 +552,7 @@ export class InputQueue {
     if (references.length > 16) throw new Error("At most 16 attachment references are allowed")
     const stored: UserInput = {
       text: input.text,
+      ...(input.literal === undefined ? {} : { literal: input.literal }),
       ...(input.sourceText === undefined ? {} : { sourceText: input.sourceText }),
       ...(images.length ? { images } : {}),
       ...(input.files?.length ? { files: input.files } : {}),
@@ -628,6 +635,7 @@ function validPrompt(value: unknown): value is AcceptedPrompt {
     typeof item.redacted === "boolean" &&
     !!item.input &&
     typeof item.input.text === "string" &&
+    (item.input.literal === undefined || typeof item.input.literal === "boolean") &&
     Buffer.byteLength(item.input.text) <= 64 * 1024 &&
     (item.input.sourceText === undefined ||
       (typeof item.input.sourceText === "string" && Buffer.byteLength(item.input.sourceText) <= 64 * 1024)) &&

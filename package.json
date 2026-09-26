@@ -13,7 +13,11 @@
     "README.md",
     "examples/sdk",
     "CHANGELOG.md",
-    "THIRD_PARTY_NOTICES.md"
+    "THIRD_PARTY_NOTICES.md",
+    "extensions/vscode",
+    "integrations",
+    "docs/server.md",
+    "docs/integrations.md"
   ],
   "repository": {
     "type": "git",

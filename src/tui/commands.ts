@@ -1,4 +1,6 @@
 export type SlashCommandName =
+  | "share"
+  | "unshare"
   | "voice"
   | "btw"
   | "suggest"
@@ -71,6 +73,8 @@ export type ParsedSlashCommand =
   | { name: "unknown"; raw: string }
 
 const slashCommandNames: readonly SlashCommandName[] = [
+  "share",
+  "unshare",
   "voice",
   "btw",
   "suggest",

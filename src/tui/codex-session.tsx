@@ -49,6 +49,7 @@ import type { AcceptedPrompt, InputIntent, InputItem } from "../core/session/inp
 import { emptyOutcomes, outcomeSummary } from "../core/session/outcomes.ts"
 import { awayRecap, presentationArguments } from "../core/session/presentation.ts"
 import { recoveryCommand } from "../core/session/recovery-command.ts"
+import { markdownFileCitations } from "../server/hyperlinks.ts"
 import { extractImageAttachments } from "./attachments.ts"
 import { Attention } from "./attention.tsx"
 import { type BrandPalette, brandThemes } from "./brand.ts"
@@ -1223,6 +1224,15 @@ export function CodexSessionApp({
             })
           })
           return
+        case "share":
+        case "unshare":
+          void runCommand(async () => {
+            const result = await controller.runCommand(
+              `/${command.name}${command.argument ? ` ${command.argument}` : ""}`,
+            )
+            setOverlay({ kind: "resources", title: "Session sharing", text: JSON.stringify(result, null, 2) })
+          })
+          return
         case "export":
           void runCommand(async () => {
             const { parse } = await import("shell-quote")
@@ -1765,6 +1775,7 @@ export function CodexSessionApp({
                   syntaxStyle={syntaxStyle}
                   engineName={engineDisplayName(engine)}
                   thinking={tui.thinking}
+                  cwd={project.cwd}
                 />
               ))
           )}
@@ -2451,12 +2462,14 @@ function SessionOverlay({
 }
 
 function TranscriptEntry({
+  cwd,
   item,
   palette,
   syntaxStyle,
   engineName = "Codex",
   thinking = "show",
 }: {
+  cwd: string
   item: TranscriptItem
   palette: BrandPalette
   syntaxStyle: SyntaxStyle
@@ -2465,8 +2478,8 @@ function TranscriptEntry({
 }) {
   const anchorId = transcriptAnchorId(item.id)
   const rendered = useMemo(
-    () => (item.status === "running" ? item.text : terminalMarkdown(item.text)),
-    [item.text, item.status],
+    () => (item.status === "running" ? item.text : markdownFileCitations(terminalMarkdown(item.text), cwd)),
+    [item.text, item.status, cwd],
   )
   if (item.kind === "reasoning" && thinking === "collapse")
     return (

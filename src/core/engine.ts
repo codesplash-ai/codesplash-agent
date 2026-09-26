@@ -57,6 +57,9 @@ export type PermissionRuleOverrides = {
 }
 
 export type OpenSessionOptions = {
+  /** Route each input through an existing scoped native agent definition. */
+  agent?: string
+  execution?: import("../engines/codesplash/execution.ts").ExecutionLimits
   disableExtensions?: boolean
   interactiveExtensions?: boolean
   /** Owned canonical state, or an in-memory equivalent; no inferred file authority. */
@@ -103,6 +106,8 @@ export type OpenSessionOptions = {
 }
 
 export type UserInput = {
+  /** Remote or quoted text is data: do not expand file mentions or slash templates. */
+  literal?: boolean
   /** Original typed draft, for recall only; never sent as additional provider context. */
   sourceText?: string
   text: string
@@ -145,6 +150,8 @@ export interface EngineSession {
   readonly nativeSessionId?: string
   readonly capabilities: EngineCapabilities
   readonly events: AsyncIterable<AgentEvent>
+  /** Wait for the active turn and its durable completion without admitting queued work. */
+  settled?(): Promise<void>
   readonly inputQueue?: InputQueue
   sessionPresentation?(request: import("./session/presentation.ts").PresentationRequest): Promise<unknown>
   sideQuery?(

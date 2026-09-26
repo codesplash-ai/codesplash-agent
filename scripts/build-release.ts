@@ -146,6 +146,7 @@ async function main(): Promise<void> {
     await run([process.execPath, "scripts/automation-smoke.ts", binaryPath])
     await run([process.execPath, "scripts/scheduler-smoke.ts", binaryPath])
     await run([process.execPath, "scripts/teams-smoke.ts", binaryPath])
+    await run([process.execPath, "scripts/server-smoke.ts", binaryPath])
     await run([process.execPath, "scripts/sdk-smoke.ts"])
   }
 

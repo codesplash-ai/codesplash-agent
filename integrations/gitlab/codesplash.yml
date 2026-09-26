@@ -1,0 +1,14 @@
+# Include from a pinned commit. Supply an already installed/pinned CodeSplash CLI and model
+# credential through a masked, protected CI variable. Never run protected credentials on fork jobs.
+codesplash-review:
+  stage: test
+  rules:
+    - if: '$CI_COMMIT_REF_PROTECTED == "true" && $CI_PIPELINE_SOURCE == "web"'
+      when: manual
+    - when: never
+  script:
+    - codesplash run --sandbox read-only --output-format json < codesplash-prompt.txt > codesplash-result.json
+  artifacts:
+    when: always
+    paths: [codesplash-result.json]
+    expire_in: 7 days

@@ -19,12 +19,15 @@ import {
   transcriptPathFor,
 } from "../core/sessions.ts"
 import { CodesplashDriver } from "../engines/codesplash/engine.ts"
+import { outputValidator, validateLimits } from "../engines/codesplash/execution.ts"
 import type { HostExtension } from "../engines/codesplash/extensions/api.ts"
 import { EventFeed } from "./event-feed.ts"
 import { configuration } from "./review.ts"
 import type { AgentSession, CreateAgentSessionOptions, PromptResult, SessionRequest } from "./types.ts"
 
 export async function create(options: CreateAgentSessionOptions): Promise<AgentSession> {
+  validateLimits(options.execution)
+  outputValidator(options.outputSchema)
   options.signal?.throwIfAborted()
   if (
     options.persistence &&
@@ -132,6 +135,8 @@ export async function create(options: CreateAgentSessionOptions): Promise<AgentS
       new CodesplashDriver({ config, hostExtensions: extensions }),
       {
         cwd,
+        execution: options.execution,
+        agent: options.agent,
         localSessionId: id,
         model: options.model,
         policy,
@@ -147,6 +152,7 @@ export async function create(options: CreateAgentSessionOptions): Promise<AgentS
         disableExtensions: options.disableExtensions,
         interactiveExtensions: options.interactive ?? false,
         resuming: !!options.persistence?.resume,
+        resumeQueuedInput: options.resumeQueuedInput,
         flushSessionEvents: async () => {
           await recorder?.flush()
           if (recorder?.failure) throw recorder.failure
@@ -182,6 +188,7 @@ function own(
     feeds = new Set<EventFeed>()
   const stateListeners = new Set<() => void>()
   let waitingInputs = 0
+  let schemaPromptActive = false
   const lifetime = new AbortController(),
     requests = new Map<string, AbortController>()
   let closing: Promise<void> | undefined
@@ -403,17 +410,39 @@ function own(
     },
     async prompt(input, waitOptions) {
       waitOptions?.signal?.throwIfAborted()
-      if (session.inputQueue?.snapshot().paused)
-        throw new Error("Input queue is paused; review it and call inputs.resume with its revision")
-      const ack = await controller.submit(typeof input === "string" ? { text: input } : input)
-      if (!ack) throw new Error("Prompt is empty")
-      return waitForInput(ack.id, waitOptions?.signal)
+      if (
+        options.outputSchema &&
+        (schemaPromptActive ||
+          session.inputQueue
+            ?.snapshot()
+            .items.some((i) => ["queued", "admitted", "running"].includes(i.status)))
+      )
+        throw new Error("Structured output requires one prompt at a time")
+      schemaPromptActive = !!options.outputSchema
+      try {
+        if (session.inputQueue?.snapshot().paused)
+          throw new Error("Input queue is paused; review it and call inputs.resume with its revision")
+        const ack = await controller.submit(typeof input === "string" ? { text: input } : input)
+        if (!ack) throw new Error("Prompt is empty")
+        const result = await waitForInput(ack.id, waitOptions?.signal)
+        const validate = outputValidator(options.outputSchema)
+        if (validate && result.status === "completed") {
+          const message = controller.state.transcript.findLast((item) => item.kind === "message")
+          validate(message?.text ?? "")
+        }
+        return result
+      } finally {
+        schemaPromptActive = false
+      }
     },
     waitForInput,
     flush,
     close,
     interrupt: () => session.interrupt(),
-    submit: controller.submit.bind(controller),
+    submit: (...args) => {
+      if (schemaPromptActive) throw new Error("Structured output prompt is still running")
+      return controller.submit(...args)
+    },
     resolveRequest: controller.resolveRequest.bind(controller),
     listModels: controller.listModels.bind(controller),
     setModel: controller.setModel.bind(controller),

@@ -81,6 +81,7 @@ export type {
   TeamView,
 } from "../core/orchestration/teams.ts"
 export type { WorktreeRecord, WorktreeRequest } from "../core/orchestration/worktrees.ts"
+export type { ExecutionLimits } from "../engines/codesplash/execution.ts"
 export type { SpawnAgentInput } from "../engines/codesplash/orchestration/children.ts"
 export type { AgentDefinition, ResolvedAgent } from "../engines/codesplash/orchestration/definitions.ts"
 export type { ShellSelection } from "../engines/codesplash/orchestration/shell-state.ts"

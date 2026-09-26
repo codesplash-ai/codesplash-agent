@@ -54,6 +54,17 @@ Usage:
   codesplash --help
 
 Commands:
+  serve          Run the authenticated native daemon or --stdio JSON-RPC server
+  attach         Attach the terminal UI to a daemon thread
+  daemon         Inspect daemon status or issue a one-time pairing code
+  acp            Run the Agent Client Protocol stdio adapter
+  mcp-server     Expose codesplash and codesplash-reply as MCP tools
+  generate       Emit versioned protocol types, JSON Schema and OpenAPI
+  ide            Package or install the VS Code daemon extension
+  lsp            Review and install managed language services and formatters
+  integrations   Run an operator-configured GitHub App or Slack Socket Mode bridge
+  pr             Preview or apply an isolated GitHub PR checkout and session import
+  open           Inspect a codesplash:// link; --attach opens a local reader
   login          Store an API key for the native CodeSplash engine. Without --api-key the key is
                  read from stdin — hidden when the terminal is interactive, a plain line otherwise
   logout         Remove a stored API key
@@ -105,6 +116,13 @@ Options:
   --strict-config
                  Reject unknown configuration settings
   --fixture      Render the synthetic OpenTUI development fixture
+  --input-format text|stream-json   Headless stdin format (bounded user frames)
+  --output-schema JSON|@FILE       Validate final JSON without retrying effects
+  --output-last-message FILE      Atomically save a successful final response
+  --agent ID                     Run through a reviewed native child role
+  --tools NAMES                   Comma-separated tool ceiling
+  --exclude-tools NAMES           Comma-separated tool exclusions
+  --max-budget-usd N              Cumulative estimated model spend ceiling
   --codex-smoke  Check Codex app-server startup, protocol, and account state without running a model
   --codex-live-smoke
                  Use model quota to exercise approval, interrupt, resume, and a second turn
@@ -493,6 +511,11 @@ function readSecretFromTty(prompt: string, stderr: HeadlessSink): Promise<string
 /* ------------------------------------- run subcommand ------------------------------------- */
 
 export type RunCommand = {
+  agent?: string
+  inputFormat?: "text" | "stream-json"
+  outputSchema?: string
+  outputLastMessage?: string
+  execution?: import("./engines/codesplash/execution.ts").ExecutionLimits
   profile?: string
   strictConfig?: boolean
   disableExtensions?: boolean
@@ -544,6 +567,10 @@ export function parseRunArguments(
 ): RunCommand {
   const { args: remaining, ...controls } = extractConfigControls(args)
   args = remaining
+  const executionOptions: Pick<
+    RunCommand,
+    "execution" | "inputFormat" | "outputSchema" | "outputLastMessage" | "agent"
+  > = {}
   let promptFlag: string | undefined
   let model: string | undefined
   let effort: ReasoningEffort | undefined
@@ -564,7 +591,41 @@ export function parseRunArguments(
 
   for (let index = 0; index < args.length; index++) {
     const argument = args[index] as string
-    if (argument === "-p" || argument === "--prompt" || argument.startsWith("--prompt=")) {
+    if (
+      [
+        "--agent",
+        "--input-format",
+        "--output-schema",
+        "--output-last-message",
+        "--tools",
+        "--exclude-tools",
+        "--max-budget-usd",
+      ].includes(argument.split("=")[0]!)
+    ) {
+      const flag = argument.split("=")[0]!,
+        value = argument.includes("=") ? argument.slice(flag.length + 1) : args[++index]
+      if (value === undefined) throw new UsageError(`${flag} requires a value`)
+      if (flag === "--agent") {
+        if (!value.trim()) throw new UsageError("Agent name required")
+        executionOptions.agent = value
+      } else if (flag === "--input-format") {
+        if (value !== "text" && value !== "stream-json") throw new UsageError("Invalid input format")
+        executionOptions.inputFormat = value
+      } else if (flag === "--output-schema") executionOptions.outputSchema = value
+      else if (flag === "--output-last-message") executionOptions.outputLastMessage = value
+      else {
+        executionOptions.execution ??= {}
+        if (flag === "--max-budget-usd") {
+          const budget = Number(value)
+          if (!Number.isFinite(budget) || budget <= 0)
+            throw new UsageError("Budget must be positive and finite")
+          executionOptions.execution.maxBudgetUsd = budget
+        } else
+          executionOptions.execution[flag === "--tools" ? "allowedTools" : "excludedTools"] = value
+            ? value.split(",")
+            : []
+      }
+    } else if (argument === "-p" || argument === "--prompt" || argument.startsWith("--prompt=")) {
       const value = argument.startsWith("--prompt=") ? argument.slice("--prompt=".length) : args[++index]
       if (value === undefined) throw new UsageError("--prompt expects the prompt text")
       promptFlag = value
@@ -671,6 +732,7 @@ export function parseRunArguments(
   }
 
   return {
+    ...executionOptions,
     path,
     prompt,
     model,
@@ -712,6 +774,42 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
   const stderr = overrides.stderr ?? process.stderr
 
   let prompt = command.prompt
+  let inputs: AsyncIterable<string> | undefined
+  if (command.inputFormat === "stream-json") {
+    if (prompt !== undefined || (overrides.stdinIsTty ?? process.stdin.isTTY === true))
+      throw new UsageError("stream-json requires piped stdin and no prompt argument")
+    const { ndjson } = await import("./server/transport.ts")
+    const source = overrides.readStdinText
+      ? (async function* () {
+          yield await overrides.readStdinText!()
+        })()
+      : process.stdin
+    inputs = (async function* () {
+      for await (const frame of ndjson(source)) {
+        const input = frame as { type?: string; text?: unknown }
+        if (
+          !input ||
+          input.type !== "user" ||
+          typeof input.text !== "string" ||
+          !input.text.trim() ||
+          Object.keys(input).some((k) => !["type", "text"].includes(k))
+        )
+          throw new UsageError("Each input line must be {type: user, text: nonempty string}")
+        yield input.text
+      }
+    })()
+    prompt = "stream input"
+  }
+  let outputSchema: unknown
+  if (command.outputSchema) {
+    const { bytes } = await import("./core/session/files.ts")
+    outputSchema = JSON.parse(
+      command.outputSchema.startsWith("@")
+        ? bytes(command.outputSchema.slice(1), 65536).toString()
+        : command.outputSchema,
+    )
+    ;(await import("./engines/codesplash/execution.ts")).outputValidator(outputSchema)
+  }
   if (prompt === undefined) {
     const isTty = overrides.stdinIsTty ?? process.stdin.isTTY === true
     if (!isTty) prompt = (await (overrides.readStdinText ?? readAllOfStdin)()).trim()
@@ -880,6 +978,11 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
 
   const { runHeadless } = await import("./engines/codesplash/runner.ts")
   const exitCode = await runHeadless({
+    agent: command.agent,
+    inputs,
+    execution: command.execution,
+    outputSchema,
+    outputLastMessage: command.outputLastMessage,
     resuming,
     prompt,
     cwd: project.cwd,
@@ -908,6 +1011,7 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
     stdout: overrides.stdout,
     stderr: overrides.stderr,
   })
+  if (inputs && !overrides.readStdinText) process.stdin.destroy()
   await recorder?.close(exitCode === 1 ? "failed" : "closed")
   return exitCode
 }
@@ -977,6 +1081,33 @@ async function main(): Promise<void> {
   installSignalHandlers()
 
   const args = process.argv.slice(2)
+
+  if (args[0] === "open") {
+    process.exitCode = await (await import("./commands/open-link.ts")).runOpenLink(args.slice(1))
+    return
+  }
+  if (args[0] === "pr") {
+    process.exitCode = await (await import("./commands/pr.ts")).runPrCommand(args.slice(1))
+    return
+  }
+  if (args[0] === "integrations") {
+    process.exitCode = await (await import("./commands/integrations.ts")).runIntegrationsCommand(
+      args.slice(1),
+    )
+    return
+  }
+  if (args[0] === "ide") {
+    process.exitCode = await (await import("./commands/ide.ts")).runIdeCommand(args.slice(1))
+    return
+  }
+  if (args[0] === "lsp") {
+    process.exitCode = await (await import("./commands/language.ts")).runLanguageCommand(args.slice(1))
+    return
+  }
+  if (["serve", "attach", "daemon", "acp", "mcp-server", "generate"].includes(args[0] ?? "")) {
+    process.exitCode = await (await import("./commands/server.ts")).runServerCommand(args[0]!, args.slice(1))
+    return
+  }
 
   if (args[0] === "--internal-session-sqlite") {
     ;(await import("./core/session/foreign-sqlite-worker.ts")).foreignSqliteMain(args[1])

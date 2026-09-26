@@ -1276,3 +1276,11 @@ Model-visible task statuses are delivered as data at the next provider boundary;
 a turn automatically. Context-excluded commands remain excluded from those model notices.
 The SDK includes sixteen runnable local examples; example 16 combines parallel team writes,
 a workflow command and a scheduled child in one session. `codesplash agent` is an alias for `agents`.
+
+### Native daemon, IDE and remote clients
+
+Run `codesplash serve --cwd /absolute/project` to share one native session owner between the browser
+and `codesplash attach THREAD_UUID`. ACP/MCP stdio adapters, a VS Code extension, reviewed language
+services, revocable sharing, CI/chat bridges and stricter headless execution controls are described
+in [the server guide](docs/server.md) and [integration setup](docs/integrations.md). Desktop remains
+an explicit prototype; signed GUI distribution is deferred.

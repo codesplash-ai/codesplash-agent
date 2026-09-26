@@ -66,7 +66,9 @@ export async function sessionPortableCommand(
     else if (rest[i] === "--sha256" && rest[i + 1]) expected = rest[++i]
     else if (rest[i] !== "--json") throw new Error(`Unknown portable import option ${rest[i]}`)
   }
-  const bundle = readPortable(resolve(id))
+  const bundle = /^https?:\/\//.test(id)
+    ? await (await import("../server/sharing.ts")).fetchShare(id)
+    : readPortable(resolve(id))
   if (expected && expected !== bundle.sha256) throw new Error("Import content changed since preview")
   output(`${JSON.stringify(await importPortable(repository.root, bundle, cwd, apply), null, 2)}\n`)
   return 0

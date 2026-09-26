@@ -306,7 +306,7 @@ export class ContextInputs {
       rules.push(`[Instructions from ${resource.path}]\n${body}\n[End instructions]`)
     }
     const templateFiles: string[] = []
-    const slash = /^\/([^\s]+)(?:\s+([\s\S]*))?$/.exec(input.text.trim())
+    const slash = input.literal ? null : /^\/([^\s]+)(?:\s+([\s\S]*))?$/.exec(input.text.trim())
     if (slash) {
       let expansion: string
       if (slash[1] === "skill") {
@@ -322,7 +322,9 @@ export class ContextInputs {
       }
       content.push({ type: "text", text: expansion })
     }
-    const files = [...new Set([...(input.files ?? []), ...mentions(input.text), ...templateFiles])]
+    const files = [
+      ...new Set([...(input.files ?? []), ...(input.literal ? [] : mentions(input.text)), ...templateFiles]),
+    ]
     if (files.length > 16) throw new Error("At most 16 file mentions are allowed")
     let fileBytes = 0
     for (const file of files) {

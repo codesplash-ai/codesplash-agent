@@ -13,7 +13,12 @@ export type IntegrationOptions = {
   trustDataDirectory?: string
 }
 export type CreateAgentSessionOptions = IntegrationOptions & {
+  agent?: string
+  execution?: import("../engines/codesplash/execution.ts").ExecutionLimits
+  outputSchema?: unknown
   model?: string
+  /** Replayed pending inputs stay held for daemon and headless clients. */
+  resumeQueuedInput?: boolean
   /** Default is ephemeral. A root is required so recording is an explicit storage decision. */
   persistence?: { root: string; resume?: string }
   extensions?: readonly HostExtension[]

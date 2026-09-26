@@ -152,6 +152,7 @@ export type CodesplashLoopOptions = {
   onContextBoundary?: (kind: "before-compaction" | "compaction", messages: ChatMessage[]) => void
   beforeMutation?: (label: string, signal: AbortSignal) => Promise<string | undefined>
   afterMutation?: (id: string | undefined) => Promise<void>
+  postEdit?: (outcome: ToolOutcome, context: ToolContext) => Promise<void>
   context?: ContextOptions
   outputStore?: ToolOutputStore
   cwd: string
@@ -264,7 +265,7 @@ export class CodesplashLoop {
   }
   readonly #recoveryHooks: Pick<
     CodesplashLoopOptions,
-    "onContextBoundary" | "beforeMutation" | "afterMutation"
+    "onContextBoundary" | "beforeMutation" | "afterMutation" | "postEdit"
   >
   readonly #cwd: string
   readonly #policy: SessionPolicy
@@ -508,6 +509,15 @@ export class CodesplashLoop {
   }
 
   /** The current history in the same array shape sent to providers, thinking blocks included. */
+  recordDelegatedTurn(input: string, output: string): void {
+    if (this.#abort) throw new Error("Cannot record delegated output during a model turn")
+    this.#history.push(
+      { role: "user", content: [{ type: "text", text: input }] },
+      { role: "assistant", content: [{ type: "text", text: output }] },
+    )
+    this.#historyRevision++
+  }
+
   historySnapshot(): ChatMessage[] {
     return [...this.#history]
   }
@@ -2016,6 +2026,8 @@ export class CodesplashLoop {
                       if (!signal.aborted) this.#emitToolItem(itemId, provisionalLabel, text, "running")
                     },
                   })
+        if (outcome.mutatedPaths?.length)
+          await this.#recoveryHooks.postEdit?.(outcome, this.#toolContext(signal))
       } finally {
         const finalize = async () => {
           try {

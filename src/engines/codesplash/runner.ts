@@ -24,15 +24,22 @@ import {
   type TurnStatus,
   writeTrustDecision,
 } from "../../core/index.ts"
+import { atomic } from "../../core/session/files.ts"
 import { openEngineSession } from "../../core/session/open.ts"
 import { defaultModelFor, defaultProvider, formatModelSelector } from "./catalog.ts"
 import type { ReasoningEffort } from "./contracts.ts"
 import { CodesplashDriver } from "./engine.ts"
+import { type ExecutionLimits, outputValidator } from "./execution.ts"
 
 export type HeadlessOutputFormat = "text" | "json" | "stream-json"
 
 /** Minimal writable surface; process.stdout/stderr satisfy it and tests capture plain strings. */
-export type HeadlessSink = { write(chunk: string): unknown }
+export type HeadlessSink = {
+  write(chunk: string): unknown
+  writableNeedDrain?: boolean
+  once?(event: "drain", callback: () => void): unknown
+  off?(event: "drain", callback: () => void): unknown
+}
 
 /** Recorder surface the runner needs; a real SessionRecorder satisfies it, and so do test fakes. */
 export type HeadlessRecorder = Pick<SessionRecorder, "record" | "recordNativeSessionId" | "flush"> &
@@ -47,6 +54,11 @@ export type HeadlessRunOptions = {
   sessionState?: import("../../core/session/control.ts").SessionStateAccess
   promptHistory?: import("../../core/session/prompt-history.ts").PromptHistory
   prompt: string
+  inputs?: AsyncIterable<string>
+  agent?: string
+  execution?: ExecutionLimits
+  outputSchema?: unknown
+  outputLastMessage?: string
   cwd: string
   /** Model id, optionally already carrying `:<effort>`; omitted → the engine's default model. */
   model?: string
@@ -96,9 +108,25 @@ type FinalTurnStatus = Exclude<TurnStatus, "idle" | "running">
  * 0 completed · 1 turn failed or provider error · 130 interrupted via SIGINT.
  */
 export async function runHeadless(options: HeadlessRunOptions): Promise<number> {
+  const validateOutput = outputValidator(options.outputSchema)
+  const finalMessage = new ResultAccumulator()
   const driver = options.driver ?? new CodesplashDriver()
   const stdout = options.stdout ?? process.stdout
   const stderr = options.stderr ?? process.stderr
+  const drain = async () => {
+    if (!stdout.writableNeedDrain || !stdout.once) return
+    await new Promise<void>((resolve, reject) => {
+      const done = () => {
+        clearTimeout(timer)
+        resolve()
+      }
+      const timer = setTimeout(() => {
+        stdout.off?.("drain", done)
+        reject(new Error("Headless output consumer stalled"))
+      }, 5000)
+      stdout.once?.("drain", done)
+    })
+  }
   const recorder = options.recorder
   const maxTurns = Math.max(1, Math.floor(options.maxTurns ?? DEFAULT_MAX_TURNS))
   const localSessionId = options.localSessionId ?? crypto.randomUUID()
@@ -116,6 +144,8 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<number> 
       driver,
       {
         cwd: options.cwd,
+        execution: options.execution,
+        agent: options.agent,
         localSessionId,
         model: headlessModelSelector(options.model, options.effort),
         policy: { ...options.policy, permissionMode },
@@ -145,6 +175,22 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<number> 
   options.recordPermissionMode?.(permissionMode)
 
   const resolvedRequests = new Set<string>()
+  const inputAbort = new AbortController()
+  const nextInput = async (iterator: AsyncIterator<string>) => {
+    inputAbort.signal.throwIfAborted()
+    let cancel: () => void = () => {}
+    try {
+      return await Promise.race([
+        iterator.next(),
+        new Promise<IteratorResult<string>>((_, reject) => {
+          cancel = () => reject(new Error("Input interrupted"))
+          inputAbort.signal.addEventListener("abort", cancel, { once: true })
+        }),
+      ])
+    } finally {
+      inputAbort.signal.removeEventListener("abort", cancel)
+    }
+  }
   let interrupted = false
   let turnStatus: FinalTurnStatus | undefined
   let turns = 0
@@ -162,6 +208,7 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<number> 
   const releaseSignalExit = deferSignalExit()
   const onSigint = (): void => {
     interrupted = true
+    inputAbort.abort()
     if (session.capabilities.interrupt) {
       void session.interrupt().catch(() => {})
     } else {
@@ -173,13 +220,18 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<number> 
   let status: FinalTurnStatus = "failed"
   try {
     try {
-      await session.send({ text: options.prompt })
+      const inputs = options.inputs?.[Symbol.asyncIterator]()
+      const first = inputs ? await nextInput(inputs) : { done: false, value: options.prompt }
+      if (first.done) throw new Error("Stream input contained no prompts")
+      await session.send({ text: first.value })
       // A SIGINT during send() lands before the engine's turn exists, so interrupt() was a no-op;
       // re-issue it now that the turn has started instead of silently running the turn out.
       if (interrupted) onSigint()
       for await (const event of session.events) {
         recorder?.record(event)
         output.onEvent(event)
+        finalMessage.observe(event)
+        await drain()
 
         if (event.kind === "warning") stderr.write(`warning: ${event.payload.message}\n`)
         if (event.kind === "request.opened") {
@@ -209,7 +261,17 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<number> 
           turnStatus = event.payload.status
           // One prompt, one turn: the first completed turn ends the run. maxTurns stays the outer
           // bound so a future multi-turn cut inherits the same guard.
-          if (turns >= 1 || turns >= maxTurns) requestClose()
+          if (!inputs || turns >= maxTurns || event.payload.status !== "completed" || interrupted)
+            requestClose()
+          else {
+            const next = await nextInput(inputs)
+            if (next.done) requestClose()
+            else {
+              // Keep resumed queued work held; admit only the next explicit stream frame.
+              await session.settled?.()
+              await session.send({ text: next.value })
+            }
+          }
         }
         if (event.kind === "error") {
           stderr.write(`error: ${event.payload.message}\n`)
@@ -220,6 +282,7 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<number> 
         }
       }
     } catch (error) {
+      turnStatus = interrupted ? "interrupted" : "failed"
       stderr.write(`codesplash: ${describeError(error)}\n`)
     }
 
@@ -227,7 +290,17 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<number> 
     await closePromise
 
     status = turnStatus ?? (interrupted ? "interrupted" : "failed")
+    if (status === "completed") {
+      try {
+        validateOutput?.(finalMessage.result)
+        if (options.outputLastMessage) atomic(options.outputLastMessage, finalMessage.result)
+      } catch (error) {
+        status = "failed"
+        stderr.write(`codesplash: ${describeError(error)}\n`)
+      }
+    }
     output.finish(status, turns)
+    await drain()
     await recorder?.flush()
   } finally {
     // Released only after the final output line and recorder flush: a SIGINT arriving during
