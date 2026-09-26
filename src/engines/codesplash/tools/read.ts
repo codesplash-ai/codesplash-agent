@@ -8,6 +8,7 @@ import {
   ToolInputError,
   type ToolOutcome,
 } from "../contracts.ts"
+import { readMedia } from "./media.ts"
 
 const MAX_LINES_PER_CALL = 2000
 const MAX_BYTES_PER_CALL = 50 * 1024
@@ -69,6 +70,8 @@ async function runRead(input: ReadInput, context: ToolContext): Promise<ToolOutc
     )
   }
 
+  const media = await readMedia(resolved, context, input.offset, input.limit)
+  if (media) return media
   const raw = await readFile(resolved, { encoding: "utf8", signal: context.signal })
   const content = context.sanitizeOutput?.(raw) ?? raw
   if (content === "") return { text: `${display} is an empty file`, label: display }
@@ -116,7 +119,7 @@ export const readFileTool: HarnessTool = {
   description:
     "Read a file from the workspace. Returns line-numbered content. Reads are capped at 2000 lines and " +
     "50KB per call; page through larger files with offset (1-based start line) and limit (line count). " +
-    "Directories and files over 5MB are refused.",
+    "Images return attachments; PDF offset/limit select pages (maximum 10) for text extraction. Directories and files over 5MB are refused.",
   inputSchema: {
     type: "object",
     properties: {

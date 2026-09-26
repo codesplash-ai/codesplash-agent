@@ -139,8 +139,63 @@ export const grepTool: HarnessTool = {
 
     const candidates: string[] = []
     try {
-      const walker = new Bun.Glob("**/*")
-      for await (const relativePath of walker.scan({ cwd: context.cwd, dot: true, onlyFiles: true })) {
+      async function* files() {
+        if (!context.searchBinary) {
+          yield* new Bun.Glob("**/*").scan({ cwd: context.cwd, dot: true, onlyFiles: true })
+          return
+        }
+        const child = Bun.spawn(
+          [
+            context.searchBinary,
+            "--files",
+            "--hidden",
+            "--no-ignore",
+            "--null",
+            "--glob",
+            "!.git/**",
+            "--glob",
+            "!node_modules/**",
+          ],
+          {
+            cwd: context.cwd,
+            env: { PATH: "/usr/bin:/bin" },
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "ignore",
+          },
+        )
+        const stop = () => child.kill(),
+          timer = setTimeout(stop, 10000)
+        context.signal.addEventListener("abort", stop, { once: true })
+        const chunks: Uint8Array[] = []
+        let size = 0
+        try {
+          const reader = child.stdout.getReader()
+          try {
+            for (;;) {
+              const { value: chunk, done } = await reader.read()
+              if (done) break
+              size += chunk.length
+              if (size > 4 * 1024 * 1024) throw new Error("Search listing exceeds 4 MiB")
+              chunks.push(chunk)
+            }
+          } finally {
+            reader.releaseLock()
+          }
+          const code = await child.exited
+          if (code !== 0 && code !== 1) throw new Error("Verified search runtime failed; no fallback")
+          for (const path of Buffer.concat(chunks).toString().split("\0").filter(Boolean)) {
+            if (isAbsolute(path) || path.split("/").includes("..")) throw new Error("Invalid search path")
+            yield path
+          }
+        } finally {
+          clearTimeout(timer)
+          context.signal.removeEventListener("abort", stop)
+          child.kill()
+          await child.exited
+        }
+      }
+      for await (const relativePath of files()) {
         if (context.signal.aborted) {
           return { text: "Search aborted before completion.", isError: true, label }
         }
@@ -152,6 +207,7 @@ export const grepTool: HarnessTool = {
         ) {
           continue
         }
+        if (candidates.length >= 50000) throw new Error("Search listing exceeds 50,000 files")
         candidates.push(relativePath)
       }
     } catch (error) {

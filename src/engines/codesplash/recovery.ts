@@ -5,6 +5,7 @@ import { type CheckpointPolicy, CheckpointStore } from "../../core/session/check
 import type { SessionStateAccess } from "../../core/session/control.ts"
 import { digest, hostPath } from "../../core/session/files.ts"
 import { forkLocalSession } from "../../core/session/fork.ts"
+import { HunkService } from "../../core/session/hunks.ts"
 import { type RestorePreview, RestoreService } from "../../core/session/restore.ts"
 import { workingDirectory } from "../../core/session/working-directory.ts"
 import type { ChatMessage } from "./contracts.ts"
@@ -152,6 +153,25 @@ export class NativeRecovery {
           contextBytes: this.branches.collect(request.revision),
           ...(await this.checkpoints.collect(request.revision)),
         },
+      }
+    }
+    if (request.action === "hunks")
+      return {
+        title: "Checkpoint hunk attribution",
+        data: await new HunkService(this.checkpoints).preview(request.checkpoint, request.path),
+      }
+    if (request.action === "accept-hunk" || request.action === "reject-hunk") {
+      this.assertReady()
+      return {
+        title: "Hunk decision",
+        data: await new HunkService(this.checkpoints).decide(
+          request.checkpoint,
+          request.path,
+          request.hunk,
+          request.action === "accept-hunk" ? "accept" : "reject",
+          request.revision ?? "",
+          !!request.apply,
+        ),
       }
     }
     if (request.action === "tree") return { title: "Session branches", data: this.branches.view() }

@@ -1,10 +1,12 @@
 import { constants } from "node:fs"
-import { lstat, mkdir, mkdtemp, open, rm } from "node:fs/promises"
+import { lstat, mkdir, mkdtemp, open, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import type { PermissionMode } from "../../../core/config.ts"
+import { diagnosticContext } from "../../../core/diagnostics.ts"
 import { registerChildProcess } from "../../../core/lifecycle.ts"
 import { redactSensitiveText } from "../../../core/redaction.ts"
+import { searchRuntime } from "../../../core/search-runtime.ts"
 import type { HarnessTool, ToolContext, ToolOutcome } from "../contracts.ts"
 import { describePermissionRules } from "../permissions.ts"
 import { NamedSecrets } from "../secrets.ts"
@@ -21,6 +23,10 @@ import type { SupervisorInput } from "./supervisor.ts"
 import type { WorkerInput } from "./worker.ts"
 
 const FILE_TOOLS = new Set([
+  "notebook_edit",
+  "read_anchors",
+  "edit_anchors",
+  "code_mode",
   "attachment_access",
   "context_read",
   "context_list",
@@ -293,8 +299,10 @@ export class NativeSandbox implements SandboxRuntime {
       timeoutMs: number
       planFile?: string
       secrets?: Record<string, string>
+      outputLimit?: number
       structured?: boolean
       redactions?: string[]
+      search?: boolean
       fixed?: boolean
       environment?: string[]
     },
@@ -302,10 +310,17 @@ export class NativeSandbox implements SandboxRuntime {
     mode?: PermissionMode,
   ): Promise<ExecutionResult> {
     if (this.#closed) throw new Error("Sandbox session closed")
+    const started = performance.now()
     const temp = physicalPath(await mkdtemp(join(tmpdir(), "codesplash-sandbox-")))
     let reaper: Awaited<ReturnType<typeof createMacReaper>> | undefined
     let unregister: (() => void) | undefined
     try {
+      if (command.search) {
+        const runtime = await searchRuntime(),
+          binary = join(temp, "rg")
+        await writeFile(binary, runtime.payload, { mode: 0o500, flag: "wx" })
+        command.input = JSON.stringify({ ...JSON.parse(command.input!), searchBinary: binary })
+      }
       const profile = command.fixed
         ? {
             ...this.profile,
@@ -323,6 +338,7 @@ export class NativeSandbox implements SandboxRuntime {
           signal,
           input: command.input,
           timeoutMs: command.timeoutMs,
+          maxBytes: command.outputLimit,
           structured: command.structured,
           secrets: command.structured ? [] : [...this.#secretValues],
         })
@@ -347,7 +363,7 @@ export class NativeSandbox implements SandboxRuntime {
           input: wire,
           timeoutMs: command.timeoutMs + 15_000,
           structured: true,
-          maxBytes: 2 * 1024 * 1024,
+          maxBytes: (command.outputLimit ?? 1024 * 1024) + 2 * 1024 * 1024,
           cleanup: () => reaper?.kill(),
         })
         if (transport.kind !== "success")
@@ -401,6 +417,10 @@ export class NativeSandbox implements SandboxRuntime {
       this.#log.record("execution", profile.hash, result.kind)
       return result
     } finally {
+      if (command.search)
+        diagnosticContext
+          .getStore()
+          ?.record("index.operation", { count: 1, durationMs: performance.now() - started })
       reaper?.kill()
       unregister?.()
       await rm(temp, { recursive: true, force: true })
@@ -509,7 +529,9 @@ export class NativeSandbox implements SandboxRuntime {
       "timeout" in input &&
       typeof input.timeout === "number"
         ? Math.min(600_000, Math.max(1, input.timeout)) + 3000
-        : 125_000
+        : tool.name === "code_mode"
+          ? 33000
+          : 125_000
     if (tool.name === "bash") {
       const command = targets?.command
       if (!command) throw new Error("Invalid bash command")
@@ -531,6 +553,8 @@ export class NativeSandbox implements SandboxRuntime {
     }
     const result = await this.#invoke(
       {
+        outputLimit: 8 * 1024 * 1024,
+        search: tool.name === "grep",
         argv: internalCommand("worker"),
         input: JSON.stringify(worker),
         timeoutMs: timeout,

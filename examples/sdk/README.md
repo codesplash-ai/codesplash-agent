@@ -162,3 +162,6 @@ JSON schema validation. Pass `execution: {allowedTools, excludedTools, maxBudget
 `outputSchema` to creation. Schema validation applies to `prompt`, accepts one active prompt at a time,
 and never retries effects. Low-level input-queue users validate their own results. Budget estimates
 share reservations with child work, fail closed on missing pricing/usage, and disable embeddings.
+
+`19-advanced-tools.ts` opts into anchors and code mode, approves a bounded native code call,
+and verifies an anchored edit plus vendored search through the installed SDK.

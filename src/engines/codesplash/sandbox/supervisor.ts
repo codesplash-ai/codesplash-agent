@@ -24,6 +24,7 @@ export type SupervisorInput = {
   planFile?: string
   secrets?: Record<string, string>
   timeoutMs: number
+  outputLimit?: number
   structured?: boolean
   redactions?: string[]
   workloadEnv?: NodeJS.ProcessEnv
@@ -148,6 +149,7 @@ export async function runSupervisor(input: SupervisorInput, execute = runProcess
       input: input.input,
       signal: signal.signal,
       timeoutMs: input.timeoutMs,
+      maxBytes: Math.min(input.outputLimit ?? 1024 * 1024, 8 * 1024 * 1024),
       structured: input.structured,
       secrets: input.structured ? [] : (input.redactions ?? Object.values(input.secrets ?? {})),
       cleanup: () => reaper?.kill(),

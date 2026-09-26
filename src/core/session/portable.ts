@@ -121,6 +121,7 @@ export function portableContext(
       switch (block.type) {
         case "thinking":
         case "redacted_thinking":
+        case "provider_item":
           omissions.add("Provider reasoning, signatures and opaque thinking blocks omitted")
           return []
         case "text":

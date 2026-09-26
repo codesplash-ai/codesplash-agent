@@ -14,10 +14,12 @@ import {
 } from "./core/config.ts"
 import type { EngineDriver, SessionPolicy, SessionUsageSnapshot } from "./core/engine.ts"
 import type { AgentEvent } from "./core/events.ts"
+import { bytes as boundedFileBytes } from "./core/session/files.ts"
 import type { SessionRecorder } from "./core/session-recorder.ts"
 import type { SessionMeta, SessionStore } from "./core/sessions.ts"
 import type { ProviderId, ReasoningEffort } from "./engines/codesplash/contracts.ts"
 import type { HeadlessOutputFormat, HeadlessSink } from "./engines/codesplash/runner.ts"
+import { validateEnvironments } from "./engines/codesplash/tools/environments.ts"
 
 function printHelp() {
   process.stdout.write(`CodeSplash Agent
@@ -54,6 +56,10 @@ Usage:
   codesplash --help
 
 Commands:
+  eval           Run isolated native tasks, fault fixtures and budgeted model judges
+  diagnostics    Inspect content-free lifecycle logs and crash history
+  trace          Export and replay diagnostic timelines without repeating effects
+  feedback       Prepare diagnostics; upload only with explicit destination and consent
   serve          Run the authenticated native daemon or --stdio JSON-RPC server
   attach         Attach the terminal UI to a daemon thread
   daemon         Inspect daemon status or issue a one-time pairing code
@@ -90,6 +96,8 @@ Commands:
   plugin         Install, inspect and activate pinned plugins/marketplaces
   extensions     Review and trust native TS/JS extensions
   config         Explain/validate effective configuration and select named profiles
+  models         List/refresh model metadata and discover/pull local runtime models
+  tools          Inspect tool versions, presets, verified assets and attribution policies
   debug          Inspect harness internals; "debug prompt" prints the model-visible surface
                  (model, system prompt, tool specs) as JSON without opening a session
 
@@ -122,6 +130,10 @@ Options:
   --agent ID                     Run through a reviewed native child role
   --tools NAMES                   Comma-separated tool ceiling
   --exclude-tools NAMES           Comma-separated tool exclusions
+  --features NAMES                Opt into notebook, anchors, clock, code, browser, generation, plugins, environments
+  --browser-origins ORIGINS       Exact comma-separated allowed HTTP(S) origins
+  --environments FILE             Reviewed local/container/SSH environment manifest
+  --toolset NAME                  Apply a named tool ceiling (concise, plan, read-only, anchors)
   --max-budget-usd N              Cumulative estimated model spend ceiling
   --codex-smoke  Check Codex app-server startup, protocol, and account state without running a model
   --codex-live-smoke
@@ -593,6 +605,10 @@ export function parseRunArguments(
     const argument = args[index] as string
     if (
       [
+        "--browser-origins",
+        "--features",
+        "--environments",
+        "--toolset",
         "--agent",
         "--input-format",
         "--output-schema",
@@ -615,7 +631,14 @@ export function parseRunArguments(
       else if (flag === "--output-last-message") executionOptions.outputLastMessage = value
       else {
         executionOptions.execution ??= {}
-        if (flag === "--max-budget-usd") {
+        if (flag === "--environments")
+          executionOptions.execution.environments = validateEnvironments(
+            JSON.parse(boundedFileBytes(value, 65536).toString()),
+          )
+        else if (flag === "--browser-origins") executionOptions.execution.browserOrigins = value.split(",")
+        else if (flag === "--features") executionOptions.execution.features = value.split(",")
+        else if (flag === "--toolset") executionOptions.execution.toolset = value
+        else if (flag === "--max-budget-usd") {
           const budget = Number(value)
           if (!Number.isFinite(budget) || budget <= 0)
             throw new UsageError("Budget must be positive and finite")
@@ -1081,7 +1104,34 @@ async function main(): Promise<void> {
   installSignalHandlers()
 
   const args = process.argv.slice(2)
+  if (
+    !args.includes("--no-history") &&
+    !args[0]?.startsWith("--internal-") &&
+    process.env.CODESPLASH_DIAGNOSTICS_DISABLED !== "1"
+  ) {
+    const { startAppDiagnostics } = await import("./core/diagnostics.ts")
+    startAppDiagnostics()
+  }
+  if (["diagnostics", "trace", "feedback"].includes(args[0] ?? "")) {
+    process.exitCode = await (await import("./commands/diagnostics.ts")).runDiagnosticsCommand(
+      args[0]!,
+      args.slice(1),
+    )
+    return
+  }
 
+  if (args[0] === "tools") {
+    process.exitCode = await (await import("./commands/tools.ts")).runToolsCommand(args.slice(1))
+    return
+  }
+  if (args[0] === "models") {
+    process.exitCode = await (await import("./commands/models.ts")).runModelsCommand(args.slice(1))
+    return
+  }
+  if (args[0] === "eval") {
+    process.exitCode = await (await import("./commands/evals.ts")).runEvalCommand(args.slice(1))
+    return
+  }
   if (args[0] === "open") {
     process.exitCode = await (await import("./commands/open-link.ts")).runOpenLink(args.slice(1))
     return

@@ -6,6 +6,7 @@
 import type { AgentConfig, CustomProviderConfig } from "../../core/index.ts"
 import { resolveApiKey } from "./auth.ts"
 import type { ModelInfo, ProviderId, ProviderRuntime, ReasoningEffort } from "./contracts.ts"
+import { cachedModels } from "./model-cache.ts"
 import { anthropicModels, createAnthropicProvider } from "./providers/anthropic.ts"
 import { createOpenAiProvider, openaiModels } from "./providers/openai.ts"
 
@@ -105,6 +106,20 @@ export function buildProviderRegistry(
     providers.push(customRuntime(custom))
   }
 
+  // Only hydrate already configured providers; cached data cannot add endpoints or credentials.
+  const cached = cachedModels()
+  for (const runtime of providers) {
+    const replacements = cached.filter(
+      (model) => model.provider === runtime.id && model.protocol === runtime.protocol,
+    )
+    if (replacements.length) {
+      const models = runtime.client.models
+        .filter((model) => !replacements.some((next) => next.id === model.id))
+        .concat(replacements)
+      const client = runtime.client
+      runtime.client = { id: client.id, models, stream: client.stream.bind(client) }
+    }
+  }
   for (const runtime of extensions) {
     if (providers.some((provider) => provider.id === runtime.id))
       throw new Error("Extension provider collision")
@@ -173,7 +188,14 @@ function customRuntime(custom: CustomProviderConfig): ProviderRuntime {
     keyEnvVar: custom.keyEnvVar,
     requiresKey: custom.requiresKey,
     baseUrl: custom.baseUrl,
-    client: factory({ baseUrl: custom.baseUrl, keyEnvVar: custom.keyEnvVar, models }),
+    client: factory({
+      baseUrl: custom.baseUrl,
+      keyEnvVar: custom.keyEnvVar,
+      models,
+      api: custom.api,
+      transport: custom.transport,
+      serviceTier: custom.serviceTier,
+    }),
   }
 }
 

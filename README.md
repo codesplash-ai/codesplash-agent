@@ -1284,3 +1284,14 @@ and `codesplash attach THREAD_UUID`. ACP/MCP stdio adapters, a VS Code extension
 services, revocable sharing, CI/chat bridges and stricter headless execution controls are described
 in [the server guide](docs/server.md) and [integration setup](docs/integrations.md). Desktop remains
 an explicit prototype; signed GUI distribution is deferred.
+
+### Observability and advanced tools
+
+M10 adds local content-free diagnostics and trace/feedback commands, opt-in OTLP export,
+native behavioral evals, Responses transports and explicit model catalog refresh. Advanced
+tools include image/PDF reads, notebook/anchor edits, confined code, browser actions, reviewed
+execution environments and media jobs. See the [configuration, bounds and examples](docs/observability-and-tools.md).
+
+Use `codesplash tools list`, `tools presets`, `tools doctor`, `models --help`, and
+`eval --help` to inspect the installed capabilities. New external tools require explicit feature
+selection and operator configuration; per-action approval remains in force.

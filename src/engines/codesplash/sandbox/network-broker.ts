@@ -10,7 +10,7 @@ export async function startNetworkBroker(
   options: {
     resolve?: (host: string) => Promise<string[]>
     blocked?: (address: string) => string | undefined
-    /** Reviewed MCP development endpoints only; never a general private-network grant. */
+    /** Reviewed MCP/browser/generation development endpoints only; never a general private-network grant. */
     loopbackOrigins?: readonly string[]
   } = {},
 ): Promise<{ url: string; close(): void }> {
@@ -53,7 +53,7 @@ export async function startNetworkBroker(
   }
   const server = createServer(async (req, res) => {
     if (req.headers["proxy-authorization"] !== `Basic ${token}`) {
-      res.writeHead(407).end()
+      res.writeHead(407, { "Proxy-Authenticate": 'Basic realm="codesplash"' }).end()
       return
     }
     try {
@@ -91,7 +91,9 @@ export async function startNetworkBroker(
   })
   server.on("connect", async (req, downstream, head) => {
     if (req.headers["proxy-authorization"] !== `Basic ${token}`) {
-      downstream.end("HTTP/1.1 407 Proxy Authentication Required\r\n\r\n")
+      downstream.end(
+        'HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="codesplash"\r\n\r\n',
+      )
       return
     }
     try {

@@ -17,6 +17,7 @@ import {
   type StopReason,
   type ToolSpec,
 } from "../contracts.ts"
+import { createResponsesProvider } from "./responses.ts"
 import { withRetries } from "./retry.ts"
 import { parseSseStream } from "./sse.ts"
 
@@ -50,6 +51,9 @@ export const openaiModels: ModelInfo[] = [
 ]
 
 export type OpenAiProviderOptions = {
+  api?: "chat" | "responses"
+  transport?: "sse" | "websocket"
+  serviceTier?: "auto" | "default" | "flex" | "priority"
   /** Overrides the OPENAI_BASE_URL env override and the default endpoint. */
   baseUrl?: string
   /** Env var the key is read from; when set and the var is absent, no auth header is sent. */
@@ -59,6 +63,8 @@ export type OpenAiProviderOptions = {
 }
 
 export function createOpenAiProvider(options: OpenAiProviderOptions = {}): ProviderClient {
+  if (options.api === "responses")
+    return createResponsesProvider({ ...options, models: options.models ?? openaiModels })
   return {
     id: "openai",
     models: options.models ?? openaiModels,
@@ -177,7 +183,10 @@ async function connect(
   const response = await fetch(`${base}/v1/chat/completions`, {
     method: "POST",
     headers,
-    body: JSON.stringify(buildBody(request)),
+    body: JSON.stringify({
+      ...buildBody(request),
+      ...(options.serviceTier ? { service_tier: options.serviceTier } : {}),
+    }),
     signal,
   })
   if (!response.ok) {

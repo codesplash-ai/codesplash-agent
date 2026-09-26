@@ -5,6 +5,7 @@
  */
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
+import { diagnosticContext } from "../../core/diagnostics.ts"
 import { type FormResponse, type InteractionForm, validateFormValues } from "../../core/forms.ts"
 import { safeGitArguments, safeGitEnvironment } from "../../core/git-process.ts"
 import type { HookEvent, HookEventName, HookFields } from "../../core/hooks.ts"
@@ -28,6 +29,7 @@ import {
   pruneToolResults,
   reminderText,
 } from "./context.ts"
+import type { ProviderItemBlock } from "./contracts.ts"
 import {
   ASK_USER_TOOL_NAME,
   type ChatMessage,
@@ -239,7 +241,7 @@ type StreamResult =
       kind: "done"
       stopReason: Exclude<StopReason, "aborted">
       text: string
-      thinking: Array<ThinkingBlock | RedactedThinkingBlock>
+      thinking: Array<ThinkingBlock | RedactedThinkingBlock | ProviderItemBlock>
       toolCalls: ToolCallBlock[]
     }
 
@@ -1103,6 +1105,7 @@ export class CodesplashLoop {
     }
   }
   async #compactionErrorHook(error: unknown, signal: AbortSignal): Promise<void> {
+    diagnosticContext.getStore()?.record("compaction.error", { failed: 1 })
     if (signal.aborted) return
     const failed = await this.hook("compaction.error", signal, {
       cwd: this.#cwd,
@@ -1179,7 +1182,7 @@ export class CodesplashLoop {
     const reasoningId = crypto.randomUUID()
     let text = ""
     let reasoning = ""
-    const thinking: Array<ThinkingBlock | RedactedThinkingBlock> = []
+    const thinking: Array<ThinkingBlock | RedactedThinkingBlock | ProviderItemBlock> = []
     const toolCalls: ToolCallBlock[] = []
     let stopReason: StopReason | undefined
     let sawEvent = false
@@ -1223,6 +1226,8 @@ export class CodesplashLoop {
           const block: ThinkingBlock = { type: "thinking", text: event.text }
           if (event.signature !== undefined) block.signature = event.signature
           thinking.push(block)
+        } else if (event.type === "provider_item") {
+          thinking.push(event)
         } else if (event.type === "redacted_thinking") {
           thinking.push({ type: "redacted_thinking", data: event.data })
         } else if (event.type === "tool_call") {
@@ -1426,7 +1431,8 @@ export class CodesplashLoop {
     let droppedBeforeTurn = 0
     for (const [index, message] of this.#history.entries()) {
       const content = message.content.filter(
-        (block) => block.type !== "thinking" && block.type !== "redacted_thinking",
+        (block) =>
+          block.type !== "thinking" && block.type !== "redacted_thinking" && block.type !== "provider_item",
       )
       if (content.length === 0) {
         if (index < this.#turnStartIndex) droppedBeforeTurn += 1

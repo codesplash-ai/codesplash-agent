@@ -208,6 +208,15 @@
                   }
                 },
                 "minItems": 1
+              },
+              "api": {
+                "enum": ["chat", "responses"]
+              },
+              "transport": {
+                "enum": ["sse", "websocket"]
+              },
+              "serviceTier": {
+                "enum": ["auto", "default", "flex", "priority"]
               }
             }
           }

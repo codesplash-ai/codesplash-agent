@@ -68,6 +68,9 @@ export type CustomModelConfig = {
 
 /** One `[providers.<id>]` table, fully resolved (defaults applied). Keys never live here. */
 export type CustomProviderConfig = {
+  api?: "chat" | "responses"
+  transport?: "sse" | "websocket"
+  serviceTier?: "auto" | "default" | "flex" | "priority"
   id: string
   protocol: CustomProviderProtocol
   baseUrl: string
@@ -662,12 +665,38 @@ function validateProvider(
     }
   }
 
+  for (const [field, allowed] of Object.entries({
+    api: ["chat", "responses"],
+    transport: ["sse", "websocket"],
+    serviceTier: ["auto", "default", "flex", "priority"],
+  })) {
+    if (
+      table[field] !== undefined &&
+      (typeof table[field] !== "string" || !allowed.includes(table[field] as string))
+    )
+      problems.push(`Invalid provider ${field}`)
+  }
+  if ((table.api || table.transport || table.serviceTier) && protocol !== "openai")
+    problems.push("Transport options require an OpenAI provider")
+  if (table.transport === "websocket" && table.api !== "responses")
+    problems.push("WebSocket requires Responses")
   const models = validateModels(id, table.models, keyEnvVar, seenModelIds, problems)
 
   if (problems.length > before || protocol === undefined || baseUrl === undefined || !models) {
     return undefined
   }
-  return { id, protocol, baseUrl, displayName, keyEnvVar, requiresKey, models }
+  return {
+    id,
+    protocol,
+    baseUrl,
+    displayName,
+    keyEnvVar,
+    requiresKey,
+    models,
+    ...(table.api ? { api: table.api as CustomProviderConfig["api"] } : {}),
+    ...(table.transport ? { transport: table.transport as CustomProviderConfig["transport"] } : {}),
+    ...(table.serviceTier ? { serviceTier: table.serviceTier as CustomProviderConfig["serviceTier"] } : {}),
+  }
 }
 
 function validateModels(
@@ -864,6 +893,9 @@ function providerTable(provider: CustomProviderConfig): TomlTable {
     displayName: provider.displayName,
     keyEnvVar: provider.keyEnvVar,
     requiresKey: provider.requiresKey,
+    ...(provider.api ? { api: provider.api } : {}),
+    ...(provider.transport ? { transport: provider.transport } : {}),
+    ...(provider.serviceTier ? { serviceTier: provider.serviceTier } : {}),
     models: provider.models.map((model) => {
       const entry: TomlTable = {
         id: model.id,

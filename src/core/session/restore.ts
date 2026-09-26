@@ -137,6 +137,36 @@ export class RestoreService {
     })
     return this.#run()
   }
+  /** Trusted hunk planner supplies immutable blobs; retain the same durable no-clobber journal. */
+  async applySelection(checkpoint: string, revision: string, rows: RestoreRow[]) {
+    return workspaceMutations.run([this.store.policy.cwd], AbortSignal.timeout(30000), async () => {
+      this.store.step(checkpoint)
+      if (
+        this.journal() ||
+        this.store.view().revision !== revision ||
+        this.store.availability() ||
+        rows.length !== 1
+      )
+        throw new Error("Hunk restore state changed")
+      for (const row of rows) {
+        if (!this.store.eligible(row.path, true) || !same(this.#current(row.path), row.expected))
+          throw new Error("External edit preserved")
+        for (const file of [row.expected, row.target]) if (file) await this.store.content(file)
+      }
+      this.store.update(revision, "hunk-restore-prepare", (state) => {
+        state.restore = {
+          version: 1,
+          id: crypto.randomUUID(),
+          checkpoint,
+          created: new Date().toISOString(),
+          status: "prepared",
+          direction: "finish",
+          entries: rows,
+        } satisfies RestoreJournal
+      })
+      return this.#run()
+    })
+  }
   async recover(action: "finish" | "rollback", signal = AbortSignal.timeout(30000)): Promise<RestoreJournal> {
     return workspaceMutations.run([this.store.policy.cwd], signal, () => this.#recover(action))
   }

@@ -1,3 +1,4 @@
+import { diagnosticContext } from "../../../core/diagnostics.ts"
 /**
  * Retry engine for provider connections. Retryable failures are ProviderHttpError with status
  * 408/429/5xx and network-level errors — TypeError (Node/undici convention) or a plain Error
@@ -40,7 +41,13 @@ export async function withRetries<T>(operation: () => Promise<T>, options: Retry
     } catch (error) {
       if (attempt >= maxAttempts || !isRetryable(error)) throw error
       signal?.throwIfAborted()
-      await sleepUnlessAborted(delayBeforeRetry(error, attempt, baseDelayMs, maxDelayMs), signal)
+      const delayMs = delayBeforeRetry(error, attempt, baseDelayMs, maxDelayMs)
+      diagnosticContext.getStore()?.record("provider.retry", {
+        attempt,
+        delayMs,
+        status: error instanceof ProviderHttpError ? error.status : undefined,
+      })
+      await sleepUnlessAborted(delayMs, signal)
     }
   }
 }

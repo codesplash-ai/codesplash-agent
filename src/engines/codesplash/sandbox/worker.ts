@@ -6,6 +6,7 @@ import { builtinTools } from "../tools/registry.ts"
 import { SecretSanitizer } from "./env-policy.ts"
 
 export type WorkerInput = {
+  searchBinary?: string
   tool: string
   input: unknown
   cwd: string
@@ -19,7 +20,7 @@ export async function workerMain(): Promise<void> {
   const bytes = await new Response(Bun.stdin.stream()).arrayBuffer()
   if (bytes.byteLength > 8 * 1024 * 1024) throw new Error("Tool request exceeds 8 MiB")
   const request = JSON.parse(Buffer.from(bytes).toString()) as WorkerInput
-  const tool = [...builtinTools(), ...internalContextTools()].find((t) => t.name === request.tool)
+  const tool = [...builtinTools(true), ...internalContextTools()].find((t) => t.name === request.tool)
   if (!tool || ["ask_user", "enter_plan_mode", "exit_plan_mode", "request_permissions"].includes(tool.name))
     throw new Error("Unknown sandbox worker tool")
   const permissions = await createPermissionRuntime({
@@ -32,6 +33,7 @@ export async function workerMain(): Promise<void> {
   const clean = (text: string) => redactSensitiveText(sanitizer.redact(text))
   try {
     const outcome = await tool.run(request.input, {
+      searchBinary: request.searchBinary,
       cwd: request.cwd,
       policy: request.policy,
       permissions,

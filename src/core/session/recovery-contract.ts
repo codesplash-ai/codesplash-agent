@@ -2,6 +2,15 @@ import type { SessionMeta } from "../sessions.ts"
 import type { BranchView } from "./branches.ts"
 import type { RestoreJournal, RestorePreview } from "./restore.ts"
 export type RecoveryRequest =
+  | { action: "hunks"; checkpoint: string; path: string }
+  | {
+      action: "accept-hunk" | "reject-hunk"
+      checkpoint: string
+      path: string
+      hunk: string
+      revision?: string
+      apply?: boolean
+    }
   | { action: "tree" }
   | { action: "gc-recovery"; revision: string }
   | { action: "acknowledge-fork"; id: string; revision: string }

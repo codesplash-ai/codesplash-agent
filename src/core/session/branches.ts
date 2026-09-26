@@ -339,6 +339,17 @@ export function validNativeContext(value: unknown): value is ChatMessage[] {
           )
             return false
           break
+        case "provider_item":
+          if (
+            message.role !== "assistant" ||
+            block.provider !== "openai-responses" ||
+            !block.item ||
+            typeof block.item !== "object" ||
+            block.item.type !== "reasoning" ||
+            JSON.stringify(block.item).length > 8 * 1024 * 1024
+          )
+            return false
+          break
         case "redacted_thinking":
           if (message.role !== "assistant" || typeof block.data !== "string") return false
           break

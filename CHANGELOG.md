@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Observability, evaluation and advanced tools (M10)
+
+- Add bounded content-free diagnostics, provider timing/retry records, crash recovery markers,
+  trace summaries, reviewed feedback export/upload, and independently opt-in OTLP/analytics sinks.
+- Add native behavioral evals with deterministic faults, explicit live-model budgets, optional
+  advisory judges and suite-bound quality/cost comparison reports.
+- Add Responses SSE/WebSocket transport, service tiers, checksum-pinned model caches and explicit
+  local-runtime discovery/pull commands.
+- Add image/PDF reads, notebook and anchor edits, confined code, clock, isolated browser actions,
+  image/video job generation, plugin suggestions and reviewed local/container/SSH environments.
+- Add checkpoint hunk review and conflict-safe rejection, explicit commit/PR attribution formatting,
+  tool schema versions/presets, verified bundled search repair and bounded shell structure analysis.
+- Keep advanced capabilities opt-in. External effects require approval and are never automatically
+  replayed; live-provider, remote-host and platform validation limits are documented.
+
 ### Server, IDE and remote clients (M9)
 
 - Add an authenticated native JSON-RPC daemon, generated protocol contracts, replay/snapshots,

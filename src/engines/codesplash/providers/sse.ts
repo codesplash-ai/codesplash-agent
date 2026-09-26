@@ -22,6 +22,7 @@ export async function* parseSseStream(response: Response, signal?: AbortSignal):
   const decoder = new TextDecoder()
   let buffered = ""
   let dataLines: string[] = []
+  let eventBytes = 0
   let eventName: string | undefined
 
   const finishLine = (line: string): SseEvent | undefined => {
@@ -33,6 +34,7 @@ export async function* parseSseStream(response: Response, signal?: AbortSignal):
       const finished: SseEvent = { data: dataLines.join("\n") }
       if (eventName !== undefined) finished.event = eventName
       dataLines = []
+      eventBytes = 0
       eventName = undefined
       return finished
     }
@@ -41,8 +43,11 @@ export async function* parseSseStream(response: Response, signal?: AbortSignal):
     const field = colon === -1 ? line : line.slice(0, colon)
     let value = colon === -1 ? "" : line.slice(colon + 1)
     if (value.startsWith(" ")) value = value.slice(1)
-    if (field === "data") dataLines.push(value)
-    else if (field === "event") eventName = value
+    if (field === "data") {
+      eventBytes += Buffer.byteLength(value)
+      if (eventBytes > 8 * 1024 * 1024) throw new Error("Provider SSE event exceeds 8 MiB")
+      dataLines.push(value)
+    } else if (field === "event") eventName = value
     return undefined
   }
 
@@ -60,6 +65,7 @@ export async function* parseSseStream(response: Response, signal?: AbortSignal):
       buffered += decoder.decode(chunk.value, { stream: true })
       const { lines, rest } = splitLines(buffered, false)
       buffered = rest
+      if (Buffer.byteLength(buffered) > 8 * 1024 * 1024) throw new Error("Provider SSE line exceeds 8 MiB")
       for (const line of lines) {
         const finished = finishLine(line)
         if (finished) yield finished

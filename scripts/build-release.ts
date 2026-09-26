@@ -6,7 +6,7 @@
  */
 
 import { createHash } from "node:crypto"
-import { chmod, copyFile, mkdir, rm } from "node:fs/promises"
+import { chmod, copyFile, cp, mkdir, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { verifiedSeccompHelper } from "../src/engines/codesplash/sandbox/supervisor.ts"
@@ -102,6 +102,9 @@ async function main(): Promise<void> {
 
   const runtimeAssets = join(outDirectory, "sandbox-runtime")
   await mkdir(runtimeAssets)
+  await cp(join(projectRoot, "node_modules", "playwright-core"), join(runtimeAssets, "playwright-core"), {
+    recursive: true,
+  })
   const upstream = fileURLToPath(
     new URL("../node_modules/@anthropic-ai/sandbox-runtime/LICENSE", import.meta.url),
   )
@@ -147,6 +150,7 @@ async function main(): Promise<void> {
     await run([process.execPath, "scripts/scheduler-smoke.ts", binaryPath])
     await run([process.execPath, "scripts/teams-smoke.ts", binaryPath])
     await run([process.execPath, "scripts/server-smoke.ts", binaryPath])
+    await run([process.execPath, "scripts/m10-smoke.ts", binaryPath])
     await run([process.execPath, "scripts/sdk-smoke.ts"])
   }
 

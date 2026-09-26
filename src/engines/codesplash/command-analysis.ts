@@ -1,3 +1,4 @@
+import { shellStructure } from "./shell-structure.ts"
 /**
  * Pure shell-command analysis for the permission layer: a hand-rolled POSIX-ish tokenizer,
  * wrapper peeling, the always-ask dangerous floor, the built-in read-only command table, and
@@ -28,6 +29,7 @@ export type ShellSegment = { argv: string[]; pipedFromPrevious: boolean }
  * anything that could rewrite it (`$(`, backticks, `<(`, `>(`) is unanalyzable instead.
  */
 export function splitCommandSegments(command: string): ShellSegment[] | undefined {
+  if (!shellStructure(command).valid) return undefined
   const segments: ShellSegment[] = []
   let argv: string[] = []
   let word = ""
@@ -551,7 +553,8 @@ function dangerousSegmentReason(canonical: string[]): string | undefined {
  * than bailed on): the floor must see through `PATH=/tmp rm -rf x`, not be evaded by it.
  * Unanalyzable commands never reach this function and are NOT dangerous by themselves.
  */
-export function dangerousCommandReason(segments: ShellSegment[]): string | undefined {
+export function dangerousCommandReason(segments: ShellSegment[], depth = 0): string | undefined {
+  if (depth > 16) return "Shell interpreter nesting exceeds the analysis limit"
   const canonicals = segments.map((segment) => canonicalizeWords(segment.argv, true) ?? [...segment.argv])
   for (let i = 0; i < segments.length; i++) {
     const canonical = canonicals[i] ?? []
@@ -564,7 +567,7 @@ export function dangerousCommandReason(segments: ShellSegment[]): string | undef
     if (payload !== undefined) {
       const inner = splitCommandSegments(payload)
       if (inner !== undefined) {
-        const innerReason = dangerousCommandReason(inner)
+        const innerReason = dangerousCommandReason(inner, depth + 1)
         if (innerReason !== undefined) return innerReason
       }
     }

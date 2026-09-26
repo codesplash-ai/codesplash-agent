@@ -168,6 +168,15 @@
               }
             },
             "minItems": 1
+          },
+          "api": {
+            "enum": ["chat", "responses"]
+          },
+          "transport": {
+            "enum": ["sse", "websocket"]
+          },
+          "serviceTier": {
+            "enum": ["auto", "default", "flex", "priority"]
           }
         }
       }
@@ -479,6 +488,15 @@
                     }
                   },
                   "minItems": 1
+                },
+                "api": {
+                  "enum": ["chat", "responses"]
+                },
+                "transport": {
+                  "enum": ["sse", "websocket"]
+                },
+                "serviceTier": {
+                  "enum": ["auto", "default", "flex", "priority"]
                 }
               }
             }
@@ -1762,9 +1780,17 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "mouseScroll": { "enum": ["linear", "accelerated"] },
-        "copyOnSelect": { "type": "boolean" },
-        "notificationIdleMs": { "type": "integer", "minimum": 0, "maximum": 60000 },
+        "mouseScroll": {
+          "enum": ["linear", "accelerated"]
+        },
+        "copyOnSelect": {
+          "type": "boolean"
+        },
+        "notificationIdleMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 60000
+        },
         "vim": {
           "type": "boolean"
         },

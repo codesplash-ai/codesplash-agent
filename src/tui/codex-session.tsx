@@ -1224,6 +1224,18 @@ export function CodexSessionApp({
             })
           })
           return
+        case "feedback":
+          void runCommand(async () => {
+            const { exportDiagnostics, replayDiagnostics } = await import("../core/diagnostics.ts")
+            setOverlay({
+              kind: "resources",
+              title: "Diagnostic feedback",
+              text:
+                JSON.stringify(replayDiagnostics(exportDiagnostics()), null, 2) +
+                "\nExport: codesplash feedback export FILE\nReview the file, then send explicitly with: codesplash feedback send FILE --url HTTPS_URL --yes",
+            })
+          })
+          return
         case "share":
         case "unshare":
           void runCommand(async () => {
@@ -1267,6 +1279,9 @@ export function CodexSessionApp({
         case "fork":
         case "rewind":
         case "checkpoints":
+        case "hunks":
+        case "accept-hunk":
+        case "reject-hunk":
         case "checkpoint-diff":
         case "restore":
         case "recover-restore":

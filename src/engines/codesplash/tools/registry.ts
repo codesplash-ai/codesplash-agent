@@ -4,6 +4,7 @@
  */
 import type { HarnessTool, ToolCallBlock, ToolSpec } from "../contracts.ts"
 import { readToolOutputTool } from "../tool-output-store.ts"
+import { advancedTools } from "./advanced.ts"
 import { applyPatchTool } from "./apply-patch.ts"
 import { bashTool } from "./bash.ts"
 import { editFileTool } from "./edit.ts"
@@ -27,8 +28,9 @@ export type ToolRegistry = {
   source(name: string): { id: string; generation: string } | undefined
 }
 
-export function builtinTools(): HarnessTool[] {
+export function builtinTools(advanced = false): HarnessTool[] {
   return [
+    ...(advanced ? advancedTools() : []),
     readFileTool,
     writeFileTool,
     editFileTool,

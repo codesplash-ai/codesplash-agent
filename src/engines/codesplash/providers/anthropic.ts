@@ -205,7 +205,9 @@ function toWireMessage(
   includeThinking: boolean,
 ): { role: "user" | "assistant"; content: WireBlock[] } {
   const content = message.content.filter(
-    (block) => includeThinking || (block.type !== "thinking" && block.type !== "redacted_thinking"),
+    (block) =>
+      block.type !== "provider_item" &&
+      (includeThinking || (block.type !== "thinking" && block.type !== "redacted_thinking")),
   )
   return { role: message.role, content: content.map(toWireBlock) }
 }
@@ -216,6 +218,8 @@ function toWireBlock(block: ContentBlock): WireBlock {
       return { type: "text", text: block.text }
     case "thinking":
       return { type: "thinking", thinking: block.text, signature: block.signature ?? "" }
+    case "provider_item":
+      throw new Error("Foreign provider state must be filtered before Anthropic serialization")
     case "redacted_thinking":
       return { type: "redacted_thinking", data: block.data }
     case "image":

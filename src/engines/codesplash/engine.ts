@@ -7,6 +7,7 @@ import { assertManagedMode, assertManagedPolicy } from "../../core/config/policy
 import { resolveConfigForWorkspace } from "../../core/config/resolver.ts"
 import { stableValue } from "../../core/config/source.ts"
 import { configDirectory, dataDirectory } from "../../core/config.ts"
+import { Diagnostics, diagnosticContext } from "../../core/diagnostics.ts"
 import { type HookEventName, type HookFields, hookIsGate } from "../../core/hooks.ts"
 import {
   type AgentConfig,
@@ -87,7 +88,13 @@ import type {
   ProviderId,
   ReasoningEffort,
 } from "./contracts.ts"
-import { DollarBudget, type DollarState, selectedRegistry, validateLimits } from "./execution.ts"
+import {
+  advancedFeatures,
+  DollarBudget,
+  type DollarState,
+  selectedRegistry,
+  validateLimits,
+} from "./execution.ts"
 import { type ExtensionHost, ExtensionRuntime } from "./extensions/runtime.ts"
 import { HookManager } from "./hooks/manager.ts"
 import { hookTrusted, reviewHook } from "./hooks/trust.ts"
@@ -135,11 +142,17 @@ import { readPluginManifest } from "./plugins/manifest.ts"
 import { verifySelection } from "./plugins/store.ts"
 import { generatePresentation } from "./presentation.ts"
 import { buildSystemPrompt } from "./prompt.ts"
+import { observedProvider } from "./providers/observed.ts"
 import { NativeRecovery } from "./recovery.ts"
 import type { SandboxRuntime } from "./sandbox/contracts.ts"
 import { contains, createProfile, physicalPath, pinProfile } from "./sandbox/profile.ts"
 import { NativeSandbox } from "./sandbox/runtime.ts"
 import { ToolOutputStore } from "./tool-output-store.ts"
+import { advancedTools } from "./tools/advanced.ts"
+import { BrowserTools } from "./tools/browser.ts"
+import { environmentTool } from "./tools/environments.ts"
+import { GenerationTools } from "./tools/generation.ts"
+import { pluginSuggestions } from "./tools/plugin-suggestions.ts"
 import { builtinTools, createToolRegistry, type ToolRegistry } from "./tools/registry.ts"
 import { appendTranscriptMessages, loadTranscript, writeTranscriptSnapshot } from "./transcript.ts"
 
@@ -262,7 +275,19 @@ export class CodesplashDriver implements EngineDriver {
   }
 
   async openSession(options: OpenSessionOptions): Promise<EngineSession> {
-    options = { ...options, sessionState: options.sessionState ?? new MemorySessionState() }
+    options = {
+      ...options,
+      execution: {
+        ...(process.env.CODESPLASH_AGENT_FEATURES
+          ? { features: process.env.CODESPLASH_AGENT_FEATURES.split(",") }
+          : {}),
+        ...(process.env.CODESPLASH_BROWSER_ORIGINS
+          ? { browserOrigins: process.env.CODESPLASH_BROWSER_ORIGINS.split(",") }
+          : {}),
+        ...options.execution,
+      },
+      sessionState: options.sessionState ?? new MemorySessionState(),
+    }
     const state = options.sessionState as import("../../core/session/control.ts").SessionStateAccess
     const location = workingDirectory(state.read().state)
     let history: ChatMessage[] | undefined
@@ -635,6 +660,8 @@ class CodesplashSession implements EngineSession {
   readonly capabilities = CODESPLASH_CAPABILITIES
   readonly events: AsyncIterable<AgentEvent>
   readonly #queue = new AsyncQueue<AgentEvent>()
+  readonly #diagnostics: Diagnostics
+  readonly #browser: BrowserTools
   readonly #factory: CodesplashEventFactory
   readonly #loop: CodesplashLoop
   readonly #memory: MemorySession
@@ -723,7 +750,15 @@ class CodesplashSession implements EngineSession {
     this.events = this.#queue
     this.#config = config
     this.#providerRegistry = providerRegistry
-    this.#providers = providers
+    this.#diagnostics = new Diagnostics(
+      options.nativeTranscriptPath
+        ? join(options.trustDataDirectory ?? dataDirectory(), "diagnostics")
+        : undefined,
+    )
+    this.#diagnostics.record("session.start")
+    this.#providers = Object.fromEntries(
+      Object.entries(providers).map(([id, provider]) => [id, observedProvider(provider, this.#diagnostics)]),
+    )
     this.#policy = options.policy ?? defaultSessionPolicy
     this.#cwd = options.cwd
     this.#permissions = permissions
@@ -1012,6 +1047,12 @@ class CodesplashSession implements EngineSession {
         this.#systemPrompt = undefined
       },
     })
+    this.#browser = new BrowserTools(
+      sandbox.profile.allowedHosts,
+      options.execution?.browserOrigins ?? [],
+      undefined,
+      config.resolution?.constraints?.allowedHosts === undefined,
+    )
     this.#language = new LanguageServices({
       root: join(options.trustDataDirectory ?? dataDirectory(), "language-services"),
       cwd: options.cwd,
@@ -1022,6 +1063,31 @@ class CodesplashSession implements EngineSession {
     this.#extensionBase = createToolRegistry(
       [
         ...builtinTools(),
+        ...(options.execution?.features?.includes("generation")
+          ? [
+              new GenerationTools(
+                join(options.trustDataDirectory ?? dataDirectory(), "generation", options.localSessionId),
+                sandbox.profile.allowedHosts,
+                undefined,
+                options.execution?.maxBudgetUsd !== undefined,
+                config.resolution?.constraints?.allowedHosts === undefined,
+              ).tool(),
+            ]
+          : []),
+        ...(options.execution?.features?.includes("environments")
+          ? [
+              environmentTool(
+                options.execution.environments ?? [{ id: "local", transport: "local" }],
+                sandbox,
+                config.resolution?.constraints?.allowedHosts === undefined,
+              ),
+            ]
+          : []),
+        ...(options.execution?.features?.includes("plugins") ? [pluginSuggestions(() => this.#config)] : []),
+        ...(options.execution?.features?.includes("browser") ? [this.#browser.tool()] : []),
+        ...advancedTools().filter((tool) =>
+          options.execution?.features?.some((feature) => advancedFeatures[feature]?.includes(tool.name)),
+        ),
         this.#language.tool(),
         ...this.#commands.tools(),
         ...this.#children.tools(),
@@ -1074,7 +1140,10 @@ class CodesplashSession implements EngineSession {
       },
       hooks: this.#hooks,
       cwd: options.cwd,
-      onContextBoundary: (kind, messages) => this.#recovery.capture(kind, kind, messages),
+      onContextBoundary: (kind, messages) => {
+        this.#diagnostics.record(kind === "before-compaction" ? "compaction.start" : "compaction.end")
+        return this.#recovery.capture(kind, kind, messages)
+      },
       beforeMutation: async (label, signal) => {
         try {
           return await this.#recovery.checkpoints.begin(label, signal)
@@ -1589,6 +1658,9 @@ class CodesplashSession implements EngineSession {
     return this.#send(input)
   }
   async #send(input: UserInput, queuedId?: string): Promise<void> {
+    return diagnosticContext.run(this.#diagnostics, () => this.#sendObserved(input, queuedId))
+  }
+  async #sendObserved(input: UserInput, queuedId?: string): Promise<void> {
     this.#requireOpen()
     if (this.#inputRunner.failure) throw this.#inputRunner.failure
     this.#recovery.assertReady()
@@ -2601,6 +2673,7 @@ class CodesplashSession implements EngineSession {
     this.#extensionCommandAbort.abort()
     this.#extensions.suspend()
     await this.#hooks.suspend().catch(() => {})
+    await this.#browser.close()
     await this.#language.close()
     await this.#mcp.close()
     await this.#admissionSettled?.catch(() => {})
@@ -2624,6 +2697,8 @@ class CodesplashSession implements EngineSession {
       this.#releaseWorktree?.()
       this.#releaseWorktree = undefined
       this.#ended = true
+      this.#diagnostics.close()
+      await this.#diagnostics.settled()
       this.#queue.end()
     }
   }
@@ -2917,6 +2992,7 @@ class CodesplashSession implements EngineSession {
   }
 
   #push(event: AgentEvent): void {
+    this.#diagnostics?.event(event)
     if (event.kind === "turn.completed") {
       this.#lastTurnSucceeded = event.payload.status === "completed"
       this.#lastInputCompletion = event.payload.status === "interrupted" ? "cancelled" : event.payload.status

@@ -119,7 +119,7 @@ export function serializeSummary(messages: readonly ChatMessage[]): string[] {
     JSON.stringify({
       role: message.role,
       content: message.content
-        .filter((b) => b.type !== "thinking" && b.type !== "redacted_thinking")
+        .filter((b) => b.type !== "thinking" && b.type !== "redacted_thinking" && b.type !== "provider_item")
         .map((b) =>
           b.type === "image" ? { type: "text", text: "[Earlier image omitted from summary]" } : b,
         ),

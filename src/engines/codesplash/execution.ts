@@ -1,10 +1,67 @@
 import Ajv from "ajv"
 import type { SessionUsageSnapshot } from "../../core/engine.ts"
 import type { ProviderClient, ProviderUsage } from "./contracts.ts"
+import { type ExecutionEnvironment, validateEnvironments } from "./tools/environments.ts"
 import type { ToolRegistry } from "./tools/registry.ts"
-export type ExecutionLimits = { allowedTools?: string[]; excludedTools?: string[]; maxBudgetUsd?: number }
+export const toolsets: Record<string, readonly string[]> = {
+  concise: ["read_file", "write_file", "edit_file", "bash", "glob", "grep"],
+  plan: [
+    "read_file",
+    "glob",
+    "grep",
+    "web_fetch",
+    "web_search",
+    "ask_user",
+    "enter_plan_mode",
+    "exit_plan_mode",
+  ],
+  "read-only": ["read_file", "glob", "grep", "read_anchors", "lsp", "clock"],
+  anchors: ["read_anchors", "edit_anchors", "read_file", "glob", "grep"],
+}
+export const advancedFeatures: Record<string, readonly string[]> = {
+  generation: ["generate_media"],
+  environments: ["environment_exec"],
+  plugins: ["plugin_suggestions"],
+  browser: ["browser"],
+  notebook: ["notebook_edit"],
+  anchors: ["read_anchors", "edit_anchors"],
+  clock: ["clock"],
+  code: ["code_mode"],
+}
+export type ExecutionLimits = {
+  allowedTools?: string[]
+  excludedTools?: string[]
+  maxBudgetUsd?: number
+  environments?: ExecutionEnvironment[]
+  browserOrigins?: string[]
+  toolset?: string
+  features?: string[]
+}
 export function validateLimits(limits: ExecutionLimits | undefined) {
   if (!limits) return
+  if (limits.environments) validateEnvironments(limits.environments)
+  if (
+    limits.browserOrigins &&
+    (!Array.isArray(limits.browserOrigins) ||
+      limits.browserOrigins.length > 32 ||
+      limits.browserOrigins.some((origin) => {
+        try {
+          const url = new URL(origin)
+          return url.origin !== origin || !["http:", "https:"].includes(url.protocol)
+        } catch {
+          return true
+        }
+      }))
+  )
+    throw new Error("Browser origins must be exact HTTP(S) origins")
+  if (limits.toolset && !Object.hasOwn(toolsets, limits.toolset)) throw new Error("Unknown toolset preset")
+  if (
+    limits.features &&
+    (!Array.isArray(limits.features) ||
+      limits.features.length > 32 ||
+      limits.features.some((name) => !Object.hasOwn(advancedFeatures, name)))
+  )
+    throw new Error("Unknown advanced feature")
   for (const names of [limits.allowedTools, limits.excludedTools])
     if (
       names !== undefined &&
@@ -21,11 +78,13 @@ export function validateLimits(limits: ExecutionLimits | undefined) {
 }
 export function toolSelected(name: string, limits?: ExecutionLimits) {
   return (
-    !limits?.excludedTools?.includes(name) && (!limits?.allowedTools || limits.allowedTools.includes(name))
+    (!limits?.toolset || toolsets[limits.toolset]?.includes(name)) &&
+    !limits?.excludedTools?.includes(name) &&
+    (!limits?.allowedTools || limits.allowedTools.includes(name))
   )
 }
 export function selectedRegistry(registry: ToolRegistry, limits?: ExecutionLimits): ToolRegistry {
-  if (!limits?.allowedTools && !limits?.excludedTools) return registry
+  if (!limits?.allowedTools && !limits?.excludedTools && !limits?.toolset) return registry
   // Hidden context readers are fixed host operations; explicit exclusions still apply.
   const allowed = (name: string) =>
     !limits.excludedTools?.includes(name) && (registry.get(name)?.hidden || toolSelected(name, limits))

@@ -1,5 +1,6 @@
 import { existsSync, lstatSync, readdirSync, unlinkSync } from "node:fs"
 import { isAbsolute, join, relative, resolve } from "node:path"
+import { diagnosticContext } from "../diagnostics.ts"
 import type { SessionStateAccess } from "./control.ts"
 import { atomic, bytes, canonicalRoot, component, digest, directory, hostPath } from "./files.ts"
 import { attachmentIdentity } from "./input-queue.ts"
@@ -419,6 +420,7 @@ export class CheckpointStore {
   }
   async git(args: string[], input?: Buffer, accepted = [0]): Promise<Buffer> {
     if (!this.gitDirectory) throw new Error("No private checkpoint repository")
+    const started = performance.now()
     const processGit = Bun.spawn(
       [
         Bun.which("git") ?? "git",
@@ -475,6 +477,9 @@ export class CheckpointStore {
       return Buffer.from(output)
     } finally {
       clearTimeout(timer)
+      diagnosticContext
+        .getStore()
+        ?.record("git.operation", { count: 1, durationMs: performance.now() - started })
     }
   }
   update(revision: string, operation: string, change: (state: CheckpointState) => void): void {

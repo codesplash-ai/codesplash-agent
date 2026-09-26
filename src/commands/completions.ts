@@ -13,6 +13,12 @@ export const COMPLETION_SHELLS: readonly CompletionShell[] = ["bash", "zsh", "fi
 /* ------------------------------- shared command surface ------------------------------- */
 
 const SUBCOMMANDS = [
+  "models",
+  "tools",
+  "eval",
+  "diagnostics",
+  "trace",
+  "feedback",
   "serve",
   "attach",
   "daemon",
@@ -66,6 +72,10 @@ const ROOT_FLAGS = [
 ] as const
 
 const RUN_FLAGS = [
+  "--features",
+  "--toolset",
+  "--browser-origins",
+  "--environments",
   "--input-format",
   "--output-schema",
   "--output-last-message",

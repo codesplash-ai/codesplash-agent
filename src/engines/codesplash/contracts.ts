@@ -67,7 +67,13 @@ export type ToolResultBlock = {
   text: string
   isError?: boolean
 }
+export type ProviderItemBlock = {
+  type: "provider_item"
+  provider: "openai-responses"
+  item: Record<string, unknown>
+}
 export type ContentBlock =
+  | ProviderItemBlock
   | TextBlock
   | ImageBlock
   | ThinkingBlock
@@ -107,6 +113,7 @@ export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "aborted"
  * request signal yields {type:"done", stopReason:"aborted"} rather than a throw.
  */
 export type ProviderStreamEvent =
+  | ProviderItemBlock
   | { type: "text_delta"; text: string }
   | { type: "reasoning_delta"; text: string }
   /** A completed thinking block (text plus signature) the loop must preserve in history. */
@@ -193,6 +200,8 @@ export interface PermissionRuntime {
 /* ------------------------------------ tools ------------------------------------ */
 
 export type ToolContext = {
+  /** Host-staged, checksum-verified search runtime inside the OS boundary. */
+  searchBinary?: string
   /** False only for explicit user command passthrough excluded from model context. */
   modelContext?: boolean
   /** Trusted runtime fence: retain mutation admission until this actual callback settles. */

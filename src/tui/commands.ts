@@ -1,4 +1,8 @@
 export type SlashCommandName =
+  | "hunks"
+  | "accept-hunk"
+  | "reject-hunk"
+  | "feedback"
   | "share"
   | "unshare"
   | "voice"
@@ -73,6 +77,10 @@ export type ParsedSlashCommand =
   | { name: "unknown"; raw: string }
 
 const slashCommandNames: readonly SlashCommandName[] = [
+  "hunks",
+  "accept-hunk",
+  "reject-hunk",
+  "feedback",
   "share",
   "unshare",
   "voice",
@@ -230,6 +238,7 @@ export const slashCommandHelp: ReadonlyArray<{ command: string; description: str
   { command: "/suggest", description: "Stage the latest opt-in suggestion without sending it" },
   { command: "/config", description: "Search settings, inspect provenance and edit user UI preferences" },
   { command: "/integrations", description: "Manage MCP, plugins, hooks, skills and extensions" },
+  { command: "/feedback", description: "Preview content-free diagnostics and export instructions" },
   { command: "/docs · /release-notes", description: "Browse bundled documentation and release notes" },
   { command: "/onboarding", description: "Show the first-run guide" },
   { command: "/terminal", description: "Review and trust user-owned status/voice integrations" },

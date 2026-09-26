@@ -22,6 +22,16 @@ export function recoveryCommand(action: string, source: string | string[], apply
   if (action === "acknowledge-fork" && id && revision && !rest.length && apply)
     return { action, id, revision }
   if (action === "gc-recovery" && !id && revision && apply) return { action, revision }
+  if (action === "hunks" && id && rest.length === 1) return { action, checkpoint: id, path: rest[0]! }
+  if (["accept-hunk", "reject-hunk"].includes(action) && id && rest.length === 2)
+    return {
+      action: action as "accept-hunk" | "reject-hunk",
+      checkpoint: id,
+      path: rest[0]!,
+      hunk: rest[1]!,
+      revision,
+      apply,
+    }
   if (action === "tree" && !id) return { action }
   if (action === "fork" && !rest.length) return { action, node: id }
   if (action === "rewind" && id && !rest.length) return { action, node: id, revision, apply }
@@ -53,6 +63,6 @@ export function recoveryCommand(action: string, source: string | string[], apply
   if (action === "prune-checkpoints" && id && revision && apply)
     return { action, checkpoints: args, revision }
   throw new Error(
-    "Use tree | fork [NODE] | rewind NODE | checkpoints | checkpoint-diff ID | restore ID [PATH…]. Apply a preview with --apply --revision REV. Recovery: recover-restore finish|rollback --apply. Pins/prune require --apply --revision REV.",
+    "Use tree | fork [NODE] | rewind NODE | checkpoints | checkpoint-diff ID | hunks ID PATH | accept-hunk ID PATH HUNK | reject-hunk ID PATH HUNK | restore ID [PATH…]. Apply a preview with --apply --revision REV. Recovery: recover-restore finish|rollback --apply. Pins/prune require --apply --revision REV.",
   )
 }

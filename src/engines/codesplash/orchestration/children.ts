@@ -166,6 +166,7 @@ function forkHistory(history: ChatMessage[]): ChatMessage[] {
         (b) =>
           b.type !== "thinking" &&
           b.type !== "redacted_thinking" &&
+          b.type !== "provider_item" &&
           (b.type !== "tool_call" || resultIds.has(b.id)),
       ),
     }))
