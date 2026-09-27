@@ -130,8 +130,7 @@ function relative(
   if (result < 0) error(api().n.RtlNtStatusToDosError(result))
   const handle = out.readBigUInt64LE()
   try {
-    if (info(handle).attributes & 0x400)
-      throw Error("Reparse points are refused in filesystem transactions")
+    if (info(handle).attributes & 0x400) throw Error("Reparse points are refused in filesystem transactions")
     return handle
   } catch (error) {
     close(handle)
