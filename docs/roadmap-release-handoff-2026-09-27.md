@@ -172,7 +172,19 @@ Retain the prior `0.1.4` artifacts and tap history. For npm, install `codesplash
 
 ## Release outcome
 
-Deployment is in progress. This section will be replaced with verified results, exact references and any unresolved channel blocker before handoff.
+Deployment is in progress. The final verified publication record will be maintained in this document on `main`; the package copy records its build-time state.
+
+Release preparation exposed and fixed issues that local ARM64 testing had not established:
+
+- Darwin local-filesystem detection now verifies the APFS/HFS name and local-mount flag instead of assuming runtime-assigned numeric type IDs are identical on Intel and ARM64 hosts.
+- Windows transactions close rejected native handles, request the metadata and directory access they require, normalize unsigned access masks, and use the correct native relative rename/link information classes.
+- The Windows trusted broker retains its own provisioning-state location, while workload profiles remain temporary and provider credentials remain excluded.
+- Intel integration tests wait for explicit terminal readiness and bounded completion instead of assuming one- or two-second startup. Test assertions remain in place.
+- The distribution image now includes the current roadmap and handoff guides used by its offline docs build.
+
+The [candidate CI run](https://github.com/codesplash-ai/codesplash-agent/actions/runs/36342941559) passed the complete macOS ARM64, Linux x64, Linux ARM64 and distribution-image jobs. Its Intel failures identified short readiness waits being corrected before release. Actual Windows x64 storage/reparse/ancestor pinning, PowerShell/cmd, broker-environment checks and WFP network denial passed. Full Windows sandbox execution still refuses when the pinned helper cannot apply ACLs to protected `C:\Windows` and `C:\Program Files` directories. The failure remains visible, cleanup ran, and no isolation rule was removed to make it pass. Windows remains experimental and is not a required production artifact for this release.
+
+Publication results and exact final candidate references are pending.
 
 ## When work resumes
 

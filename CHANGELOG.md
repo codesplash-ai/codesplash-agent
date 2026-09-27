@@ -6,6 +6,14 @@
 
 This feature release delivers the native-agent roadmap through M11 and the documented follow-up work. See [the release handoff](docs/roadmap-release-handoff-2026-09-27.md) for completed capabilities, remaining engineering, acceptance limits and deployment instructions. Windows remains experimental; Android, KVM and live-service/device acceptance are not promoted by publication.
 
+### Release validation fixes
+
+- Detect local APFS/HFS storage by mount identity on both macOS architectures.
+- Correct Windows native handle cleanup, access masks, directory pinning and relative rename/link calls.
+- Keep Windows sandbox broker provisioning state separate from the workload environment.
+- Wait for actual terminal readiness in integration tests and include current guides in the distribution image.
+- Retain the Windows protected-system-directory ACL refusal as an explicit experimental limitation.
+
 ### Additional original-roadmap implementation
 
 - Add reusable prepared worktree pools, model-assisted disabled agent drafts and named persona defaults/overrides.

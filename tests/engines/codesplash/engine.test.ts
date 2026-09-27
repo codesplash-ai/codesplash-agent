@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { randomUUID } from "node:crypto"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -21,6 +21,9 @@ import {
   type PermissionRuntimeFactoryOptions,
 } from "../../../src/engines/codesplash/engine.ts"
 import { APP_VERSION } from "../../../src/version.ts"
+
+// Native sandbox startup on hosted Intel macOS can exceed the default five seconds.
+setDefaultTimeout(60000)
 
 const ANTHROPIC_KEY_VALUE = "unit-test-anthropic-key-value"
 const OPENAI_KEY_VALUE = "unit-test-openai-key-value"
@@ -124,7 +127,7 @@ function collectEvents(session: EngineSession): { events: AgentEvent[]; done: Pr
   return { events, done }
 }
 
-async function until<T>(get: () => T | undefined, label: string, timeoutMs = 2_000): Promise<T> {
+async function until<T>(get: () => T | undefined, label: string, timeoutMs = 15_000): Promise<T> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     const value = get()
@@ -653,7 +656,7 @@ describe("CodesplashDriver permissions", () => {
   }
 
   /** Retries until the previous turn's finalizers have released the turn reservation. */
-  async function whenIdle<T>(run: () => Promise<T>, timeoutMs = 2_000): Promise<T> {
+  async function whenIdle<T>(run: () => Promise<T>, timeoutMs = 15_000): Promise<T> {
     const deadline = Date.now() + timeoutMs
     while (true) {
       try {

@@ -3,7 +3,7 @@
  * loop from the persisted transcript, appends every turn's messages back to it, and degrades
  * transcript write failures to a single warning instead of crashing the session.
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { randomUUID } from "node:crypto"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -19,6 +19,9 @@ import type {
 } from "../../../src/engines/codesplash/contracts.ts"
 import { CodesplashDriver, type PermissionRuntimeFactory } from "../../../src/engines/codesplash/engine.ts"
 import { appendTranscriptMessages, loadTranscript } from "../../../src/engines/codesplash/transcript.ts"
+
+// Native sandbox startup on hosted Intel macOS can exceed the default five seconds.
+setDefaultTimeout(60000)
 
 /** Minimal scripted permission runtime so sessions build without permissions.ts side effects. */
 function fakePermissions(): PermissionRuntimeFactory {
@@ -92,7 +95,7 @@ function collectEvents(session: EngineSession): { events: AgentEvent[]; done: Pr
   return { events, done }
 }
 
-async function until<T>(get: () => T | undefined, label: string, timeoutMs = 2_000): Promise<T> {
+async function until<T>(get: () => T | undefined, label: string, timeoutMs = 15_000): Promise<T> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     const value = get()
@@ -103,7 +106,7 @@ async function until<T>(get: () => T | undefined, label: string, timeoutMs = 2_0
 }
 
 /** Retries send until the previous turn's finalizers (transcript append included) have run. */
-async function sendWhenIdle(session: EngineSession, text: string, timeoutMs = 2_000): Promise<void> {
+async function sendWhenIdle(session: EngineSession, text: string, timeoutMs = 15_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (true) {
     try {

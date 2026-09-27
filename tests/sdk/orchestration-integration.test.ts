@@ -103,13 +103,29 @@ test("actual task settlement notifies the local event feed and only model-visibl
       all: true,
       timeoutMs: 30000,
     })
-    const child = result<{ task: { id: string } }>(
-      await f.session.spawnAgent({
-        agent: "builtin/explore",
-        prompt: "Bounded observed child",
-        background: true,
-      }),
-    )
+    // A completed process may still have an owned checkpoint finalizer. Admission explicitly
+    // refuses until it settles; retry only that pre-admission condition, never an executed child.
+    const deadline = Date.now() + 15000
+    let spawned: unknown
+    while (true) {
+      try {
+        spawned = await f.session.spawnAgent({
+          agent: "builtin/explore",
+          prompt: "Bounded observed child",
+          background: true,
+        })
+        break
+      } catch (error) {
+        if (
+          !(error instanceof Error) ||
+          error.message !== "Wait for the active file mutation to settle" ||
+          Date.now() >= deadline
+        )
+          throw error
+        await Bun.sleep(10)
+      }
+    }
+    const child = result<{ task: { id: string } }>(spawned)
     await f.session.tasks({ action: "wait", ids: [child.task.id], all: true, timeoutMs: 30000 })
     expect((await f.session.prompt("Inspect completion statuses")).status).toBe("completed")
     const final = requests.at(-1)!

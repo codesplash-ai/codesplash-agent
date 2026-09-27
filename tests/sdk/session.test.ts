@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test"
+import { expect, setDefaultTimeout, test } from "bun:test"
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -9,6 +9,9 @@ import {
   type ExtensionProvider,
   extensionToolId,
 } from "../../src/sdk/index.ts"
+
+// Native sandbox startup on hosted Intel macOS can exceed the default five seconds.
+setDefaultTimeout(60000)
 
 async function fixture() {
   const root = await realpath(await mkdtemp(join(tmpdir(), "sdk-test-")))
@@ -208,7 +211,7 @@ test("SDK interruption and close settle a waiting responder and revoke late host
     })
     const ack = await session.submit({ text: "ask" })
     if (!ack) throw new Error("missing ack")
-    for (let i = 0; i < 100 && !signal; i++) await Bun.sleep(10)
+    for (let i = 0; i < 1500 && !signal; i++) await Bun.sleep(10)
     expect(signal).toBeDefined()
     const waiter = session.waitForInput(ack.id).catch(() => undefined)
     await Promise.all([session.close(), session.close()])
@@ -427,6 +430,17 @@ test("SDK can supply approved stdin to a private background command and refuses 
     expect(run.isError, run.text).toBeFalsy()
     const id = JSON.parse(run.text).task.id as string
     await expect(session.setPermissionMode("plan")).rejects.toThrow("active tasks")
+    const deadline = Date.now() + 15000
+    let ready = false
+    while (Date.now() < deadline) {
+      const output = (await session.tasks({ action: "output", id })) as { terminalReady: boolean }
+      if (output.terminalReady) {
+        ready = true
+        break
+      }
+      await Bun.sleep(10)
+    }
+    expect(ready).toBe(true)
     const stdin = (await session.tasks({ action: "stdin", id, text: "marker\n" })) as {
       text: string
       isError?: boolean
@@ -436,7 +450,7 @@ test("SDK can supply approved stdin to a private background command and refuses 
       action: "wait",
       ids: [id],
       all: true,
-      timeoutMs: 3000,
+      timeoutMs: 15000,
     })) as Array<{ task: { status: string }; output: { text: string } }>
     expect(results[0]!.task.status).toBe("completed")
     expect(results[0]!.output.text).toContain("PRIVATE_INPUT:marker")
