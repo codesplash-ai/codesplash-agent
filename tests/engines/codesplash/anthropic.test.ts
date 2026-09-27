@@ -75,7 +75,9 @@ function frame(event: string, data: unknown): string {
 }
 
 function sseHeaders(): Record<string, string> {
-  return { "content-type": "text/event-stream" }
+  // These fixtures deliberately cancel before the mock finishes writing its HTTP body.
+  // Do not reuse that mock connection for the next independent wire-format assertion.
+  return { "content-type": "text/event-stream", connection: "close" }
 }
 
 function sseResponse(frames: string[]): Response {
