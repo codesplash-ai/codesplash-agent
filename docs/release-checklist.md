@@ -2,6 +2,13 @@
 
 Run top to bottom for every tagged release. A release ships only when every box is checked.
 
+This is a reusable release checklist, not a feature-completion counter. M11 implementation is
+committed as `272358c`; retained local ARM64 validation passed 1,670 macOS and 1,667 Linux
+tests, all 27 release gates per host, and 19 installed SDK examples. Those results do not check
+the boxes for a new candidate, other architectures, real accounts or physical devices.
+Windows and Android acceptance and the platform limits in [distribution.md](distribution.md)
+remain explicit. The original agent-feature roadmap is M0–M11; no M12–M14 phase is defined here.
+
 ## Revalidation (policies and protocol drift move under us)
 
 - [ ] Codex app-server docs reviewed; pinned protocol baseline (0.147.0) still matches
@@ -58,7 +65,9 @@ Run top to bottom for every tagged release. A release ships only when every box 
 ## Publishing prerequisites (one-time; see README + release.yml)
 
 - [ ] Repo public; `codesplash-ai/homebrew-tap` exists (public).
-- [ ] `NPM_TOKEN` and `TAP_GITHUB_TOKEN` actions secrets set; npm package name confirmed.
+- [ ] npm package/repository/workflow trusted-publisher configuration verified against
+      `.github/workflows/release.yml` (OIDC; no `NPM_TOKEN` required by this workflow).
+      `TAP_GITHUB_TOKEN` and any enabled Scoop bucket configuration verified separately.
 
 ## Rollback
 
@@ -81,3 +90,12 @@ the version, and revert the tap formula commit.
       Do not promote ARM64, Windows startup isolation or Windows standalone activation from these tests.
 - [ ] Actual Android host: follow `docs/termux.md`, run `m11-termux-smoke.ts`, and retain the
       reported kernel, installed version, storage and local-sandbox/remote-client capability limit.
+- [ ] Windows ARM64 storage, Windows whole-agent startup confinement and Windows sleep inhibition
+      remain unavailable; do not imply that Windows x64 acceptance implements these features.
+- [ ] KVM acceleration exercised on actual compatible hardware before advertising it as tested;
+      the accepted QEMU TCG probe does not establish KVM acceptance.
+- [ ] Physical clipboard/image protocols, microphone permissions and supported editor/terminal
+      combinations exercised; PTY protocol fixtures alone do not establish device delivery.
+- [ ] Real provider/enterprise identity, MCP OAuth, deployed CI/chat integrations, LAN TLS/mDNS
+      and telemetry/fleet/proxy destinations exercised for advertised integrations. Record local
+      fixture coverage separately from these account and deployment results.

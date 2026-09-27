@@ -1,5 +1,11 @@
 # AI Agent CLI Implementation Plan
 
+> Historical harness plan, August 2026. Its Milestones 0–5 are separate from the later
+> native-agent feature roadmap M0–M11. They are not the current remaining-feature list.
+> M11 is committed as `272358c`; current public platform limits and candidate gates are in
+> [distribution.md](distribution.md) and [release-checklist.md](release-checklist.md).
+> The dated status and architecture decisions below are preserved as historical context.
+
 **Status:** Milestones 0–5 implemented — manual dogfood pending for 2–4; first public release awaits the
 repo-public migration steps
 **Reviewed:** 2026-08-15
