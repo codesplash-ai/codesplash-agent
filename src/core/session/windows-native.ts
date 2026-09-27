@@ -119,7 +119,8 @@ function relative(
   const result = api().n.NtCreateFile(
     ptr(out),
     // Every opened handle is inspected below, including write/delete-only callers.
-    (access | 0x100000 | 0x80) >>> 0,
+    // Metadata-only handles do not enforce delete sharing; list access pins directories.
+    (access | 0x100000 | 0x80 | (directory ? 1 : 0)) >>> 0,
     ptr(object),
     ptr(status),
     null,
@@ -169,7 +170,7 @@ export class WindowsParent {
       parts = [...root.slice(drive.length).split("\\").filter(Boolean), ...path.split("/")],
       file = parts.pop()!
     const handle = BigInt(
-      api().k.CreateFileW(ptr(wchar(drive)), 0x80 | 0x100000, 3, null, 3, 0x2000000 | 0x200000, 0n),
+      api().k.CreateFileW(ptr(wchar(drive)), 0x81 | 0x100000, 3, null, 3, 0x2000000 | 0x200000, 0n),
     )
     if (handle === 0xffffffffffffffffn) error(api().k.GetLastError())
     const handles = [handle]
