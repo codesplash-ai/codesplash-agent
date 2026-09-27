@@ -33,6 +33,10 @@ function load() {
     },
   } as const)
   const nt = dlopen(win32.join(system, "ntdll.dll"), {
+    NtSetInformationFile: {
+      args: ["u64", "ptr", "ptr", "u32", "i32"],
+      returns: "i32",
+    },
     NtCreateFile: {
       args: ["ptr", "u32", "ptr", "ptr", "ptr", "u32", "u32", "u32", "u32", "ptr", "u32"],
       returns: "i32",
@@ -261,12 +265,16 @@ export class WindowsParent {
       const name = wchar(to)
       validateWindowsPath(`C:\\${to}`)
       if (/[\\/]/.test(to)) throw Error("Invalid relative target")
-      const data = Buffer.alloc(20 + name.length - 2)
+      const data = Buffer.alloc(Math.max(24, 20 + name.length))
       data.writeUInt8(link ? 0 : 1, 0)
       data.writeBigUInt64LE(this.handle, 8)
       data.writeUInt32LE(name.length - 2, 16)
       name.copy(data, 20, 0, name.length - 2)
-      checked(api().k.SetFileInformationByHandle(h, link ? 11 : 3, ptr(data), data.length))
+      // NT rename/link classes resolve the destination against our pinned directory.
+      // Win32 FileInfoByHandle classes are a different enumeration (11 is not a link).
+      const status = Buffer.alloc(16)
+      const result = api().n.NtSetInformationFile(h, ptr(status), ptr(data), data.length, link ? 11 : 10)
+      if (result < 0) error(api().n.RtlNtStatusToDosError(result))
     } finally {
       close(h)
     }
