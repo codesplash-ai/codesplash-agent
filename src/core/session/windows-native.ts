@@ -114,7 +114,8 @@ function relative(
   // No share-delete: an opened ancestor/file cannot be swapped while this transaction owns it.
   const result = api().n.NtCreateFile(
     ptr(out),
-    access | 0x100000,
+    // Every opened handle is inspected below, including write/delete-only callers.
+    access | 0x100000 | 0x80,
     ptr(object),
     ptr(status),
     null,
@@ -128,11 +129,14 @@ function relative(
   if (privateAccess) api().k.LocalFree(descriptor.readBigUInt64LE())
   if (result < 0) error(api().n.RtlNtStatusToDosError(result))
   const handle = out.readBigUInt64LE()
-  if (info(handle).attributes & 0x400) {
+  try {
+    if (info(handle).attributes & 0x400)
+      throw Error("Reparse points are refused in filesystem transactions")
+    return handle
+  } catch (error) {
     close(handle)
-    throw Error("Reparse points are refused in filesystem transactions")
+    throw error
   }
-  return handle
 }
 export function windowsLocalFilesystem(path: string): boolean {
   try {
