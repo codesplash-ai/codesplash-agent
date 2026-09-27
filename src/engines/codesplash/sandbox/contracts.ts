@@ -3,6 +3,9 @@ import type { SessionPolicy } from "../../../core/engine.ts"
 import type { HarnessTool, ToolContext, ToolOutcome } from "../contracts.ts"
 
 export type NativeSandboxConfig = {
+  denyRead?: string[]
+  denyWrite?: string[]
+  limits?: { memoryMiB: number; processes: number }
   readRoots?: string[]
   writeRoots?: string[]
   allowedHosts?: string[]
@@ -10,6 +13,7 @@ export type NativeSandboxConfig = {
 }
 
 export type SandboxProfile = {
+  limits?: { memoryMiB: number; processes: number }
   version: 1
   cwd: string
   mode: SessionPolicy["sandbox"]

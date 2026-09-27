@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs"
 import { join } from "node:path"
 import { dataDirectory } from "../../core/config.ts"
+import { networkFetch } from "../../core/network.ts"
 import { atomic, bytes, digest } from "../../core/session/files.ts"
 import type { ModelInfo } from "./contracts.ts"
 export const modelCachePath = () => join(dataDirectory(), "catalog", "models.json")
@@ -86,7 +87,7 @@ export async function refreshModels(url: string, sha256: string, path = modelCac
     !/^[a-f0-9]{64}$/.test(sha256)
   )
     throw new Error("Catalog refresh requires HTTPS and an exact reviewed SHA256")
-  const response = await fetch(target, { redirect: "error", signal: AbortSignal.timeout(15000) })
+  const response = await networkFetch(target, { redirect: "error", signal: AbortSignal.timeout(15000) })
   if (!response.ok) {
     await response.body?.cancel()
     throw new Error(`Catalog HTTP ${response.status}`)

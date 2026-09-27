@@ -1,5 +1,6 @@
 import { existsSync, readdirSync } from "node:fs"
 import { join } from "node:path"
+import { networkFetch } from "../../../core/network.ts"
 import { atomic, bytes, directory, json } from "../../../core/session/files.ts"
 import type { HarnessTool, ToolContext } from "../contracts.ts"
 import { startNetworkBroker } from "../sandbox/network-broker.ts"
@@ -196,29 +197,33 @@ export class GenerationTools {
         throw new Error("Invalid artifact URL")
       if (!(this.allowLoopback && base.protocol === "http:" && url.origin === base.origin))
         context.checkNetwork?.(url.href)
-      const response = await fetch(url, {
-        method: p.action === "create" ? "POST" : "GET",
-        headers:
-          p.action === "download"
-            ? {}
-            : {
-                "content-type": "application/json",
-                ...(job.kind === "video" ? { "X-Runway-Version": "2024-11-06" } : {}),
-                ...(key ? { authorization: `Bearer ${key}` } : {}),
-              },
-        ...(p.action === "create"
-          ? {
-              body: JSON.stringify(
-                job.kind === "image"
-                  ? { model: this.config.imageModel, prompt: p.prompt, n: 1, size: "1024x1024" }
-                  : { model: this.config.videoModel, promptText: p.prompt, duration: 5, ratio: "1280:720" },
-              ),
-            }
-          : {}),
-        redirect: "error",
-        proxy: broker.url,
-        signal: AbortSignal.any([context.signal, AbortSignal.timeout(120000)]),
-      })
+      const response = await networkFetch(
+        url,
+        {
+          method: p.action === "create" ? "POST" : "GET",
+          headers:
+            p.action === "download"
+              ? {}
+              : {
+                  "content-type": "application/json",
+                  ...(job.kind === "video" ? { "X-Runway-Version": "2024-11-06" } : {}),
+                  ...(key ? { authorization: `Bearer ${key}` } : {}),
+                },
+          ...(p.action === "create"
+            ? {
+                body: JSON.stringify(
+                  job.kind === "image"
+                    ? { model: this.config.imageModel, prompt: p.prompt, n: 1, size: "1024x1024" }
+                    : { model: this.config.videoModel, promptText: p.prompt, duration: 5, ratio: "1280:720" },
+                ),
+              }
+            : {}),
+          redirect: "error",
+          proxy: broker.url,
+          signal: AbortSignal.any([context.signal, AbortSignal.timeout(120000)]),
+        },
+        { upload: p.action === "create" },
+      )
       if (!response.ok) {
         await response.body?.cancel()
         throw new Error(`Generation HTTP ${response.status}; job ${job.id}; no retry`)

@@ -1,5 +1,6 @@
 /** OTLP/HTTP JSON over the content-free diagnostic contract. No telemetry destination by default. */
 import type { DiagnosticRecord } from "./diagnostics.ts"
+import { networkFetch } from "./network.ts"
 
 type Signal = "traces" | "metrics" | "logs" | "analytics"
 const signals: Signal[] = ["traces", "metrics", "logs", "analytics"]
@@ -177,18 +178,22 @@ export class Telemetry {
         const url = this.#destination(signal)
         if (!url) return
         try {
-          const response = await this.fetcher(url, {
-            method: "POST",
-            headers: {
-              "content-type": "application/json",
-              ...(this.env.CODESPLASH_OTLP_TOKEN && signal !== "analytics"
-                ? { authorization: `Bearer ${this.env.CODESPLASH_OTLP_TOKEN}` }
-                : {}),
+          const response = await networkFetch(
+            url,
+            {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                ...(this.env.CODESPLASH_OTLP_TOKEN && signal !== "analytics"
+                  ? { authorization: `Bearer ${this.env.CODESPLASH_OTLP_TOKEN}` }
+                  : {}),
+              },
+              body: JSON.stringify(otlpBody(signal, records)),
+              redirect: "error",
+              signal: AbortSignal.timeout(2000),
             },
-            body: JSON.stringify(otlpBody(signal, records)),
-            redirect: "error",
-            signal: AbortSignal.timeout(2000),
-          })
+            { env: this.env, fetcher: this.fetcher, upload: true },
+          )
           await response.body?.cancel()
           if (!response.ok) this.failed++
         } catch {

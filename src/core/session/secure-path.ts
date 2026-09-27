@@ -16,6 +16,7 @@ import { getSystemErrorName } from "node:util"
 import { snapshotPath } from "./checkpoints.ts"
 import { digest, hostPath } from "./files.ts"
 import source from "./secure-path.c" with { type: "file" }
+import { WindowsParent } from "./windows-native.ts"
 
 const load = () => {
   const diskSource = source.startsWith("/$bunfs/")
@@ -65,7 +66,8 @@ export class SafeParent {
     readonly fd: number,
     readonly file: string,
   ) {}
-  static open(root: string, path: string, create = false): SafeParent | undefined {
+  static open(root: string, path: string, create = false): SafeParent | WindowsParent | undefined {
+    if (process.platform === "win32") return WindowsParent.open(root, snapshotPath(path), create)
     const parts = snapshotPath(path).split("/"),
       file = parts.pop() as string
     if (realpathSync(root) !== hostPath(root)) throw new Error("Workspace path identity changed")
@@ -107,7 +109,7 @@ export class SafeParent {
     const current = SafeParent.open(this.root, this.path)
     try {
       const a = fstatSync(this.fd),
-        b = current ? fstatSync(current.fd) : undefined
+        b = current instanceof SafeParent ? fstatSync(current.fd) : undefined
       if (!b || a.dev !== b.dev || a.ino !== b.ino)
         throw new Error("Restore parent directory changed; held files are preserved")
     } finally {

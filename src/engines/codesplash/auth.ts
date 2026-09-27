@@ -10,6 +10,14 @@
  */
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
+import {
+  indexKeyring,
+  keyringDelete,
+  keyringGet,
+  keyringProviders,
+  keyringSet,
+} from "../../core/identity/keyring.ts"
+import { assertIdentityAllowed } from "../../core/identity/policy.ts"
 import { configDirectory } from "../../core/index.ts"
 import type { ProviderId } from "./contracts.ts"
 
@@ -46,18 +54,27 @@ export function resolveApiKey(
   env: NodeJS.ProcessEnv = process.env,
 ): ResolvedApiKey | undefined {
   const fromEnv = env[envVarFor(provider)]
-  if (isPresent(fromEnv)) return { key: fromEnv, source: "env" }
+  if (isPresent(fromEnv)) {
+    assertIdentityAllowed("api-key", undefined, provider, env)
+    return { key: fromEnv, source: "env" }
+  }
   if (fromEnv !== undefined) return undefined
   const stored = readStore(credentialsFilePath(env)).keys[provider]
-  if (stored !== undefined) return { key: stored, source: "stored" }
+  if (stored !== undefined) {
+    assertIdentityAllowed("api-key", undefined, provider, env)
+    return { key: stored, source: "stored" }
+  }
   return undefined
 }
 
 /** Stores an API key for a provider. The key is trimmed and must be non-empty. */
 export function setApiKey(provider: ProviderId, key: string, env: NodeJS.ProcessEnv = process.env): void {
   envVarFor(provider)
+  assertIdentityAllowed("api-key", undefined, provider, env)
   const trimmed = typeof key === "string" ? key.trim() : ""
   if (trimmed === "") throw new Error("API key must be a non-empty string")
+  if (keyringProviders(configDirectory(env)).includes(provider))
+    throw new Error("This provider uses the OS credential store; use login --keyring to replace it")
   const path = credentialsFilePath(env)
   const store = readStore(path)
   store.keys[provider] = trimmed
@@ -171,4 +188,49 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isNodeError(value: unknown): value is NodeJS.ErrnoException {
   return value instanceof Error && "code" in value
+}
+
+/** Explicit OS-store selection. The index contains names only; secrets never use process argv. */
+export async function setKeyringApiKey(
+  provider: ProviderId,
+  key: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  envVarFor(provider)
+  assertIdentityAllowed("api-key", undefined, provider, env)
+  const root = configDirectory(env)
+  await keyringSet(`api:${provider}`, key.trim(), root)
+  indexKeyring(provider, true, root)
+  deleteApiKey(provider, env)
+}
+export async function hydrateKeyringCredentials(env: NodeJS.ProcessEnv = process.env): Promise<void> {
+  const root = configDirectory(env)
+  for (const value of keyringProviders(root)) {
+    const provider = value as ProviderId,
+      name = envVarFor(provider)
+    if (env[name] !== undefined) continue
+    assertIdentityAllowed("api-key", undefined, provider, env)
+    const secret = await keyringGet(`api:${provider}`, root)
+    if (!secret) throw new Error("Indexed OS credential is missing; log in again")
+    env[name] = secret
+    injectedCredentials.set(name, secret)
+  }
+}
+export async function deleteAllApiKeys(
+  provider: ProviderId,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<boolean> {
+  const root = configDirectory(env)
+  let removed = false
+  if (keyringProviders(root).includes(provider)) {
+    removed = await keyringDelete(`api:${provider}`, root)
+    indexKeyring(provider, false, root)
+  }
+  const fileRemoved = deleteApiKey(provider, env)
+  const name = envVarFor(provider)
+  if (env[name] !== undefined && env[name] === injectedCredentials.get(name)) {
+    delete env[name]
+    injectedCredentials.delete(name)
+  }
+  return fileRemoved || removed
 }

@@ -1,5 +1,6 @@
 /** Shell tool for the CodeSplash harness: runs commands through `bash -c` in the workspace. */
 import { registerChildProcess } from "../../../core/index.ts"
+import { shellCommand } from "../../../core/platform.ts"
 import { spawnEnvWithoutStoredCredentials } from "../auth.ts"
 import {
   type HarnessTool,
@@ -210,7 +211,7 @@ export const bashTool: HarnessTool = {
       return { text: "Command was interrupted before it started.", isError: true, label }
     }
 
-    const proc = Bun.spawn(["bash", "-c", command], {
+    const proc = Bun.spawn(shellCommand(command), {
       cwd: context.cwd,
       // API keys injected from the 0600 credential store must not leak into arbitrary spawned
       // commands (or their output, which is transcribed and recorded); shell-exported keys pass.

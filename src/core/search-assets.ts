@@ -4,10 +4,14 @@ import asset0 from "../../node_modules/@vscode/ripgrep-universal/bin/darwin-arm6
 import asset1 from "../../node_modules/@vscode/ripgrep-universal/bin/darwin-x64/rg" with { type: "file" }
 import asset2 from "../../node_modules/@vscode/ripgrep-universal/bin/linux-arm64/rg" with { type: "file" }
 import asset3 from "../../node_modules/@vscode/ripgrep-universal/bin/linux-x64/rg" with { type: "file" }
+import asset5 from "../../node_modules/@vscode/ripgrep-universal/bin/win32-arm64/rg.exe" with { type: "file" }
+import asset4 from "../../node_modules/@vscode/ripgrep-universal/bin/win32-x64/rg.exe" with { type: "file" }
 
 export const searchAssets: Record<string, string> = {
   "darwin-arm64": asset0,
   "darwin-x64": asset1,
   "linux-arm64": asset2,
   "linux-x64": asset3,
+  "win32-x64": asset4,
+  "win32-arm64": asset5,
 }

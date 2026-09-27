@@ -1,3 +1,4 @@
+import { networkFetch } from "../../../core/network.ts"
 /**
  * `web_search` harness tool: queries the DuckDuckGo HTML endpoint and returns numbered results
  * with titles, URLs, and snippets behind an untrusted-content notice (result text is externally
@@ -172,7 +173,7 @@ export function parseSearchResults(html: string): SearchResult[] {
 
 export function createWebSearchTool(options: WebSearchToolOptions = {}): HarnessTool {
   const endpoint = options.endpoint ?? DEFAULT_SEARCH_ENDPOINT
-  const fetchImpl = options.fetchImpl ?? fetch
+  const fetchImpl = options.fetchImpl ?? networkFetch
 
   async function runSearch(input: WebSearchInput, context: ToolContext): Promise<ToolOutcome> {
     const label = `web_search ${input.query}`

@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url"
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime"
 import { parse } from "shell-quote"
 import { installSignalHandlers, registerChildProcess } from "../../../core/lifecycle.ts"
+import { networkEnvironment, networkTLS } from "../../../core/network.ts"
 import type { ExecutionResult, SandboxProfile } from "./contracts.ts"
 import { installationRoot } from "./entrypoint.ts"
 import { childEnvironment } from "./env-policy.ts"
@@ -14,8 +15,11 @@ import { hardenLinuxMounts } from "./linux-mounts.ts"
 import { createMacReaper, macCleanupPolicy } from "./macos-reaper.ts"
 import { startNetworkBroker } from "./network-broker.ts"
 import { runProcess } from "./process.ts"
+import { resourceScope } from "./resources.ts"
+import { windowsCommand, windowsRuntimeConfig, windowsSandboxLease } from "./windows.ts"
 
 export type SupervisorInput = {
+  hostNetworkEnv?: NodeJS.ProcessEnv
   terminal?: import("./terminal-protocol.ts").TerminalSize
   profile: SandboxProfile
   argv: string[]
@@ -33,6 +37,7 @@ export type SupervisorInput = {
 }
 
 export function runtimeConfig(input: SupervisorInput): SandboxRuntimeConfig {
+  if (process.platform === "win32") return windowsRuntimeConfig(input)
   const p = input.profile
   const runtimeReads = [
     "/usr",
@@ -92,24 +97,27 @@ export function runtimeConfig(input: SupervisorInput): SandboxRuntimeConfig {
 
 /** Dedicated trusted process: its manager and broker are never shared across commands. */
 export async function runSupervisor(input: SupervisorInput, execute = runProcess): Promise<ExecutionResult> {
-  if (process.platform !== "darwin" && process.platform !== "linux")
+  if (process.platform !== "darwin" && process.platform !== "linux" && process.platform !== "win32")
     return {
       kind: "unavailable",
       exitCode: 126,
       stdout: "",
-      stderr: "Native sandbox requires macOS or Linux",
+      stderr: "Native sandbox requires macOS, Linux or provisioned Windows",
     }
   const { SandboxManager } = await import("@anthropic-ai/sandbox-runtime")
   let broker: Awaited<ReturnType<typeof startNetworkBroker>> | undefined
   let reaper: Awaited<ReturnType<typeof createMacReaper>> | undefined
   let unregister: (() => void) | undefined
+  let releaseWindows: (() => void) | undefined
+  let resources: ReturnType<typeof resourceScope>
   const signal = new AbortController()
   try {
+    if (process.platform === "win32") releaseWindows = windowsSandboxLease(input.temp)
     if (process.platform === "darwin") {
       reaper = await createMacReaper(input.cleanupTag)
       unregister = registerChildProcess(reaper)
     }
-    broker = await startNetworkBroker(input.profile.allowedHosts)
+    broker = await startNetworkBroker(input.profile.allowedHosts, { env: input.hostNetworkEnv })
     const sensitive = await assertPrivateInodes(input.profile, signal.signal)
     if (process.platform === "linux") {
       // A mode-000 read-only bind refuses access rather than returning /dev/null's
@@ -119,6 +127,14 @@ export async function runSupervisor(input: SupervisorInput, execute = runProcess
       await chmod(input.deniedFile, 0)
     }
     const config = runtimeConfig(input)
+    if (process.platform === "win32") {
+      config.filesystem.denyRead.push(...sensitive.map((item) => item.path))
+      // Literal protected directories cover future children; do not lower these to existing-only globs.
+      config.filesystem.denyWrite.push(
+        join(input.profile.cwd, ".git"),
+        join(input.profile.cwd, ".codesplash"),
+      )
+    }
     config.network.parentProxy = { http: broker.url, https: broker.url, noProxy: "" }
     // Runtime helpers must be available beside compiled distributions as well as npm installs.
     if (process.platform === "linux") {
@@ -131,19 +147,35 @@ export async function runSupervisor(input: SupervisorInput, execute = runProcess
     const dependencies = await SandboxManager.checkDependenciesAsync()
     if (dependencies.errors.length || dependencies.warnings.length)
       throw new Error([...dependencies.errors, ...dependencies.warnings].join("; "))
+    const tls = networkTLS(networkEnvironment(undefined, input.hostNetworkEnv))
+    if (tls.ca) {
+      const ca = join(input.temp, "trust-store")
+      await writeFile(ca, tls.ca.join("\n"), { flag: "wx", mode: 0o400 })
+      input.workloadEnv = {
+        ...input.workloadEnv,
+        SSL_CERT_FILE: ca,
+        CURL_CA_BUNDLE: ca,
+        NODE_EXTRA_CA_CERTS: ca,
+      }
+    }
     const id = crypto.randomUUID()
-    const command = input.argv.map(shellQuote).join(" ")
+    const windows = process.platform === "win32" ? await windowsCommand(input) : undefined
+    const command = windows?.command ?? input.argv.map(shellQuote).join(" ")
     const wrapped = await SandboxManager.wrapWithSandboxArgv(
       command,
-      "/bin/bash",
+      windows?.shell ?? "/bin/bash",
       undefined,
       signal.signal,
       input.profile.cwd,
       { commandId: id },
     )
     const env = { ...childEnvironment(input.temp), ...input.workloadEnv, ...wrapped.env, ...input.secrets }
-    const argv = hardenSandboxArgv(wrapped.argv, config.filesystem, reaper?.tag, input.deniedFile, sensitive)
-    const result = await execute(argv, {
+    const argv =
+      process.platform === "win32"
+        ? wrapped.argv
+        : hardenSandboxArgv(wrapped.argv, config.filesystem, reaper?.tag, input.deniedFile, sensitive)
+    resources = resourceScope(input.profile)
+    const result = await execute(resources ? resources.wrap(argv) : argv, {
       cwd: input.profile.cwd,
       env,
       input: input.input,
@@ -152,7 +184,10 @@ export async function runSupervisor(input: SupervisorInput, execute = runProcess
       maxBytes: Math.min(input.outputLimit ?? 1024 * 1024, 8 * 1024 * 1024),
       structured: input.structured,
       secrets: input.structured ? [] : (input.redactions ?? Object.values(input.secrets ?? {})),
-      cleanup: () => reaper?.kill(),
+      cleanup: () => {
+        reaper?.kill()
+        resources?.cleanup()
+      },
     })
     const violations = SandboxManager.getSandboxViolationStore().getViolationsForCommand(id)
     if (result.kind === "command-failure" && violations.length) result.kind = "sandbox-denial"
@@ -165,10 +200,24 @@ export async function runSupervisor(input: SupervisorInput, execute = runProcess
       stderr: `Sandbox unavailable; no unrestricted fallback or retry was attempted. ${error instanceof Error ? error.message : "Backend initialization failed"}`,
     }
   } finally {
-    reaper?.kill()
-    unregister?.()
-    await SandboxManager.reset()
-    broker?.close()
+    try {
+      reaper?.kill()
+    } finally {
+      try {
+        resources?.cleanup()
+      } finally {
+        unregister?.()
+        try {
+          await SandboxManager.reset()
+        } finally {
+          try {
+            broker?.close()
+          } finally {
+            releaseWindows?.()
+          }
+        }
+      }
+    }
   }
 }
 

@@ -32,6 +32,12 @@ export function childEnvironment(
     TEMP: temp,
     PATH: "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin",
   }
+  if (process.platform === "win32") {
+    env.SystemRoot = source.SystemRoot ?? "C:\\Windows"
+    env.PATH = `${env.SystemRoot}\\System32;${env.SystemRoot}\\System32\\WindowsPowerShell\\v1.0`
+    env.PATHEXT = ".COM;.EXE;.BAT;.CMD"
+    env.USERPROFILE = temp
+  }
   for (const name of [...SAFE_NAMES, ...extra]) {
     const value = source[name]
     if (

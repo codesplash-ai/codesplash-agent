@@ -12,6 +12,8 @@ import {
   isValidPermissionRule,
   validateConfig,
 } from "../config.ts"
+import { intersectConstraints, readFleetSources } from "../distribution/fleet.ts"
+import { featureCampaign } from "../features.ts"
 import { HOOK_EVENTS } from "../hooks.ts"
 import { narrowOrchestration, type OrchestrationConfig } from "../orchestration/config.ts"
 import { redactSensitiveText } from "../redaction.ts"
@@ -109,7 +111,7 @@ function ordinary(raw: Record<string, unknown>): Record<string, unknown> {
   )
 }
 
-function managed(raw: Record<string, unknown>): ManagedConstraints {
+export function managed(raw: Record<string, unknown>): ManagedConstraints {
   const result: ManagedConstraints = {}
   for (const [key, value] of Object.entries(raw)) {
     if (key === "required") {
@@ -123,6 +125,7 @@ function managed(raw: Record<string, unknown>): ManagedConstraints {
     } else if (
       [
         "sandboxModes",
+        "featureIds",
         "permissionModes",
         "deny",
         "allowedHosts",
@@ -227,6 +230,9 @@ export async function resolveConfig(
   }
   add("defaults", { ...defaultConfig, providers: {} })
   userPath = resolve(userPath)
+  const fleetSources = readFleetSources(dirname(userPath))
+  const campaign = featureCampaign(dirname(userPath), fleetSources)
+  if (campaign) add("remote", { theme: campaign.theme }, undefined, undefined, `campaign:${campaign.id}`)
   const user = readConfigSource(userPath)
   inspect(user.raw, userPath)
   add("user", ordinary(user.raw), userPath, user.fingerprint)
@@ -355,7 +361,16 @@ export async function resolveConfig(
   add("cli", cli)
   const managedPath = join(dirname(userPath), "managed.toml")
   const policySource = readConfigSource(managedPath)
-  const constraints = managed(policySource.raw)
+  let constraints = managed(policySource.raw)
+  for (const source of fleetSources) {
+    constraints = managed(intersectConstraints(constraints, managed(source.payload.constraints ?? {})))
+    sources.push({
+      id: `fleet:${source.path}`,
+      scope: "managed",
+      path: source.path,
+      fingerprint: source.fingerprint,
+    })
+  }
   const requestedOrchestration = structuredClone(effective.orchestration) as
     | Partial<OrchestrationConfig>
     | undefined

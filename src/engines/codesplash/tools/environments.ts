@@ -4,11 +4,13 @@ import { isAbsolute, join } from "node:path"
 import type { HarnessTool } from "../contracts.ts"
 import type { SandboxRuntime } from "../sandbox/contracts.ts"
 import { childEnvironment } from "../sandbox/env-policy.ts"
+import { type MicroVMEnvironment, runMicroVM, validateMicroVM } from "../sandbox/microvm.ts"
 import { runProcess } from "../sandbox/process.ts"
 import { contains, physicalPath } from "../sandbox/profile.ts"
 import { bashTool } from "./bash.ts"
 
 export type ExecutionEnvironment =
+  | MicroVMEnvironment
   | { id: string; transport: "local" }
   | { id: string; transport: "container"; image: string; executable: string; runtimeDirectory?: string }
   | {
@@ -31,6 +33,10 @@ export function validateEnvironments(raw: unknown): ExecutionEnvironment[] {
       throw new Error("Invalid or duplicate environment id")
     ids.add(item.id)
     if (item.transport === "local") continue
+    if (item.transport === "microvm") {
+      validateMicroVM(item)
+      continue
+    }
     if (
       item.transport === "container" &&
       typeof item.image === "string" &&
@@ -68,7 +74,7 @@ export function environmentTool(
   const environments = validateEnvironments(raw)
   return {
     name: "environment_exec",
-    description: `Run a command in a reviewed environment (${environments.map((e) => `${e.id}:${e.transport}`).join(", ")}). Local uses the native sandbox. Containers have no host mounts or network. SSH has fixed identity and strict host keys. External changes cannot be restored locally.`,
+    description: `Run a command in a reviewed environment (${environments.map((e) => `${e.id}:${e.transport}`).join(", ")}). Local uses the native sandbox. Containers and ephemeral micro-VMs have no host mounts or network. Micro-VM files disappear at shutdown. SSH has fixed identity and strict host keys. External changes cannot be restored locally.`,
     permissionName: "bash",
     effects: "workspace-and-external",
     alwaysAsk: () => true,
@@ -107,6 +113,22 @@ export function environmentTool(
         throw new Error("Execution requires writable non-plan policy and a bounded timeout")
       if (env.transport === "local")
         return sandbox.runTool(bashTool, { command: p.command, timeout }, context)
+      if (env.transport === "microvm") {
+        if (
+          [env.executable, env.kernel, env.initrd].some((path) =>
+            sandbox.profile.writeRoots.some((root) => contains(root, physicalPath(path))),
+          )
+        )
+          throw new Error("Micro-VM runtime and boot assets must stay outside model-writable roots")
+        const result = await runMicroVM(env, p.command, timeout, context.signal)
+        return {
+          text:
+            context.sanitizeOutput?.(`${result.stdout}${result.stderr}\n[${result.kind}; microvm]`) ??
+            `${result.stdout}${result.stderr}\n[${result.kind}; microvm]`,
+          label: `Environment ${env.id}`,
+          isError: result.kind !== "success",
+        }
+      }
       const name = `codesplash-${crypto.randomUUID()}`
       const argv =
         env.transport === "container"

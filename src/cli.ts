@@ -12,6 +12,7 @@ import {
   isValidPermissionRule,
   type PermissionMode,
 } from "./core/config.ts"
+import { brand, dispatchArguments } from "./core/distribution/brand.ts"
 import type { EngineDriver, SessionPolicy, SessionUsageSnapshot } from "./core/engine.ts"
 import type { AgentEvent } from "./core/events.ts"
 import { bytes as boundedFileBytes } from "./core/session/files.ts"
@@ -20,14 +21,25 @@ import type { SessionMeta, SessionStore } from "./core/sessions.ts"
 import type { ProviderId, ReasoningEffort } from "./engines/codesplash/contracts.ts"
 import type { HeadlessOutputFormat, HeadlessSink } from "./engines/codesplash/runner.ts"
 import { validateEnvironments } from "./engines/codesplash/tools/environments.ts"
+import { APP_VERSION } from "./version.ts"
 
 function printHelp() {
-  process.stdout.write(`CodeSplash Agent
+  process.stdout.write(`${brand.name}
 
 Usage:
   codesplash [path] [--no-history] [--sandbox <mode>] [--full-access] [--permission-mode <mode>]
              [--allow <rule>] [--ask <rule>] [--deny <rule>] [--bypass-approvals] [-c <key=value>]
-  codesplash login <anthropic|openai> [--api-key <key>]
+  codesplash login <anthropic|openai> [--keyring] [--api-key <key>]
+  codesplash identity <login|logout> <provider>
+  codesplash update [status|check|apply --apply|rollback --apply]
+  codesplash fleet <status|refresh FILE --apply>
+  codesplash features [list|announcements|set NAME on|off|default --apply]
+  codesplash disk
+  codesplash key-proxy --config FILE
+  codesplash wrap [--clipboard] -- CMD [ARGS...]
+  codesplash isolate PROFILE.json -- COMMAND [ARGS...]
+  codesplash windows-sandbox <status|verify|install --apply|uninstall --apply>
+  codesplash --build-info
   codesplash logout <anthropic|openai>
   codesplash run [path] [-p|--prompt <text>] [run options]
   codesplash review [path] [review options]
@@ -103,6 +115,8 @@ Commands:
 
 Options:
   path           Project directory (defaults to the current directory)
+  --offline      Refuse governed outbound network requests (before COMMAND)
+  --harden       Apply supported kernel process hardening (before COMMAND)
   --doctor       Print non-interactive diagnostics (runtime, engines, auth, paths) and exit
   --version      Print the application version and exit
   --no-history   Do not write session metadata or event history for this run
@@ -132,7 +146,7 @@ Options:
   --exclude-tools NAMES           Comma-separated tool exclusions
   --features NAMES                Opt into notebook, anchors, clock, code, browser, generation, plugins, environments
   --browser-origins ORIGINS       Exact comma-separated allowed HTTP(S) origins
-  --environments FILE             Reviewed local/container/SSH environment manifest
+  --environments FILE             Reviewed local/container/SSH/micro-VM environment manifest
   --toolset NAME                  Apply a named tool ceiling (concise, plan, read-only, anchors)
   --max-budget-usd N              Cumulative estimated model spend ceiling
   --codex-smoke  Check Codex app-server startup, protocol, and account state without running a model
@@ -381,7 +395,7 @@ export function parseAppArguments(args: string[]): { path?: string; options: App
 
 /* ------------------------------- login / logout subcommands ------------------------------- */
 
-export type LoginCommand = { provider: ProviderId; apiKey?: string }
+export type LoginCommand = { provider: ProviderId; apiKey?: string; keyring?: boolean }
 
 /**
  * Provider arguments are never echoed back in errors: a user who pastes the key where the
@@ -398,10 +412,12 @@ function parseProviderArgument(command: string, value: string | undefined): Prov
 export function parseLoginArguments(args: string[]): LoginCommand {
   let provider: ProviderId | undefined
   let apiKey: string | undefined
+  let keyring = false
 
   for (let index = 0; index < args.length; index++) {
     const argument = args[index] as string
-    if (argument === "--api-key" || argument.startsWith("--api-key=")) {
+    if (argument === "--keyring") keyring = true
+    else if (argument === "--api-key" || argument.startsWith("--api-key=")) {
       const value = argument.includes("=") ? argument.slice("--api-key=".length) : args[++index]
       if (value === undefined) throw new UsageError("--api-key expects a value")
       apiKey = value
@@ -414,7 +430,7 @@ export function parseLoginArguments(args: string[]): LoginCommand {
     }
   }
 
-  return { provider: parseProviderArgument("login", provider), apiKey }
+  return { provider: parseProviderArgument("login", provider), apiKey, ...(keyring ? { keyring: true } : {}) }
 }
 
 export function parseLogoutArguments(args: string[]): { provider: ProviderId } {
@@ -445,13 +461,18 @@ export type CredentialCommandIo = {
 }
 
 export async function runLoginCommand(args: string[], io: CredentialCommandIo = {}): Promise<number> {
-  const { provider, apiKey } = parseLoginArguments(args)
+  const { provider, apiKey, keyring } = parseLoginArguments(args)
   const env = io.env ?? process.env
   const stdout = io.stdout ?? process.stdout
   const key = apiKey ?? (await readApiKeyFromStdin(provider, io))
   if (key.trim() === "") throw new UsageError("API key must be a non-empty string")
 
-  const { credentialsFilePath, setApiKey } = await import("./engines/codesplash/auth.ts")
+  const { credentialsFilePath, setApiKey, setKeyringApiKey } = await import("./engines/codesplash/auth.ts")
+  if (keyring) {
+    await setKeyringApiKey(provider, key, env)
+    stdout.write(`Saved ${provider} API key to OS credential store\n`)
+    return 0
+  }
   setApiKey(provider, key, env)
   stdout.write(`Saved ${provider} API key to ${credentialsFilePath(env)}\n`)
   return 0
@@ -459,8 +480,8 @@ export async function runLoginCommand(args: string[], io: CredentialCommandIo = 
 
 export async function runLogoutCommand(args: string[], io: CredentialCommandIo = {}): Promise<number> {
   const { provider } = parseLogoutArguments(args)
-  const { deleteApiKey } = await import("./engines/codesplash/auth.ts")
-  const removed = deleteApiKey(provider, io.env ?? process.env)
+  const { deleteAllApiKeys } = await import("./engines/codesplash/auth.ts")
+  const removed = await deleteAllApiKeys(provider, io.env ?? process.env)
   const stdout = io.stdout ?? process.stdout
   stdout.write(removed ? `Removed stored ${provider} API key\n` : `No stored ${provider} API key\n`)
   return 0
@@ -841,7 +862,8 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
     throw new UsageError("run needs a prompt: pass -p/--prompt, positional text, or pipe it on stdin")
   }
 
-  const { applyStoredCredentials } = await import("./engines/codesplash/auth.ts")
+  const { applyStoredCredentials, hydrateKeyringCredentials } = await import("./engines/codesplash/auth.ts")
+  await hydrateKeyringCredentials(env)
   applyStoredCredentials(env)
 
   const { inspectProject } = await import("./core/preflight.ts")
@@ -1103,7 +1125,63 @@ async function main(): Promise<void> {
   const { installSignalHandlers } = await import("./core/lifecycle.ts")
   installSignalHandlers()
 
-  const args = process.argv.slice(2)
+  let args = process.argv.slice(2)
+  let requestedHardening = process.env.CODESPLASH_HARDEN === "1"
+  while (args[0] === "--offline" || args[0] === "--harden") {
+    if (args.shift() === "--offline") process.env.CODESPLASH_OFFLINE = "1"
+    else requestedHardening = true
+  }
+  args = dispatchArguments(process.argv0, args)
+  let hardening: Awaited<ReturnType<typeof import("./core/hardening.ts").hardenProcess>> | undefined
+  if (requestedHardening) {
+    hardening = await (await import("./core/hardening.ts")).hardenProcess()
+  }
+  if (args[0] === "--build-info") {
+    process.stdout.write(
+      `${JSON.stringify({ ...brand, version: APP_VERSION, ...(hardening ? { hardening } : {}) })}\n`,
+    )
+    return
+  }
+  if (args[0] === "windows-sandbox") {
+    process.exitCode = await (await import("./commands/windows-sandbox.ts")).runWindowsSandboxCommand(
+      args.slice(1),
+    )
+    return
+  }
+  if (args[0] === "isolate") {
+    if (!args[1] || args[2] !== "--")
+      throw new UsageError("Usage: codesplash isolate PROFILE.json -- COMMAND [ARGS...]")
+    process.exitCode = await (await import("./core/startup-isolation.ts")).runIsolatedAgent(
+      args[1],
+      args.slice(3),
+    )
+    return
+  }
+  if (args[0] === "wrap") {
+    process.exitCode = await (await import("./commands/wrap.ts")).runWrapCommand(args.slice(1))
+    return
+  }
+  if (args[0] === "disk") {
+    process.exitCode = await (await import("./commands/disk.ts")).runDiskCommand(args.slice(1))
+    return
+  }
+  if (args[0] === "key-proxy") {
+    process.exitCode = await (await import("./commands/key-proxy.ts")).runKeyProxyCommand(args.slice(1))
+    return
+  }
+  if (args[0] === "identity") {
+    process.exitCode = await (await import("./commands/identity.ts")).runIdentityCommand(args.slice(1))
+    return
+  }
+  if (["update", "fleet", "features"].includes(args[0] ?? "")) {
+    process.exitCode = await (await import("./commands/distribution.ts")).runDistributionCommand(
+      args[0]!,
+      args.slice(1),
+    )
+    return
+  }
+  if (!args[0]?.startsWith("--internal-") && !args.includes("--doctor") && !args.includes("--version"))
+    (await import("./core/distribution/update.ts")).assertInstallationReady()
   if (
     !args.includes("--no-history") &&
     !args[0]?.startsWith("--internal-") &&
@@ -1366,7 +1444,8 @@ async function main(): Promise<void> {
   const { path, options } = parseAppArguments(args)
 
   // Stored native-engine credentials feed the interactive session too (env vars still win).
-  const { applyStoredCredentials } = await import("./engines/codesplash/auth.ts")
+  const { applyStoredCredentials, hydrateKeyringCredentials } = await import("./engines/codesplash/auth.ts")
+  await hydrateKeyringCredentials()
   applyStoredCredentials()
 
   const { inspectProject } = await import("./core/preflight.ts")

@@ -1,3 +1,4 @@
+import { validateBrand } from "../src/core/distribution/brand.ts"
 /**
  * Builds the host platform's release artifact: a Bun-compiled executable (ADR 0003's
  * proven format), archived with LICENSE and README, plus a SHA-256 checksum file.
@@ -10,6 +11,7 @@ import { chmod, copyFile, cp, mkdir, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { verifiedSeccompHelper } from "../src/engines/codesplash/sandbox/supervisor.ts"
+import { verifiedWindowsHelper } from "../src/engines/codesplash/sandbox/windows.ts"
 import { APP_VERSION } from "../src/version.ts"
 
 const projectRoot = fileURLToPath(new URL("..", import.meta.url))
@@ -90,10 +92,25 @@ async function main(): Promise<void> {
   await rm(outDirectory, { recursive: true, force: true })
   await mkdir(outDirectory, { recursive: true })
 
+  const brandAt = process.argv.indexOf("--brand-config")
+  const customBrand =
+    brandAt < 0 ? undefined : validateBrand(await Bun.file(process.argv[brandAt + 1] ?? "").json())
+  if (customBrand?.variant === "internal" && !process.argv.includes("--unsigned"))
+    throw new Error("Internal variants require --unsigned and cannot enter the public signing path")
   const binaryPath = join(outDirectory, binaryName)
   // Keep Bun's temporary compile files inside the ignored build directory.
   await run(
-    ["bun", "build", join(projectRoot, "src", "cli.ts"), "--compile", "--outfile", binaryPath],
+    [
+      "bun",
+      "build",
+      join(projectRoot, "src", "cli.ts"),
+      "--compile",
+      ...(customBrand
+        ? ["--define", `__CODESPLASH_BRAND__=${JSON.stringify(JSON.stringify(customBrand))}`]
+        : []),
+      "--outfile",
+      binaryPath,
+    ],
     outDirectory,
   )
   if (!isWindows) await chmod(binaryPath, 0o755)
@@ -113,6 +130,8 @@ async function main(): Promise<void> {
     join(projectRoot, "src", "core", "session", "secure-path.c"),
     join(runtimeAssets, "restore.c"),
   )
+  if (process.platform === "win32")
+    await copyFile(verifiedWindowsHelper(), join(runtimeAssets, "srt-win.exe"))
   if (process.platform === "linux") {
     const helper = join(runtimeAssets, "apply-seccomp")
     await copyFile(await verifiedSeccompHelper(), helper)
@@ -151,6 +170,8 @@ async function main(): Promise<void> {
     await run([process.execPath, "scripts/teams-smoke.ts", binaryPath])
     await run([process.execPath, "scripts/server-smoke.ts", binaryPath])
     await run([process.execPath, "scripts/m10-smoke.ts", binaryPath])
+    await run([process.execPath, "scripts/m11-smoke.ts", binaryPath])
+    await run([process.execPath, "scripts/m11-startup-smoke.ts", binaryPath])
     await run([process.execPath, "scripts/sdk-smoke.ts"])
   }
 
@@ -161,6 +182,8 @@ async function main(): Promise<void> {
     join(outDirectory, "THIRD_PARTY_NOTICES.md"),
     Bun.file(join(projectRoot, "THIRD_PARTY_NOTICES.md")),
   )
+
+  await run([process.execPath, "scripts/m11-package-smoke.ts", outDirectory])
 
   const archivePath = join(outDirectory, archiveName)
   if (isWindows) {

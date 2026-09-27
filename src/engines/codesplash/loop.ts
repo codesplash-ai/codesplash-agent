@@ -1535,7 +1535,7 @@ export class CodesplashLoop {
       let target: { call: ToolCallBlock; tool: HarnessTool }
       try {
         if (this.#modelToolAllowed?.(call.name) === false)
-          throw new ToolInputError("Coordinator mode permits orchestration tools only")
+          throw new ToolInputError("Tool is not allowed by current feature or session policy")
         const tool = this.#registry.get(call.name)
         if (
           tool &&
@@ -1545,7 +1545,7 @@ export class CodesplashLoop {
           throw new ToolInputError(`Denied by permission rule: ${call.name}`)
         target = this.#registry.resolve?.(call) ?? { call, tool: tool as HarnessTool }
         if (this.#modelToolAllowed?.(target.call.name) === false)
-          throw new ToolInputError("Coordinator mode permits orchestration tools only")
+          throw new ToolInputError("Tool is not allowed by current feature or session policy")
         if (!target.tool || target.tool.hidden) throw new ToolInputError(`Unknown tool: ${call.name}`)
         if (this.#hookTool(target.tool)) {
           await flushReadOnlyBatch()

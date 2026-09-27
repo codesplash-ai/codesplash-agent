@@ -12,7 +12,7 @@ await writeFile(
   new URL("../dist/core/search-assets.js", import.meta.url),
   `import { binPathFor } from "@vscode/ripgrep-universal";
 export const searchAssets = Object.fromEntries(
-  ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"].map(target => {
+  ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "win32-arm64", "win32-x64"].map(target => {
     const [os, arch] = target.split("-");
     return [target, binPathFor({os, arch})];
   })

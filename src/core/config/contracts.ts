@@ -1,6 +1,7 @@
 import type { PermissionMode, SandboxMode } from "../config.ts"
 
 export type ConfigScope =
+  | "remote"
   | "plugin"
   | "defaults"
   | "user"
@@ -17,6 +18,7 @@ export type ConfigSource = {
   disabledReason?: string
 }
 export type ManagedConstraints = {
+  featureIds?: string[]
   sandboxModes?: SandboxMode[]
   permissionModes?: PermissionMode[]
   deny?: string[]

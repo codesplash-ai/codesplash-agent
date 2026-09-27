@@ -1,0 +1,9 @@
+.git
+.env
+.env.*
+docs/private
+node_modules
+dist
+out
+*.pem
+*.key

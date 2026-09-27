@@ -1,6 +1,7 @@
 import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { isTable } from "../../../core/config/source.ts"
+import { networkFetch } from "../../../core/network.ts"
 import { runProcess } from "../sandbox/process.ts"
 import {
   ARCHIVE_BYTES,
@@ -142,7 +143,7 @@ export class RegistrySource {
   async fetch(url: URL, max: number): Promise<Buffer> {
     if (++this.#requests > 256 || url.origin !== this.url.origin)
       throw new Error("Plugin registry request/origin limit exceeded")
-    const result = await fetch(url, {
+    const result = await networkFetch(url, {
       signal: this.signal,
       redirect: "error",
       headers: { accept: "application/vnd.npm.install-v1+json" },

@@ -8,6 +8,7 @@ import { resolveConfigForWorkspace } from "../../core/config/resolver.ts"
 import { stableValue } from "../../core/config/source.ts"
 import { configDirectory, dataDirectory } from "../../core/config.ts"
 import { Diagnostics, diagnosticContext } from "../../core/diagnostics.ts"
+import { featureAnnouncements, resolveFeatures } from "../../core/features.ts"
 import { type HookEventName, type HookFields, hookIsGate } from "../../core/hooks.ts"
 import {
   type AgentConfig,
@@ -67,7 +68,7 @@ import {
 import { projectIdFor } from "../../core/sessions.ts"
 import { readTrustDecision } from "../../core/trust.ts"
 import { APP_VERSION } from "../../version.ts"
-import { PROVIDER_ENV_VARS, resolveApiKey } from "./auth.ts"
+import { hydrateKeyringCredentials, PROVIDER_ENV_VARS, resolveApiKey } from "./auth.ts"
 import {
   buildProviderRegistry,
   customProviderAvailable,
@@ -231,6 +232,7 @@ export class CodesplashDriver implements EngineDriver {
    * with its key state. Key values never appear in the probe.
    */
   async probe(): Promise<EngineProbe> {
+    await hydrateKeyringCredentials()
     const config = await this.#probeConfig()
     const resolved = (Object.keys(PROVIDER_ENV_VARS) as ProviderId[]).flatMap((provider) => {
       const credential = resolveApiKey(provider)
@@ -474,6 +476,14 @@ export class CodesplashDriver implements EngineDriver {
     }
     scope?.signal.throwIfAborted()
     const config = await resolveNative()
+    const featureRoot = config.resolution ? dirname(config.resolution.request.userPath) : configDirectory()
+    const features = resolveFeatures(options.execution?.features, featureRoot).filter(
+      (name) =>
+        (!scope || options.execution?.features?.includes(name)) &&
+        (!config.resolution?.constraints.featureIds ||
+          config.resolution.constraints.featureIds.includes(name)),
+    )
+    options = { ...options, execution: { ...options.execution, features } }
     // Lifecycle gates are initialized before the session is published.
     assertManagedPolicy(
       config,
@@ -501,6 +511,7 @@ export class CodesplashDriver implements EngineDriver {
     }
     try {
       scope?.signal.throwIfAborted()
+      await hydrateKeyringCredentials()
       const registry = buildProviderRegistry(config, process.env, extensions.providers())
       if (registry.providers.length === 0) {
         throw new Error(`${NO_KEYS_DETAIL} to use the CodeSplash engine`)
@@ -1129,10 +1140,21 @@ class CodesplashSession implements EngineSession {
     this.#loop = new CodesplashLoop({
       postEdit: (outcome, context) => this.#language.afterEdit(outcome, context),
       modelToolAllowed: (name) =>
-        !(
+        !Object.entries(advancedFeatures).some(
+          ([feature, tools]) =>
+            tools.includes(name) &&
+            (!resolveFeatures(
+              this.options.execution?.features,
+              this.#config.resolution ? dirname(this.#config.resolution.request.userPath) : configDirectory(),
+            ).includes(feature) ||
+              (this.#config.resolution?.constraints.featureIds &&
+                !this.#config.resolution.constraints.featureIds.includes(feature))),
+        ) &&
+        (!(
           this.childScope?.definition.id === "builtin/coordinator" ||
           (!this.childScope && this.#teams.store.read().coordinator)
-        ) || coordinatorTools.has(name),
+        ) ||
+          coordinatorTools.has(name)),
       extensionsEnabled: () => this.#extensions.enabled,
       observeHook: async (event, signal) => {
         if (event.name === "turn.start") this.#extensionAuxiliary = 0
@@ -1312,6 +1334,17 @@ class CodesplashSession implements EngineSession {
   }
   async initializeRecovery(startLifecycle = true): Promise<void> {
     await this.#recovery.initialize()
+    if (startLifecycle && !this.childScope)
+      for (const notice of featureAnnouncements(
+        this.#config.resolution ? dirname(this.#config.resolution.request.userPath) : configDirectory(),
+      ))
+        this.#push(
+          this.#factory.event(
+            "fleet/announcement",
+            {},
+            { kind: "warning", payload: { message: notice.text } },
+          ),
+        )
     if (!this.#hooksInitialized) {
       const started = startLifecycle
         ? await this.#loop.hook(

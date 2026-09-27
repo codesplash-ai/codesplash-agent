@@ -1,5 +1,6 @@
 import { writeFile } from "node:fs/promises"
 import { diagnosticFiles, diagnosticRoot, exportDiagnostics, replayDiagnostics } from "../core/diagnostics.ts"
+import { networkFetch } from "../core/network.ts"
 import { bytes } from "../core/session/files.ts"
 import { UsageError } from "./usage-error.ts"
 
@@ -53,13 +54,17 @@ export async function runDiagnosticsCommand(command: string, args: string[]): Pr
     replayDiagnostics(data)
     // Re-project on upload: a user-edited export cannot smuggle arbitrary fields into feedback.
     const { cleanRecord } = await import("../core/diagnostics.ts")
-    const response = await fetch(url, {
-      method: "POST",
-      body: JSON.stringify({ version: 1, records: data.records.map(cleanRecord) }),
-      headers: { "content-type": "application/json" },
-      redirect: "error",
-      signal: AbortSignal.timeout(10000),
-    })
+    const response = await networkFetch(
+      url,
+      {
+        method: "POST",
+        body: JSON.stringify({ version: 1, records: data.records.map(cleanRecord) }),
+        headers: { "content-type": "application/json" },
+        redirect: "error",
+        signal: AbortSignal.timeout(10000),
+      },
+      { upload: true },
+    )
     await response.body?.cancel()
     if (!response.ok)
       throw new Error(`Feedback endpoint returned HTTP ${response.status}; upload was not retried`)

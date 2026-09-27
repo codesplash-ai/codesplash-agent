@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto"
 import { existsSync, readdirSync, statSync, unlinkSync } from "node:fs"
 import { join } from "node:path"
+import { networkFetch } from "../core/network.ts"
 import { atomic, bytes, directory } from "../core/session/files.ts"
 import { type PortableSession, renderPortable, validatePortable } from "../core/session/portable.ts"
 import type { AgentSession } from "../sdk/types.ts"
@@ -136,7 +137,7 @@ export async function fetchShare(source: string): Promise<PortableSession> {
   )
     throw new Error("Expected an HTTPS or loopback daemon share URL")
   if (!url.pathname.endsWith("/bundle")) url.pathname += "/bundle"
-  const response = await fetch(url, {
+  const response = await networkFetch(url, {
     redirect: "error",
     signal: AbortSignal.timeout(15000),
     headers: { Accept: "application/json" },

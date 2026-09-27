@@ -11,9 +11,11 @@ import { type AgentsConfig, validateAgentsConfig } from "../engines/codesplash/o
 import { type PluginConfig, validatePlugins } from "../engines/codesplash/plugins/config.ts"
 import type { NativeSandboxConfig } from "../engines/codesplash/sandbox/contracts.ts"
 import { validateEnvironmentName } from "../engines/codesplash/sandbox/env-policy.ts"
+import { validateResourceLimits } from "../engines/codesplash/sandbox/resources.ts"
 import type { ConfigResolution, ConfigResolutionOptions } from "./config/contracts.ts"
 import { checkConfigBounds } from "./config/source.ts"
 import { type TuiConfig, validateTuiConfig } from "./config/tui.ts"
+import { type CloudIdentity, validateIdentity } from "./identity/credentials.ts"
 import { type OrchestrationConfig, validateOrchestration } from "./orchestration/config.ts"
 import { redactSensitiveText } from "./redaction.ts"
 import { stringifyToml, type TomlTable } from "./toml.ts"
@@ -68,6 +70,7 @@ export type CustomModelConfig = {
 
 /** One `[providers.<id>]` table, fully resolved (defaults applied). Keys never live here. */
 export type CustomProviderConfig = {
+  identity?: CloudIdentity
   api?: "chat" | "responses"
   transport?: "sse" | "websocket"
   serviceTier?: "auto" | "default" | "flex" | "priority"
@@ -393,7 +396,17 @@ export function validateConfig(parsed: unknown, path: string): AgentConfig {
     else {
       config.sandbox = {}
       for (const [key, value] of Object.entries(parsed.sandbox)) {
-        if (!["readRoots", "writeRoots", "allowedHosts", "environment"].includes(key)) {
+        if (key === "limits") {
+          try {
+            config.sandbox.limits = validateResourceLimits(value)
+          } catch {
+            problems.push("Invalid sandbox resource limits")
+          }
+          continue
+        }
+        if (
+          !["readRoots", "writeRoots", "allowedHosts", "environment", "denyRead", "denyWrite"].includes(key)
+        ) {
           problems.push(`[sandbox].${key}: unknown setting`)
           continue
         }
@@ -409,7 +422,7 @@ export function validateConfig(parsed: unknown, path: string): AgentConfig {
               problems.push("[sandbox].environment: unsafe environment name")
             }
           }
-        config.sandbox[key as keyof NativeSandboxConfig] = value as string[]
+        config.sandbox[key as Exclude<keyof NativeSandboxConfig, "limits">] = value as string[]
       }
     }
   }
@@ -680,6 +693,16 @@ function validateProvider(
     problems.push("Transport options require an OpenAI provider")
   if (table.transport === "websocket" && table.api !== "responses")
     problems.push("WebSocket requires Responses")
+  let identity: CloudIdentity | undefined
+  if (table.identity !== undefined) {
+    try {
+      identity = validateIdentity(table.identity)
+      if ((["bedrock", "vertex"].includes(identity.kind) ? "anthropic" : "openai") !== protocol)
+        throw new Error("Identity protocol mismatch")
+    } catch {
+      problems.push("Invalid provider identity or protocol")
+    }
+  }
   const models = validateModels(id, table.models, keyEnvVar, seenModelIds, problems)
 
   if (problems.length > before || protocol === undefined || baseUrl === undefined || !models) {
@@ -693,6 +716,7 @@ function validateProvider(
     keyEnvVar,
     requiresKey,
     models,
+    ...(identity ? { identity } : {}),
     ...(table.api ? { api: table.api as CustomProviderConfig["api"] } : {}),
     ...(table.transport ? { transport: table.transport as CustomProviderConfig["transport"] } : {}),
     ...(table.serviceTier ? { serviceTier: table.serviceTier as CustomProviderConfig["serviceTier"] } : {}),
@@ -893,6 +917,7 @@ function providerTable(provider: CustomProviderConfig): TomlTable {
     displayName: provider.displayName,
     keyEnvVar: provider.keyEnvVar,
     requiresKey: provider.requiresKey,
+    ...(provider.identity ? { identity: { ...provider.identity } } : {}),
     ...(provider.api ? { api: provider.api } : {}),
     ...(provider.transport ? { transport: provider.transport } : {}),
     ...(provider.serviceTier ? { serviceTier: provider.serviceTier } : {}),

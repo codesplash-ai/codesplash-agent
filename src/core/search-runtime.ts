@@ -5,6 +5,14 @@ import { searchAssets } from "./search-assets.ts"
 import { atomic, bytes, digest } from "./session/files.ts"
 
 const assets: Record<string, { asset: string; sha256: string }> = {
+  "win32-x64": {
+    asset: searchAssets["win32-x64"]!,
+    sha256: "f9dde63498b3193f098355dbec97af99dc4f6b8fa0df5ed04114a03012c042cb",
+  },
+  "win32-arm64": {
+    asset: searchAssets["win32-arm64"]!,
+    sha256: "0015ba7dfb2d8b62c39332d64e50c6e85f75230125e10c50a950ed14995c79bf",
+  },
   "darwin-arm64": {
     asset: searchAssets["darwin-arm64"]!,
     sha256: "6ef40346bf31fcce79d9614c7745c198542925a0c7d4911e1ffe794c53392ac1",
@@ -30,7 +38,7 @@ export async function searchRuntime(root = join(dataDirectory(), "runtime", "sea
   if (!spec) throw new Error("Vendored search is unavailable on this target")
   const payload = Buffer.from(await Bun.file(spec.asset).arrayBuffer())
   if (digest(payload) !== spec.sha256) throw new Error("Bundled search checksum mismatch")
-  const path = join(root, `${target}-rg`)
+  const path = join(root, `${target}-rg${process.platform === "win32" ? ".exe" : ""}`)
   let repaired = false
   try {
     if (digest(bytes(path, 32 * 1024 * 1024)) !== spec.sha256) throw new Error("Damaged cache")

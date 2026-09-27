@@ -1,3 +1,4 @@
+import { assertIdentityAllowed } from "../../../core/identity/policy.ts"
 /**
  * Anthropic Messages API adapter. The initial connection goes through withRetries; nothing is
  * retried after the first emitted event. API keys never appear in error messages: response bodies
@@ -5,6 +6,7 @@
  * request's x-api-key header back in its error page).
  */
 import { redactSensitiveText } from "../../../core/index.ts"
+import { networkFetch } from "../../../core/network.ts"
 import {
   type ChatMessage,
   type ContentBlock,
@@ -80,6 +82,7 @@ export const anthropicModels: ModelInfo[] = [
 ]
 
 export type AnthropicProviderOptions = {
+  authProvider?: string
   /** Overrides the ANTHROPIC_BASE_URL env override and the default endpoint. */
   baseUrl?: string
   /** Env var the key is read from; when set and the var is absent, no auth header is sent. */
@@ -134,10 +137,11 @@ async function connect(
     accept: "text/event-stream",
   }
   if (apiKey) headers["x-api-key"] = apiKey
+  if (apiKey) assertIdentityAllowed("api-key", undefined, options.authProvider ?? "anthropic")
   const body = JSON.stringify(buildRequestBody(request))
   return withRetries(
     async () => {
-      const response = await fetch(`${baseUrl}/v1/messages`, {
+      const response = await networkFetch(`${baseUrl}/v1/messages`, {
         method: "POST",
         headers,
         body,
@@ -180,7 +184,7 @@ function retryAfterMs(header: string | null): number | undefined {
 
 type WireBlock = Record<string, unknown>
 
-function buildRequestBody(request: ProviderRequest): Record<string, unknown> {
+export function buildRequestBody(request: ProviderRequest): Record<string, unknown> {
   const thinkingEnabled = request.model.supportsReasoning && request.reasoningEffort !== undefined
   const body: Record<string, unknown> = {
     model: request.model.id,
@@ -266,7 +270,7 @@ type WireSseData = {
   error?: { type?: string; message?: string }
 }
 
-async function* mapMessagesStream(
+export async function* mapMessagesStream(
   response: Response,
   signal: AbortSignal,
 ): AsyncIterable<ProviderStreamEvent> {

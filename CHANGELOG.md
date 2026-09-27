@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Distribution and enterprise controls (M11, in progress)
+
+- Add signed standalone update staging/recovery/rollback, fleet policy and version ceilings,
+  feature preferences, live kill switches and bounded announcements.
+- Add explicit Bedrock, Vertex, Azure and OpenAI workload identities, Azure device login,
+  OS credential storage, refresh serialization and tenant/provider restrictions.
+- Apply shared offline, proxy, CA and timeout controls; preserve them through sandbox supervisors.
+- Add custom kernel path denials, Linux cgroup resource limits and explicit startup hardening.
+- Add build branding, helper aliases, key injection proxy, sandboxed terminal wrapping,
+  disk accounting, offline docs/stats artifacts and a non-root CI image definition.
+- Add package-manager update/recovery/rollback adapters, whole-agent startup filesystem isolation,
+  a private supervisor bridge, and dedicated ephemeral QEMU micro-VM execution.
+- Add an experimental Windows restricted-token/WFP backend, handle-relative NTFS transactions,
+  job ownership, explicit setup commands, and administrator policy ACL validation.
+- Retain experimental Windows/Termux status. Actual Windows/Android host gates,
+  Windows startup isolation, and platform-specific package/terminal acceptance remain explicit limits.
+
 ### Observability, evaluation and advanced tools (M10)
 
 - Add bounded content-free diagnostics, provider timing/retry records, crash recovery markers,

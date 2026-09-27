@@ -8,6 +8,7 @@ import { resolveApiKey } from "./auth.ts"
 import type { ModelInfo, ProviderId, ProviderRuntime, ReasoningEffort } from "./contracts.ts"
 import { cachedModels } from "./model-cache.ts"
 import { anthropicModels, createAnthropicProvider } from "./providers/anthropic.ts"
+import { createCloudProvider } from "./providers/cloud.ts"
 import { createOpenAiProvider, openaiModels } from "./providers/openai.ts"
 
 export const modelCatalog: ModelInfo[] = [...anthropicModels, ...openaiModels]
@@ -165,7 +166,7 @@ export function customProviderAvailable(
   custom: CustomProviderConfig,
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
-  return !custom.requiresKey || Boolean(env[custom.keyEnvVar])
+  return Boolean(custom.identity) || !custom.requiresKey || Boolean(env[custom.keyEnvVar])
 }
 
 function customRuntime(custom: CustomProviderConfig): ProviderRuntime {
@@ -180,7 +181,11 @@ function customRuntime(custom: CustomProviderConfig): ProviderRuntime {
     supportsReasoning: model.supportsReasoning,
     ...(model.pricing ? { pricing: { ...model.pricing } } : {}),
   }))
-  const factory = custom.protocol === "anthropic" ? createAnthropicProvider : createOpenAiProvider
+  const factory = custom.identity
+    ? (options: Parameters<typeof createCloudProvider>[1]) => createCloudProvider(custom.identity!, options)
+    : custom.protocol === "anthropic"
+      ? createAnthropicProvider
+      : createOpenAiProvider
   return {
     id: custom.id,
     protocol: custom.protocol,
@@ -189,6 +194,7 @@ function customRuntime(custom: CustomProviderConfig): ProviderRuntime {
     requiresKey: custom.requiresKey,
     baseUrl: custom.baseUrl,
     client: factory({
+      authProvider: custom.id,
       baseUrl: custom.baseUrl,
       keyEnvVar: custom.keyEnvVar,
       models,

@@ -53,3 +53,39 @@ jobs:
 
       - name: Standalone sandbox enforcement
         run: bun run release:build
+
+  windows-shell:
+    name: Windows native acceptance (experimental until gate passes)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile --backend=copyfile
+      - run: bun run typecheck
+      - run: bun test tests/core/windows-platform.test.ts tests/core/windows-native.test.ts
+      - run: bun run build
+      - run: bun dist/cli.js --version
+      - name: Provision isolated runner account and WFP boundary
+        run: bun src/cli.ts windows-sandbox install --apply
+      - name: Prove WFP and native filesystem boundary
+        run: |
+          bun src/cli.ts windows-sandbox verify
+          bun scripts/m11-windows-smoke.ts
+      - name: Remove runner sandbox account and filters
+        if: always()
+        run: bun src/cli.ts windows-sandbox uninstall --apply
+
+  distribution-image:
+    name: Distribution CI image and public docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build local image
+        run: docker build -f packaging/ci/Dockerfile -t codesplash-ci:local .
+      - name: Check offline distribution surfaces
+        run: |
+          docker run --rm --network=none codesplash-ci:local bun run typecheck
+          docker run --rm --network=none codesplash-ci:local bun test tests/core/distribution.test.ts tests/core/identity.test.ts tests/core/network-integration.test.ts tests/core/platform-distribution.test.ts
+          docker run --rm --network=none codesplash-ci:local bun run docs:build

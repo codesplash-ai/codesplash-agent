@@ -1,3 +1,5 @@
+import { assertIdentityAllowed } from "../../../core/identity/policy.ts"
+import { networkFetch, networkSocketOptions } from "../../../core/network.ts"
 import { redactSensitiveText } from "../../../core/redaction.ts"
 import type { ProviderClient, ProviderRequest, ProviderStreamEvent } from "../contracts.ts"
 import { ProviderHttpError } from "../contracts.ts"
@@ -79,7 +81,7 @@ async function* websocketFrames(
   const Socket = WebSocket as unknown as {
     new (target: URL, options: { headers: Record<string, string> }): WebSocket
   }
-  const socket = new Socket(url, { headers })
+  const socket = new Socket(url, { headers, ...networkSocketOptions(url) })
   const queue: string[] = []
   let size = 0,
     ended = false,
@@ -146,12 +148,13 @@ export function createResponsesProvider(options: OpenAiProviderOptions): Provide
     id: "openai",
     models: options.models ?? [],
     async *stream(request, signal) {
-      const key = process.env[options.keyEnvVar ?? "OPENAI_API_KEY"],
+      const key = options.token ? await options.token() : process.env[options.keyEnvVar ?? "OPENAI_API_KEY"],
         headers: Record<string, string> = {
           "content-type": "application/json",
           ...(key ? { authorization: `Bearer ${key}` } : {}),
         },
         body = responsesBody(request, options)
+      if (key && !options.token) assertIdentityAllowed("api-key", undefined, options.authProvider ?? "openai")
       let finished = false,
         tools = 0
       try {
@@ -161,7 +164,7 @@ export function createResponsesProvider(options: OpenAiProviderOptions): Provide
         else {
           const response = await withRetries(
             async () => {
-              const r = await fetch(endpoint(options), {
+              const r = await networkFetch(endpoint(options), {
                 method: "POST",
                 headers,
                 body: JSON.stringify({ ...body, stream: true }),

@@ -1,5 +1,6 @@
 import type { PermissionMode } from "../../../core/config.ts"
 import { type HookEventName, hookIsGate } from "../../../core/hooks.ts"
+import { networkFetch } from "../../../core/network.ts"
 import type { SandboxRuntime } from "../sandbox/contracts.ts"
 import { startNetworkBroker } from "../sandbox/network-broker.ts"
 import { canonicalHost } from "../sandbox/profile.ts"
@@ -53,7 +54,7 @@ export async function runHookHandler(options: {
     signal.addEventListener("abort", cancel, { once: true })
     try {
       signal.throwIfAborted()
-      const response = await fetch(endpoint, {
+      const response = await networkFetch(endpoint, {
         method: "POST",
         headers: {
           "content-type": "application/json",

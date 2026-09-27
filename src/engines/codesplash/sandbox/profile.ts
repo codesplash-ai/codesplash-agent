@@ -4,10 +4,13 @@ import { mkdir, open, readFile, rename } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, isAbsolute, join, resolve, sep } from "node:path"
 import { configDirectory, dataDirectory, type SandboxMode } from "../../../core/config.ts"
+import { pathContains, validateWindowsPath } from "../../../core/platform.ts"
 import type { AccessGrant, NativeSandboxConfig, SandboxProfile } from "./contracts.ts"
 import { validateEnvironmentName } from "./env-policy.ts"
+import { validateResourceLimits } from "./resources.ts"
 
 export function physicalPath(path: string): string {
+  if (process.platform === "win32") validateWindowsPath(resolve(path))
   let cursor = resolve(path)
   const tail: string[] = []
   while (true) {
@@ -16,13 +19,13 @@ export function physicalPath(path: string): string {
     } catch {
       const parent = dirname(cursor)
       if (parent === cursor) throw new Error("Cannot resolve sandbox path")
-      tail.push(cursor.slice(parent.length).replace(/^\//, ""))
+      tail.push(cursor.slice(parent.length).replace(/^[\\/]/, ""))
       cursor = parent
     }
   }
 }
 export function contains(root: string, path: string): boolean {
-  return root === path || path.startsWith(root.endsWith(sep) ? root : root + sep)
+  return pathContains(root, path)
 }
 function unique(items: string[]): string[] {
   return [...new Set(items)].sort()
@@ -62,6 +65,7 @@ export function createProfile(
   cwd = physicalPath(cwd)
   const home = physicalPath(homedir())
   const protectedPaths = [
+    ...(config.denyWrite ?? []).map(denyPrefix),
     configDirectory(),
     dataDirectory(),
     join(home, ".ssh"),
@@ -94,6 +98,7 @@ export function createProfile(
   for (const name of config.environment ?? []) validateEnvironmentName(name)
   const data: Omit<SandboxProfile, "hash"> = {
     version: 1,
+    ...(config.limits ? { limits: validateResourceLimits(config.limits) } : {}),
     cwd,
     mode,
     readRoots,
@@ -101,6 +106,7 @@ export function createProfile(
     protectedPaths: unique(protectedPaths),
     deniedReadPaths: unique(
       [
+        ...(config.denyRead ?? []).map(denyPrefix),
         configDirectory(),
         dataDirectory(),
         ...recoveryPaths.filter(
@@ -130,6 +136,7 @@ export function validateProfile(value: unknown): SandboxProfile {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("Invalid pinned sandbox profile")
   const p = value as SandboxProfile
+  if (p.limits) validateResourceLimits(p.limits)
   if (
     p.version !== 1 ||
     !["read-only", "workspace-write", "danger-full-access"].includes(p.mode) ||
@@ -205,4 +212,22 @@ export function validateAccessGrant(profile: SandboxProfile, grant: AccessGrant,
   if (grant.resource === "write" && (plan || profile.mode === "read-only"))
     throw new Error("Write escalation is unavailable in read-only/plan mode")
   return { ...grant, target }
+}
+
+/** Expand a deny glob to its literal containing directory, so future matches are denied in-kernel too.
+ * This deliberately denies siblings as well; no pre-execution glob snapshot is called a boundary. */
+export function denyPrefix(pattern: string): string {
+  if (
+    !isAbsolute(pattern) ||
+    pattern.length > 4096 ||
+    /[\p{Cc}\p{Cf}]/u.test(pattern) ||
+    pattern.split(/[\\/]/).includes("..")
+  )
+    throw new Error("Deny patterns must be absolute without parent traversal")
+  const at = pattern.search(/[?*[{]/)
+  if (at < 0) return absoluteRoot(pattern)
+  const prefix = dirname(pattern.slice(0, at) + "placeholder")
+  if (prefix === "/" || /^[a-z]:[\\/]$/i.test(prefix))
+    throw new Error("Deny glob has no scoped literal parent")
+  return absoluteRoot(prefix)
 }

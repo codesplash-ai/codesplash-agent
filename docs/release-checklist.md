@@ -25,6 +25,18 @@ Run top to bottom for every tagged release. A release ships only when every box 
       Record actual terminal/microphone coverage; protocol fixtures do not prove device support.
 - [ ] Claude handoff exercised with the real CLI: launch, slash command, quit, resume via picker.
 
+## M11 distribution gates
+
+- [ ] Compiled `m11-smoke.ts`: live feature revocation, hardening, custom kernel denies,
+      offline supervisor, helper alias and actual PTY clipboard filtering.
+- [ ] On a delegated Linux cgroup-v2 host, `m11-resource-smoke.ts` enforces OOM/process ceilings
+      and leaves no active owned scope. Other hosts explicitly refuse configured limits.
+- [ ] Signed manifest matches every packaged file; update interruption, migration conflict,
+      signature/revision rejection and rollback tests pass. Retain signing keys outside artifacts.
+- [ ] Real TLS, proxy CONNECT and cloud wire fixtures pass. Record live provider accounts and
+      actual Windows/Termux hosts separately; fixtures cannot promote those support claims.
+- [ ] Build the CI image and offline public docs; inspect package allowlists for private material.
+
 ## Artifacts
 
 - [ ] Version bumped in `package.json` **and** `src/version.ts` (test enforces sync), CHANGELOG
@@ -54,3 +66,18 @@ Previous releases stay downloadable; rollback = install the prior tag from any c
 (`npm i -g codesplash-agent@<prev>`, earlier release archive, or pinned brew formula commit in the
 tap history). If a release is broken, mark it as a pre-release/yanked on GitHub, `npm deprecate`
 the version, and revert the tap formula commit.
+
+
+### M11 remaining-platform acceptance
+
+- [ ] `m11-startup-smoke.ts` runs the compiled first-party agent and an approved tool inside its
+      startup boundary; source tests also cover streaming/PTY transport and forged-profile refusal.
+- [ ] Linux `m11-microvm-smoke.ts` boots reviewed hash-pinned assets and verifies ephemeral guest
+      state, host/network denial, timeout and cancellation. Retain the boot hashes with the evidence.
+- [ ] npm and Homebrew package-manager upgrade/recovery/rollback gates pass in isolated prefixes;
+      run Scoop against a disposable Windows installation before advertising that adapter.
+- [ ] Windows x64: native handle-relative storage tests, helper checksum, explicit setup, WFP
+      verification, filesystem deny/write and job teardown gate. Retain the real runner output.
+      Do not promote ARM64, Windows startup isolation or Windows standalone activation from these tests.
+- [ ] Actual Android host: follow `docs/termux.md`, run `m11-termux-smoke.ts`, and retain the
+      reported kernel, installed version, storage and local-sandbox/remote-client capability limit.

@@ -14,6 +14,7 @@
  * isError results — only invalid input throws (ToolInputError).
  */
 import { lookup } from "node:dns/promises"
+import { networkFetch } from "../../../core/network.ts"
 import {
   type HarnessTool,
   type PermissionTargets,
@@ -375,7 +376,7 @@ type CacheEntry = { text: string; expiresAt: number }
 
 export function createWebFetchTool(options: WebFetchToolOptions = {}): HarnessTool {
   const resolveAddresses = options.resolveAddresses ?? defaultResolveAddresses
-  const fetchImpl = options.fetchImpl ?? fetch
+  const fetchImpl = options.fetchImpl ?? networkFetch
   const cacheTtlMs = options.cacheTtlMs ?? CACHE_TTL_MS
   const cache = new Map<string, CacheEntry>()
 

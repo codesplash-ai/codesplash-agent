@@ -1,4 +1,5 @@
 import type { FetchLike } from "@modelcontextprotocol/client"
+import { networkFetch } from "../../../core/network.ts"
 import type { SandboxProfile } from "../sandbox/contracts.ts"
 import { startNetworkBroker } from "../sandbox/network-broker.ts"
 import { canonicalHost } from "../sandbox/profile.ts"
@@ -71,7 +72,7 @@ export async function openMcpOAuthNetwork(
       ])
       for (let redirect = 0; ; redirect++) {
         check(url)
-        const response = await fetch(url, {
+        const response = await networkFetch(url, {
           ...init,
           redirect: "manual",
           proxy: broker.url,

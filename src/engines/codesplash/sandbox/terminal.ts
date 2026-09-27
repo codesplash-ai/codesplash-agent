@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { registerChildProcess } from "../../../core/lifecycle.ts"
+import { supervisorNetworkEnvironment } from "../../../core/network.ts"
 import type { ExecutionResult, SandboxProfile } from "./contracts.ts"
 import { internalCommand } from "./entrypoint.ts"
 import { childEnvironment } from "./env-policy.ts"
@@ -46,7 +47,7 @@ export async function openSandboxTerminal(
   signal.addEventListener("abort", cancel, { once: true })
   if (signal.aborted) cancel()
   try {
-    if (process.platform === "darwin") {
+    if (process.platform === "darwin" && !process.env.CODESPLASH_STARTUP_BRIDGE) {
       reaper = await createMacReaper()
       unregister = registerChildProcess(reaper)
     }
@@ -105,6 +106,7 @@ export async function openSandboxTerminal(
       else throw new Error("Unexpected terminal response")
     }
     const envelope: SupervisorInput = {
+      hostNetworkEnv: supervisorNetworkEnvironment(),
       profile: structuredClone(profile),
       argv: [...argv],
       temp,

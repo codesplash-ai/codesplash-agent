@@ -5,6 +5,8 @@ import { dirname, join, resolve } from "node:path"
 import type { PermissionMode } from "../../../core/config.ts"
 import { diagnosticContext } from "../../../core/diagnostics.ts"
 import { registerChildProcess } from "../../../core/lifecycle.ts"
+import { networkFetch, supervisorNetworkEnvironment } from "../../../core/network.ts"
+import { shellCommand } from "../../../core/platform.ts"
 import { redactSensitiveText } from "../../../core/redaction.ts"
 import { searchRuntime } from "../../../core/search-runtime.ts"
 import type { HarnessTool, ToolContext, ToolOutcome } from "../contracts.ts"
@@ -289,7 +291,9 @@ export class NativeSandbox implements SandboxRuntime {
           ? "Seatbelt"
           : process.platform === "linux"
             ? "bwrap/seccomp"
-            : "unsupported OS"
+            : process.platform === "win32"
+              ? "restricted token/WFP (host validation required)"
+              : "unsupported OS"
     return `${backend}: ${this.#closed ? "closed" : this.#enforcement} · profile ${this.profile.hash.slice(0, 12)} · ${this.profile.readRoots.length} read / ${this.profile.writeRoots.length} write roots · ${this.#effective().allowedHosts.length} host grants`
   }
   async #invoke(
@@ -343,11 +347,12 @@ export class NativeSandbox implements SandboxRuntime {
           secrets: command.structured ? [] : [...this.#secretValues],
         })
       } else {
-        if (process.platform === "darwin") {
+        if (process.platform === "darwin" && !process.env.CODESPLASH_STARTUP_BRIDGE) {
           reaper = await createMacReaper()
           unregister = registerChildProcess(reaper)
         }
         const input: SupervisorInput = {
+          hostNetworkEnv: supervisorNetworkEnvironment(),
           ...command,
           profile,
           temp,
@@ -453,7 +458,7 @@ export class NativeSandbox implements SandboxRuntime {
           checkNetwork: this.checkNetwork,
           fetchNetwork: (url, init) => {
             this.checkNetwork(url)
-            return fetch(url, { ...init, proxy: broker.url })
+            return networkFetch(url, { ...init, proxy: broker.url })
           },
         })
       } finally {
@@ -537,7 +542,7 @@ export class NativeSandbox implements SandboxRuntime {
       if (!command) throw new Error("Invalid bash command")
       const result = await this.#invoke(
         {
-          argv: ["/bin/bash", "-c", command],
+          argv: shellCommand(command),
           timeoutMs: timeout - 3000,
           secrets: secretBindings,
           redactions: [...this.#secretValues],

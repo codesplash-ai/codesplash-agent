@@ -177,6 +177,64 @@
           },
           "serviceTier": {
             "enum": ["auto", "default", "flex", "priority"]
+          },
+          "identity": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind"],
+            "properties": {
+              "kind": {
+                "enum": ["bedrock", "vertex", "azure", "openai-workload"]
+              },
+              "region": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              "project": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              "tenant": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              "clientId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              "clientSecretEnv": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              "tokenFile": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              "audience": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              "identityProviderId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              "serviceAccountId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              "authMode": {
+                "enum": ["device"]
+              }
+            }
           }
         }
       }
@@ -211,6 +269,39 @@
           "items": {
             "type": "string",
             "minLength": 1
+          }
+        },
+        "denyRead": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "denyWrite": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["memoryMiB", "processes"],
+          "properties": {
+            "memoryMiB": {
+              "type": "integer",
+              "minimum": 64,
+              "maximum": 65536
+            },
+            "processes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096
+            }
           }
         }
       }

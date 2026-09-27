@@ -1292,6 +1292,10 @@ native behavioral evals, Responses transports and explicit model catalog refresh
 tools include image/PDF reads, notebook/anchor edits, confined code, browser actions, reviewed
 execution environments and media jobs. See the [configuration, bounds and examples](docs/observability-and-tools.md).
 
+Signed updates, fleet policy, enterprise provider credentials, offline/proxy/CA settings, startup
+hardening and distribution commands are documented in [Distribution and enterprise controls](docs/distribution.md).
+Windows native isolation and real Windows/Termux acceptance remain open.
+
 Use `codesplash tools list`, `tools presets`, `tools doctor`, `models --help`, and
 `eval --help` to inspect the installed capabilities. New external tools require explicit feature
 selection and operator configuration; per-action approval remains in force.

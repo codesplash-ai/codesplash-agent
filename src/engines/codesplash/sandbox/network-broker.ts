@@ -1,13 +1,16 @@
 import { lookup } from "node:dns/promises"
-import { createServer, type OutgoingHttpHeaders, request } from "node:http"
-import { connect, type Socket } from "node:net"
+import { Agent, createServer, type OutgoingHttpHeaders, request } from "node:http"
+import type { Socket } from "node:net"
+import { networkEnvironment } from "../../../core/network.ts"
 import { blockedAddressClass } from "../tools/web-fetch.ts"
 import { canonicalHost } from "./profile.ts"
+import { connectThroughProxy } from "./proxy-tunnel.ts"
 
 /** Upstream for the OS runtime's proxies. Every connection uses the exact vetted DNS answer. */
 export async function startNetworkBroker(
   allowed: readonly string[],
   options: {
+    env?: NodeJS.ProcessEnv
     resolve?: (host: string) => Promise<string[]>
     blocked?: (address: string) => string | undefined
     /** Reviewed MCP/browser/generation development endpoints only; never a general private-network grant. */
@@ -32,6 +35,7 @@ export async function startNetworkBroker(
     })
   }
   async function destination(authority: string) {
+    networkEnvironment(new URL(`https://${authority}`), options.env)
     const local = loopback.get(authority)
     if (local) return local
     const target = canonicalHost(authority)
@@ -63,8 +67,15 @@ export async function startNetworkBroker(
       const headers: OutgoingHttpHeaders = { ...req.headers, host: url.host }
       for (const key of ["proxy-authorization", "proxy-connection", "connection", "upgrade"])
         delete headers[key]
+      const netEnv = networkEnvironment(url, options.env)
+      const connection = await connectThroughProxy(dest.address, dest.port, netEnv)
+      sockets.add(connection)
+      connection.on("close", () => sockets.delete(connection))
+      const agent = new Agent({ keepAlive: false })
+      agent.createConnection = () => connection
       const upstream = request(
         {
+          agent,
           hostname: dest.address,
           port: dest.port,
           method: req.method,
@@ -85,6 +96,7 @@ export async function startNetworkBroker(
       req.on("aborted", () => upstream.destroy())
       res.on("close", () => upstream.destroy())
       req.pipe(upstream)
+      connection.resume()
     } catch {
       res.writeHead(403).end("Denied by sandbox network policy")
     }
@@ -99,15 +111,18 @@ export async function startNetworkBroker(
     try {
       const dest = await destination(req.url ?? "")
       if (downstream.destroyed) return
-      const upstream = connect({ host: dest.address, port: dest.port })
+      const upstream = await connectThroughProxy(
+        dest.address,
+        dest.port,
+        networkEnvironment(new URL(`https://${req.url}`), options.env),
+      )
       sockets.add(upstream)
       upstream.setTimeout(60_000, () => upstream.destroy())
-      upstream.once("connect", () => {
-        downstream.write("HTTP/1.1 200 Connection Established\r\n\r\n")
-        if (head.length) upstream.write(head)
-        upstream.pipe(downstream)
-        downstream.pipe(upstream)
-      })
+      downstream.write("HTTP/1.1 200 Connection Established\r\n\r\n")
+      if (head.length) upstream.write(head)
+      upstream.pipe(downstream)
+      downstream.pipe(upstream)
+      upstream.resume()
       upstream.on("error", () => downstream.destroy())
       downstream.on("error", () => upstream.destroy())
       downstream.on("close", () => upstream.destroy())

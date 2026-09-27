@@ -1,5 +1,6 @@
 import Ajv from "ajv"
 import type { SessionUsageSnapshot } from "../../core/engine.ts"
+import { advancedFeatures } from "../../core/features.ts"
 import type { ProviderClient, ProviderUsage } from "./contracts.ts"
 import { type ExecutionEnvironment, validateEnvironments } from "./tools/environments.ts"
 import type { ToolRegistry } from "./tools/registry.ts"
@@ -18,16 +19,7 @@ export const toolsets: Record<string, readonly string[]> = {
   "read-only": ["read_file", "glob", "grep", "read_anchors", "lsp", "clock"],
   anchors: ["read_anchors", "edit_anchors", "read_file", "glob", "grep"],
 }
-export const advancedFeatures: Record<string, readonly string[]> = {
-  generation: ["generate_media"],
-  environments: ["environment_exec"],
-  plugins: ["plugin_suggestions"],
-  browser: ["browser"],
-  notebook: ["notebook_edit"],
-  anchors: ["read_anchors", "edit_anchors"],
-  clock: ["clock"],
-  code: ["code_mode"],
-}
+export { advancedFeatures } from "../../core/features.ts"
 export type ExecutionLimits = {
   allowedTools?: string[]
   excludedTools?: string[]

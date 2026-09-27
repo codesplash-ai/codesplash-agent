@@ -1,6 +1,7 @@
 import { constants } from "node:os"
 import { registerChildProcess } from "../../../core/lifecycle.ts"
 import { redactSensitiveText } from "../../../core/redaction.ts"
+import { windowsProcessJob } from "../../../core/session/windows-native.ts"
 import type { ExecutionResult } from "./contracts.ts"
 import { SecretSanitizer } from "./env-policy.ts"
 
@@ -24,6 +25,11 @@ export async function runProcess(
     cleanup?: () => void
   },
 ): Promise<ExecutionResult> {
+  if (process.env.CODESPLASH_STARTUP_BRIDGE) {
+    const role = argv.at(-1)?.replace(/^--internal-sandbox-/, "")
+    if (role && ["supervisor", "stream-supervisor", "pty-supervisor"].includes(role))
+      return (await import("../../../core/startup-bridge.ts")).runStartupTransport(role, options)
+  }
   if (options.input !== undefined && options.inputStream)
     throw new Error("Process input and inputStream are mutually exclusive")
   if (options.signal.aborted)
@@ -36,10 +42,31 @@ export async function runProcess(
     stderr: "pipe",
     detached: options.detached !== false,
   })
+  let windowsJob: (() => void) | undefined
+  if (process.platform === "win32") {
+    try {
+      windowsJob = windowsProcessJob(proc.pid)
+    } catch (error) {
+      proc.kill("SIGKILL")
+      await proc.exited
+      throw error
+    }
+  }
   let timedOut = false,
-    interrupted = false
+    interrupted = false,
+    cleanupFailed = false
   const kill = (signal: "SIGTERM" | "SIGKILL") => {
-    if (signal === "SIGKILL") options.cleanup?.()
+    if (signal === "SIGKILL") {
+      try {
+        try {
+          options.cleanup?.()
+        } finally {
+          windowsJob?.()
+        }
+      } catch {
+        cleanupFailed = true
+      }
+    }
     try {
       if (options.detached !== false) process.kill(-proc.pid, signal)
       else proc.kill(signal)
@@ -147,16 +174,18 @@ export async function runProcess(
     const signalExit = proc.signalCode ? 128 + (constants.signals[proc.signalCode] ?? 1) : 1
     const exitCode = interrupted ? 130 : timedOut ? 124 : (proc.exitCode ?? signalExit)
     return {
-      kind: interrupted
-        ? "interrupted"
-        : timedOut
-          ? "timeout"
-          : exitCode === 0
-            ? "success"
-            : "command-failure",
-      exitCode,
+      kind: cleanupFailed
+        ? "unavailable"
+        : interrupted
+          ? "interrupted"
+          : timedOut
+            ? "timeout"
+            : exitCode === 0
+              ? "success"
+              : "command-failure",
+      exitCode: cleanupFailed ? 126 : exitCode,
       stdout: out,
-      stderr: err,
+      stderr: cleanupFailed ? `${err}\nProcess cleanup failed` : err,
     }
   } finally {
     if (timeout) clearTimeout(timeout)

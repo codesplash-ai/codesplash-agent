@@ -13,6 +13,13 @@ export const COMPLETION_SHELLS: readonly CompletionShell[] = ["bash", "zsh", "fi
 /* ------------------------------- shared command surface ------------------------------- */
 
 const SUBCOMMANDS = [
+  "update",
+  "fleet",
+  "features",
+  "identity",
+  "disk",
+  "key-proxy",
+  "wrap",
   "models",
   "tools",
   "eval",
@@ -53,6 +60,8 @@ const ROOT_FLAGS = [
   "--help",
   "--version",
   "--doctor",
+  "--offline",
+  "--harden",
   "--no-history",
   "--no-extensions",
   "--sandbox",
@@ -373,6 +382,8 @@ function fishScript(): string {
     `complete -c codesplash -n __fish_use_subcommand -l help`,
     `complete -c codesplash -n __fish_use_subcommand -l version`,
     `complete -c codesplash -n __fish_use_subcommand -l doctor`,
+    `complete -c codesplash -n __fish_use_subcommand -l offline`,
+    `complete -c codesplash -n __fish_use_subcommand -l harden`,
     `complete -c codesplash -n __fish_use_subcommand -l no-history`,
     `complete -c codesplash -n __fish_use_subcommand -l full-access`,
     `complete -c codesplash -n __fish_use_subcommand -l bypass-approvals`,

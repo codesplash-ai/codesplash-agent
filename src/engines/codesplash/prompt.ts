@@ -1,7 +1,9 @@
 /** Prompt assembly for the CodeSplash engine: project-rule discovery and the system prompt. */
 import { realpath, stat } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
+import { brand } from "../../core/distribution/brand.ts"
 import { registerChildProcess, type SessionPolicy } from "../../core/index.ts"
+import { shellDialect } from "../../core/platform.ts"
 import type { ProjectRulesFile, SystemPromptOptions } from "./contracts.ts"
 
 /** Per-file cap for a single AGENTS.md/CLAUDE.md. */
@@ -49,10 +51,15 @@ export async function buildSystemPrompt(options: SystemPromptOptions): Promise<s
   const rules = options.rules ?? (workspaceTrusted ? await discoverProjectRules(options.cwd) : [])
 
   const sections = [
-    "You are CodeSplash Agent, a coding harness running in a terminal. You complete the user's coding tasks by inspecting and editing their workspace with the tools below.",
+    `You are ${brand.name}, a coding harness running in a terminal. You complete the user's coding tasks by inspecting and editing their workspace with the tools below.`,
     [
       `Working directory: ${options.cwd}`,
       `Platform: ${process.platform}`,
+      ...(process.platform === "win32"
+        ? [
+            `Shell tool dialect: ${shellDialect()}. Use Windows paths; POSIX shell syntax is not available. PowerShell profiles are disabled.`,
+          ]
+        : []),
       `Today's date: ${localDate()}`,
       `Model: ${options.model.id}`,
     ].join("\n"),

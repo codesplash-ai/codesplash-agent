@@ -19,11 +19,28 @@ export function parseSandboxArguments(args: string[]) {
     const arg = args[i]
     if (arg === "--read-only") readOnly = true
     else if (arg === "--no-history") history = false
-    else if (arg === "--read-root" || arg === "--write-root" || arg === "--allow-host") {
+    else if (
+      arg === "--read-root" ||
+      arg === "--write-root" ||
+      arg === "--allow-host" ||
+      arg === "--deny-read" ||
+      arg === "--deny-write"
+    ) {
       const value = args[++i]
       if (!value || i >= boundary) throw new UsageError(`${arg} requires a value`)
-      const key = arg === "--read-root" ? "readRoots" : arg === "--write-root" ? "writeRoots" : "allowedHosts"
-      config[key]?.push(value)
+      const key =
+        arg === "--deny-read"
+          ? "denyRead"
+          : arg === "--deny-write"
+            ? "denyWrite"
+            : arg === "--read-root"
+              ? "readRoots"
+              : arg === "--write-root"
+                ? "writeRoots"
+                : "allowedHosts"
+      const values = config[key] ?? []
+      values.push(value)
+      config[key] = values
     } else throw new UsageError(`Unknown sandbox option ${arg}`)
   }
   if (readOnly && config.writeRoots?.length) throw new UsageError("--read-only conflicts with --write-root")
@@ -42,7 +59,12 @@ export async function runSandboxCommand(args: string[]): Promise<number> {
     approvalPolicy: config.codex.approvalPolicy,
     permissionMode: config.permissions.mode,
   })
-  const merged = { ...config.sandbox, ...parsed.config }
+  const merged = {
+    ...config.sandbox,
+    ...parsed.config,
+    denyRead: [...(config.sandbox?.denyRead ?? []), ...(parsed.config.denyRead ?? [])],
+    denyWrite: [...(config.sandbox?.denyWrite ?? []), ...(parsed.config.denyWrite ?? [])],
+  }
   const ceiling = config.resolution?.constraints.allowedHosts
   if (ceiling && merged.allowedHosts?.some((host) => !ceiling.includes(host)))
     throw new Error("Requested network host prohibited by managed configuration")

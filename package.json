@@ -18,7 +18,9 @@
     "integrations",
     "docs/server.md",
     "docs/integrations.md",
-    "docs/observability-and-tools.md"
+    "docs/observability-and-tools.md",
+    "docs/distribution.md",
+    "docs/termux.md"
   ],
   "repository": {
     "type": "git",
@@ -48,10 +50,14 @@
     "release:major": "npm version major && git push origin HEAD && git push origin --tags",
     "start": "bun dist/cli.js",
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "docs:build": "bun scripts/build-docs.ts out/docs",
+    "release:manifest": "bun scripts/release-manifest.ts"
   },
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "0.0.75",
+    "@aws-sdk/client-bedrock-runtime": "3.1141.0",
+    "@aws-sdk/client-sts": "3.1141.0",
     "@modelcontextprotocol/client": "2.0.0",
     "@opentui/core": "0.5.3",
     "@opentui/react": "0.5.3",

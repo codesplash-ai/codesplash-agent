@@ -1,3 +1,4 @@
+import { assertIdentityAllowed } from "../../../core/identity/policy.ts"
 /**
  * OpenAI Chat Completions streaming adapter. Connects through withRetries and never retries after
  * the first emitted event; aborting the request signal yields {type:"done", stopReason:"aborted"}
@@ -6,6 +7,7 @@
  * Authorization header back in its error page).
  */
 import { redactSensitiveText } from "../../../core/index.ts"
+import { networkFetch } from "../../../core/network.ts"
 import {
   type ChatMessage,
   type ModelInfo,
@@ -51,6 +53,8 @@ export const openaiModels: ModelInfo[] = [
 ]
 
 export type OpenAiProviderOptions = {
+  authProvider?: string
+  token?: () => Promise<string>
   api?: "chat" | "responses"
   transport?: "sse" | "websocket"
   serviceTier?: "auto" | "default" | "flex" | "priority"
@@ -171,7 +175,7 @@ async function connect(
   signal: AbortSignal,
   options: OpenAiProviderOptions,
 ): Promise<Response> {
-  const key = process.env[options.keyEnvVar ?? "OPENAI_API_KEY"]
+  const key = options.token ? await options.token() : process.env[options.keyEnvVar ?? "OPENAI_API_KEY"]
   // The default provider requires its key; a custom provider is only constructed when available,
   // so a missing key there means requiresKey=false and the request carries no auth header.
   if (!key && options.keyEnvVar === undefined) {
@@ -179,8 +183,9 @@ async function connect(
   }
   const base = (options.baseUrl ?? process.env.OPENAI_BASE_URL ?? DEFAULT_BASE_URL).replace(/\/+$/, "")
   const headers: Record<string, string> = { "content-type": "application/json" }
+  if (key && !options.token) assertIdentityAllowed("api-key", undefined, options.authProvider ?? "openai")
   if (key) headers.authorization = `Bearer ${key}`
-  const response = await fetch(`${base}/v1/chat/completions`, {
+  const response = await networkFetch(`${base.replace(/\/v1$/, "")}/v1/chat/completions`, {
     method: "POST",
     headers,
     body: JSON.stringify({

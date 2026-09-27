@@ -5,6 +5,7 @@ import {
   type Transport,
   type TransportSendOptions,
 } from "@modelcontextprotocol/client"
+import { networkFetch } from "../../../core/network.ts"
 import type { SandboxProfile } from "../sandbox/contracts.ts"
 import { startNetworkBroker } from "../sandbox/network-broker.ts"
 import { canonicalHost } from "../sandbox/profile.ts"
@@ -105,7 +106,7 @@ export async function openMcpHttpTransport(options: {
           const timer = setTimeout(() => timeout.abort(), options.server.requestTimeoutMs)
           let response: Response
           try {
-            response = await fetch(url, {
+            response = await networkFetch(url, {
               ...init,
               headers,
               redirect: "manual",

@@ -73,7 +73,11 @@ export async function terminalSupervisorMain() {
       ended = false,
       killed = false
     const kill = () => {
-      options.cleanup?.()
+      try {
+        options.cleanup?.()
+      } catch {
+        failure = "Terminal process cleanup failed"
+      }
       if (killed) return
       killed = true
       try {

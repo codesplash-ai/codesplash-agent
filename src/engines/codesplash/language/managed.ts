@@ -2,6 +2,7 @@ import { existsSync } from "node:fs"
 import { chmod, readdir, readFile, realpath, stat } from "node:fs/promises"
 import { isAbsolute, join } from "node:path"
 import { gunzipSync } from "node:zlib"
+import { networkFetch } from "../../../core/network.ts"
 import { atomic, bytes, digest } from "../../../core/session/files.ts"
 
 export type LanguageDescriptor = {
@@ -126,7 +127,7 @@ export async function managedCommand(
     const destination = join(root, "bin", reviewed.fingerprint),
       original = `${destination}.download`
     if (!existsSync(original) || digest(bytes(original, 128 * 1024 * 1024)) !== d.download.sha256) {
-      const response = await fetch(d.download.url, {
+      const response = await networkFetch(d.download.url, {
         redirect: "error",
         signal: AbortSignal.any([signal, AbortSignal.timeout(60000)]),
       })

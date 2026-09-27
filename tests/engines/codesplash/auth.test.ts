@@ -6,6 +6,7 @@ import { join } from "node:path"
 import {
   applyStoredCredentials,
   credentialsFilePath,
+  deleteAllApiKeys,
   deleteApiKey,
   PROVIDER_ENV_VARS,
   resolveApiKey,
@@ -303,4 +304,17 @@ describe("provider env var mapping", () => {
   test("matches the variables the provider adapters read", () => {
     expect(PROVIDER_ENV_VARS).toEqual({ anthropic: "ANTHROPIC_API_KEY", openai: "OPENAI_API_KEY" })
   })
+})
+
+test("logout removes hydrated credentials but preserves explicit environment overrides", async () => {
+  const env: NodeJS.ProcessEnv = { CODESPLASH_AGENT_CONFIG_DIR: await makeTempDir() }
+  setApiKey("openai", "stored-fixture", env)
+  applyStoredCredentials(env)
+  expect(env.OPENAI_API_KEY).toBe("stored-fixture")
+  expect(await deleteAllApiKeys("openai", env)).toBe(true)
+  expect(env.OPENAI_API_KEY).toBeUndefined()
+  setApiKey("openai", "stored-fixture", env)
+  env.OPENAI_API_KEY = "explicit-fixture"
+  expect(await deleteAllApiKeys("openai", env)).toBe(true)
+  expect(env.OPENAI_API_KEY).toBe("explicit-fixture")
 })

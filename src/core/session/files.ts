@@ -18,6 +18,7 @@ import {
 } from "node:fs"
 import { hostname } from "node:os"
 import { basename, dirname, join, parse, resolve } from "node:path"
+import { WindowsParent, windowsLocalFilesystem } from "./windows-native.ts"
 export const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex")
 export function component(value: string): string {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(value) || value === "..")
@@ -40,7 +41,7 @@ export function canonicalRoot(path: string): string {
 export function directory(path: string, create = false): void {
   path = hostPath(path)
   let current = parse(path).root
-  for (const part of path.slice(current.length).split("/")) {
+  for (const part of path.slice(current.length).split(process.platform === "win32" ? /[\\/]/ : /\//)) {
     current = join(current, part)
     if (!existsSync(current)) {
       if (!create) return
@@ -52,6 +53,20 @@ export function directory(path: string, create = false): void {
 }
 export function bytes(path: string, max = 1024 * 1024): Buffer {
   path = hostPath(path)
+  if (process.platform === "win32") {
+    const parent = WindowsParent.open(dirname(path), basename(path))
+    try {
+      const result = parent?.read(undefined, max)
+      if (!result) {
+        const error = new Error("File does not exist") as NodeJS.ErrnoException
+        error.code = "ENOENT"
+        throw error
+      }
+      return result.content
+    } finally {
+      parent?.close()
+    }
+  }
   directory(dirname(path))
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
@@ -81,6 +96,25 @@ export function json<T>(path: string, max = 1024 * 1024): T {
 }
 export function atomic(path: string, value: string | Uint8Array): void {
   path = hostPath(path)
+  if (process.platform === "win32") {
+    const parent = WindowsParent.open(dirname(path), basename(path), true, true)
+    if (!parent) throw new Error("Could not open Windows storage parent")
+    const temp = `${basename(path)}.${crypto.randomUUID()}.tmp`
+    let staged = false
+    try {
+      parent.write(temp, Buffer.from(value), 0o600)
+      staged = true
+      parent.rename(temp, basename(path))
+      staged = false
+    } finally {
+      try {
+        if (staged) parent.unlink(temp)
+      } finally {
+        parent.close()
+      }
+    }
+    return
+  }
   directory(dirname(path), true)
   const temp = `${path}.${crypto.randomUUID()}.tmp`
   try {
@@ -104,6 +138,7 @@ export function atomic(path: string, value: string | Uint8Array): void {
 }
 export const hostId = () => digest(hostname()).slice(0, 24)
 export function localFilesystem(path: string): boolean {
+  if (process.platform === "win32") return windowsLocalFilesystem(path)
   try {
     let parent = hostPath(path)
     while (!existsSync(parent)) parent = dirname(parent)

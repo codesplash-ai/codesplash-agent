@@ -1,3 +1,4 @@
+import { networkFetch } from "../core/network.ts"
 import { modelCatalog } from "../engines/codesplash/catalog.ts"
 import { cachedModels, refreshModels } from "../engines/codesplash/model-cache.ts"
 import { UsageError } from "./usage-error.ts"
@@ -25,7 +26,7 @@ export async function runModelsCommand(args: string[]): Promise<number> {
     if (action === "pull" && process.env.CODESPLASH_OFFLINE === "1")
       throw new Error("Model pull is disabled offline")
     url.pathname = action === "pull" ? "/api/pull" : "/api/tags"
-    const response = await fetch(url, {
+    const response = await networkFetch(url, {
       method: action === "pull" ? "POST" : "GET",
       ...(action === "pull"
         ? {
