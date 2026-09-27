@@ -33,7 +33,7 @@ This feature release delivers the native-agent roadmap through M11 and the docum
 - Add registered-client browser PKCE with OS-store refresh/logout, search result domain filters,
   explicit Git sparse projection, three installed Git workflow SDK examples and Windows sleep code.
 - Keep direct NFS/SMB live persistence, transparent kernel projection, Windows startup confinement/
-  ARM64 storage, live-account acceptance and publication explicitly open; see the roadmap status.
+  ARM64 storage and live-account acceptance explicitly open; see the roadmap status and release handoff.
 
 ### Distribution and enterprise controls (M11)
 

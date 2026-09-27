@@ -136,13 +136,13 @@ The owner committed the implementation as `ce99219` and explicitly authorized de
 1. Start with a clean, reviewed checkout. Read [the current status](agent-roadmap-status.md), [release checklist](release-checklist.md), and [distribution controls](distribution.md). Preserve explicit platform and feature limits in release notes.
 2. Pick an unused semantic version. Update `package.json`, run `bun scripts/sync-version.ts`, and move the accumulated `Unreleased` notes into a dated version section in `CHANGELOG.md`. Do not republish or move an existing release tag.
 3. Verify `bun install --frozen-lockfile`, `bun run check`, `bun run build`, `bun scripts/check-changelog.ts`, and `npm pack --dry-run`. Inspect the package allowlist for private records or credentials. Run the release and installed-SDK gates required by the checklist.
-4. Commit and push the candidate to `main`. Wait for `.github/workflows/ci.yml` to finish. Review each macOS/Linux architecture, Windows experimental acceptance and the distribution image separately. Fix failures before tagging; do not suppress a failure to manufacture a passing release.
+4. Commit and push the candidate to `main`. Wait for `.github/workflows/ci.yml` to finish. Review each macOS/Linux architecture, Windows experimental acceptance and the distribution image separately. Fix production failures before publication; do not suppress a failure to manufacture a passing release. A tag may start the release checks alongside CI when the publish job remains gated by every required production build. Experimental platform failures remain explicit and must not promote support claims.
 
 ### Publish through the existing workflow
 
 1. Verify the npm package's trusted publisher is GitHub repository `codesplash-ai/codesplash-agent`, workflow `release.yml`. This uses GitHub OIDC; a local npm login or `NPM_TOKEN` is not needed for that path.
 2. Verify repository secrets by name, never by printing their contents: `TAP_GITHUB_TOKEN`, `MACOS_CERT_P12`, `MACOS_CERT_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID`. Optional alternate Homebrew/Scoop variables are separate from the primary Homebrew destination.
-3. Tag the passing candidate and push the tag. For this release:
+3. Tag the reviewed candidate and push the tag; publication still requires the workflow’s production checks to pass. For this release:
 
    ```sh
    git tag -a v0.2.0 -m "CodeSplash Agent v0.2.0"
@@ -172,7 +172,7 @@ Retain the prior `0.1.4` artifacts and tap history. For npm, install `codesplash
 
 ## Release outcome
 
-Deployment is in progress. The final verified publication record will be maintained in this document on `main`; the package copy records its build-time state.
+**Released 0.2.0 to GitHub Releases, npm `latest`, and Homebrew on 2026-09-27.** This document on `main` is the final deployment record; the immutable package copy retains its build-time state and historical snapshot.
 
 Release preparation exposed and fixed issues that local ARM64 testing had not established:
 
@@ -182,9 +182,56 @@ Release preparation exposed and fixed issues that local ARM64 testing had not es
 - Intel integration tests wait for explicit terminal readiness and bounded completion instead of assuming one- or two-second startup. Test assertions remain in place.
 - The distribution image now includes the current roadmap and handoff guides used by its offline docs build.
 
-The [candidate CI run](https://github.com/codesplash-ai/codesplash-agent/actions/runs/36342941559) passed the complete macOS ARM64, Linux x64, Linux ARM64 and distribution-image jobs. Its Intel failures identified short readiness waits being corrected before release. Actual Windows x64 storage/reparse/ancestor pinning, PowerShell/cmd, broker-environment checks and WFP network denial passed. Full Windows sandbox execution still refuses when the pinned helper cannot apply ACLs to protected `C:\Windows` and `C:\Program Files` directories. The failure remains visible, cleanup ran, and no isolation rule was removed to make it pass. Windows remains experimental and is not a required production artifact for this release.
+The [tagged candidate CI run](https://github.com/codesplash-ai/codesplash-agent/actions/runs/36345565268) passed all four complete macOS/Linux production jobs and the distribution image at `37e5f995d0ca72e210966724ac0dd5ea5c72f200`. Both macOS architectures passed 1,694 tests with four Windows-only skips; each Linux architecture passed 1,691 with seven platform/browser-environment skips. Every production target passed the compiled gates and all 22 installed SDK examples. Earlier Intel runs exposed short readiness waits and cancelled streaming-fixture connection reuse; the tests were corrected without removing assertions. Actual Windows x64 storage/reparse/ancestor pinning, PowerShell/cmd, broker-environment checks and WFP network denial passed. Full Windows sandbox execution still refuses when the pinned helper cannot apply ACLs to protected `C:\Windows` and `C:\Program Files` directories. The failure remains visible, cleanup ran, and no isolation rule was removed to make it pass. Windows remains experimental and is not a required production artifact for this release.
 
-Publication results and exact final candidate references are pending.
+The immutable `v0.2.0` tag points to `37e5f995d0ca72e210966724ac0dd5ea5c72f200`. The [release workflow](https://github.com/codesplash-ai/codesplash-agent/actions/runs/36345599470) completed successfully. The first signed Intel attempt passed regression and notarization but hit a one-second terminal smoke readiness race; publication was skipped. The unchanged tagged gate passed on retry before publication. The permanent readiness/output polling fix is committed on `main` as `e4bc266`; it changes the smoke harness, not the shipped runtime. The tag was not moved. This final documentation record is a later commit on `main`.
+
+### Verified publication and installation evidence
+
+| Channel | Final result |
+|---|---|
+| GitHub Releases | [v0.2.0](https://github.com/codesplash-ai/codesplash-agent/releases/tag/v0.2.0), published 2026-09-27 at 20:19:38 UTC, regular public release; four macOS/Linux archives, four sidecar hashes and `SHA256SUMS`. No Windows artifact. |
+| npm | [codesplash-agent 0.2.0](https://www.npmjs.com/package/codesplash-agent/v/0.2.0), `latest: 0.2.0`, public package, GitHub OIDC trusted publishing and [SLSA provenance](https://registry.npmjs.org/-/npm/v1/attestations/codesplash-agent@0.2.0). Initial registry processing briefly returned 404; subsequent fresh-cache lookup and installation succeeded. |
+| Homebrew | [Tap commit `15bb5ec`](https://github.com/codesplash-ai/homebrew-tap/commit/15bb5ec5ed46ba05e0fa537b346d70e7dcd581b0), formula version 0.2.0; all four platform hashes match GitHub asset digests and `SHA256SUMS`. |
+| macOS signing | Both architectures passed Developer ID signature verification and Apple notarization (`Accepted`) in the release job. The downloaded ARM64 binary also passed local strict signature verification outside the restricted tool sandbox. |
+| Actual installation | macOS ARM64 standalone download passed checksum, `--version` and `--doctor`; fresh npm installation in a disposable prefix passed version, diagnostics and the quota-free SDK example; the existing Homebrew installation upgraded to 0.2.0 and `brew test` passed. Homebrew 0.1.4 was retained for rollback. |
+
+npm integrity:
+
+```text
+sha512-RyqYTRRkuZLzEKfGp7XMtZGdoff2mS6cgqgfGSFnyMlWj9KJEvah29Eg8MKkQfIq98eDxp5x6F4u2t6x52NwHw==
+```
+
+Published archive checksums (also independently matched to GitHub asset digests and the Homebrew formula):
+
+```text
+b3545fd64ff02834e50b4aba6674a51ff5825417a125f7225bfb7959aed8fa7a  codesplash-agent-0.2.0-darwin-arm64.tar.gz
+cfce70874d9be0cecdbd00bb11139b45d639e131e2f76716fc3929e6dd046c3b  codesplash-agent-0.2.0-darwin-x64.tar.gz
+b0ad9848e6cb01c3ce4577e8b2414312ac56b253559b243f0a6a71614055f826  codesplash-agent-0.2.0-linux-arm64.tar.gz
+1a5e3a084de8dff2976de8ae28fa1240544c2065346ed12d5afe42354bbf1e56  codesplash-agent-0.2.0-linux-x64.tar.gz
+```
+
+Private logs and registry/API evidence are retained locally under `docs/private/0.2.0-release/`; the public workflow and release links above remain usable without those local files. No private evidence or credentials were added to the package allowlist.
+
+### What this release closes and what stays open
+
+- **A06:** remote regression, standalone sandbox and all 22 installed SDK example gates passed on macOS ARM64/x64 and Linux ARM64/x64 for the exact tagged candidate. Candidate CI still reports an overall failure because the explicit experimental Windows gate remains failed; the release workflow succeeded with its existing experimental-platform exclusion.
+- **A08:** version/channel choice, owner publication authorization, macOS signing/notarization, GitHub release, npm provenance publication and the primary Homebrew tap update are complete. Public website hosting and an operated standalone signed-update feed are separate, still unconfigured deployments.
+- **A07:** actual local macOS installation checks now cover all three channels. This does not establish fresh-account/device upgrade, uninstall and rollback coverage on every advertised architecture. The four-host compiled package gates are additional evidence, not a substitute for those lifecycle probes.
+- **A01–A05 and remaining engineering:** retain the specific limits and input requirements above and in [current status](agent-roadmap-status.md). Windows x64 has real partial evidence, but its full sandbox gate remains blocked; Android, KVM, live accounts and physical-device acceptance are not promoted by publication.
+
+## Owner follow-up and decisions after this release
+
+Package publication is authorized and does not need another owner decision. The three requested production channels are complete. Your next operator steps and future product choices are:
+
+- Upgrade through your chosen channel using the commands in the runbook, then run `codesplash --version` and `codesplash --doctor`. Configure provider credentials through the documented credential stores and perform an authenticated smoke in your own workspace.
+- Enable scheduler services, fleet policy, integrations and the standalone signed-update feed only where you intend to operate them. Shipping the CLI does not activate those services in customer environments.
+- Choose local state plus the remote daemon versus a new direct NFS/SMB backend; choose whether explicit Git sparse projection is sufficient or a specific kernel projection backend is required.
+- Select additional supported platforms and supply their real acceptance environments. Windows whole-agent confinement and ARM64 storage still need implementation; Windows x64 execution needs the protected-directory ACL blocker resolved before promotion.
+- Supply authorized OAuth registration/tenant/resource scopes, selected live providers and services, a spending ceiling, supported runtime distributions, and a catalog/pricing review owner and cadence.
+- Choose public website hosting and an operated signed-update feed only if you want those separate deployments. Realtime voice, packaged companions and the hosted platform stay deferred unless explicitly reopened.
+
+These choices are separate from the ordinary engineering backlog in the snapshot and current status document. The remaining work is not all waiting for your permission.
 
 ## When work resumes
 

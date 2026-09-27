@@ -1,8 +1,8 @@
-> Post-M11 candidate: see [current feature and acceptance status](agent-roadmap-status.md). New compiled carryover and three Git SDK example gates are required; platform and live-account gates remain explicit.
+> For the 0.2.0 publication record and explicit remaining acceptance gates, see [the release handoff](roadmap-release-handoff-2026-09-27.md). Post-M11 candidate: see [current feature and acceptance status](agent-roadmap-status.md). New compiled carryover and three Git SDK example gates are required; platform and live-account gates remain explicit.
 
 # Release checklist
 
-Run top to bottom for every tagged release. A release ships only when every box is checked.
+Record required production checks and explicit platform/scope exclusions for every tagged release. Experimental, live-account and physical-device gates remain open until their evidence exists; publication alone does not check them. The linked release handoff records the exact completed scope for 0.2.0.
 
 This is a reusable release checklist, not a feature-completion counter. M11 implementation is
 committed as `272358c`; retained local ARM64 validation passed 1,670 macOS and 1,667 Linux
@@ -92,8 +92,9 @@ the version, and revert the tap formula commit.
       Do not promote ARM64, Windows startup isolation or Windows standalone activation from these tests.
 - [ ] Actual Android host: follow `docs/termux.md`, run `m11-termux-smoke.ts`, and retain the
       reported kernel, installed version, storage and local-sandbox/remote-client capability limit.
-- [ ] Windows ARM64 storage, Windows whole-agent startup confinement and Windows sleep inhibition
-      remain unavailable; do not imply that Windows x64 acceptance implements these features.
+- [ ] Windows ARM64 storage and Windows whole-agent startup confinement remain unavailable.
+      Windows sleep inhibition is implemented but awaits actual-host acceptance; do not infer
+      any of these support claims from the narrower x64 storage and shell tests.
 - [ ] KVM acceleration exercised on actual compatible hardware before advertising it as tested;
       the accepted QEMU TCG probe does not establish KVM acceptance.
 - [ ] Physical clipboard/image protocols, microphone permissions and supported editor/terminal

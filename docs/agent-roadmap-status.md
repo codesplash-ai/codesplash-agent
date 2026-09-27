@@ -37,7 +37,7 @@ These items did not require a product decision and are now implemented:
 | Child inspection | Nested child listing and paginated retained transcripts | Owned journals, snapshot consistency, visible text/tools only; private reasoning/binary attachments omitted; compaction/history retention still apply. |
 | Scheduler autostart | Per-workspace launchd/systemd user service install/start/stop/status/uninstall | Explicit CLI activation; existing finite workers and durable budgets/expiry remain; actual inert lifecycle tested on both hosts. |
 | Unix socket relay | Private owned socket to stdin/stdout, real half-close, byte/time limits | macOS/Linux local IPC only; no listener, public relay, credential injection or reconnect. |
-| Public docs package | Current guides plus safe navigable links, tables, lists and code | Offline output; deployment remains A08. |
+| Public docs package | Current guides plus safe navigable links, tables, lists and code | Included in packages; public website hosting remains separate from package publication. |
 
 See [feature controls](agent-carryovers.md) for commands, configuration and operational limits.
 
@@ -78,14 +78,14 @@ F07/F08/F17 above remain actual missing backends as well as platform/acceptance 
 
 | Gate | Remaining evidence / required input |
 |---|---|
-| A01 Windows | Actual Windows x64 NTFS/ACL/reparse/lease, restricted-token/WFP denial, shells/PTY cleanup, OS credential store, managed policy, sleep inhibitor, Scoop and activation. ARM64 requires implementation as well. |
+| A01 Windows | Actual x64 native storage/reparse/ancestor pinning, shell and broker tests passed; WFP network denial passed. Full sandbox execution is blocked by protected-system-directory ACL access denied in the pinned helper. Credentials, managed policy, sleep inhibitor, Scoop, activation and broader lifecycle acceptance remain open. ARM64 requires implementation as well. |
 | A02 Android | Actual Android/Termux installation, Android-only gate and runtime/storage/sandbox limitations. No Android host is attached. |
 | A03 Isolation | Actual KVM hardware with pinned VM assets; supported backend denial, cancellation and cleanup. Local macOS/Linux and TCG results do not establish KVM or Windows equivalence. |
 | A04 Providers/services | Explicit accounts, registered OAuth client/tenant/scopes, selected models and spend ceiling; real MCP/OAuth, integrations, OTLP, proxy/fleet and SSH deployment. No paid calls or external messages were inferred. |
 | A05 Clients/devices | Authenticated engine dogfood, installed VS Code, physical terminals/clipboard, real LAN/TLS/mDNS/deep links, microphone permissions/transcription and host sleep behavior. |
-| A06 CI | Commit the candidate and obtain remote all-architecture CI. Local ARM64 runs are not committed macOS/Linux x64 or Windows CI. |
-| A07 Distribution | Fresh account/VM lifecycle for each advertised channel/platform. Available local release/install gates cover only their named hosts and channels. |
-| A08 Publication | Choose candidate version/channel; signing/notarization identities and release destinations; explicit publication instruction. No tag, push, signing or publication has been performed. |
+| A06 CI | Complete for the four production architectures at `v0.2.0` (`37e5f99`): remote regression, compiled gates and 22 installed SDK examples passed. Windows remains explicitly failed/experimental; see the release handoff for exact runs. |
+| A07 Distribution | Published standalone, fresh npm prefix and Homebrew upgrade/test verified on macOS ARM64. Four-host compiled package gates passed. Fresh-account/device upgrade, uninstall and rollback across all architectures remain broader lifecycle acceptance. |
+| A08 Publication | Complete for the requested channels: GitHub v0.2.0, npm 0.2.0 on `latest` with provenance, primary Homebrew tap updated; both macOS binaries signed and notarized. Public website hosting and an operated standalone signed-update feed remain separate, unconfigured deployments. |
 
 ## Decisions and inputs needed from you
 
@@ -102,8 +102,9 @@ F07/F08/F17 above remain actual missing backends as well as platform/acceptance 
    behavior and acceptable retry criteria before enabling model-specific heuristics.
 5. **Platform/device access:** supply the actual Windows, Android, KVM and physical terminal/device
    environments required by A01–A05, or keep those claims experimental/unsupported.
-6. **Release:** commit the reviewed changes; choose candidate version/channel and signing/publication
-   configuration, then explicitly authorize publication. Remote CI can then evaluate that exact commit.
+6. **Release decision resolved:** the owner committed the features and authorized publication.
+   Version `0.2.0` uses the existing npm, Homebrew and GitHub destinations and signing configuration.
+   No further owner decision is needed for those three channels; see the release handoff for results.
 7. **Deferred products:** D01 realtime voice, D02 packaged desktop/mobile and D03 hosted platform remain
    the recorded no-go decisions. No new decision is needed unless you want to reopen them.
 
@@ -114,13 +115,13 @@ Local implementations do not turn those into a hosted service.
 
 ## Validation
 
-Final format/type checks and regression suites: **1,694 passed / 3 Windows-only skips on macOS ARM64**;
+Before release preparation, local format/type checks and regression suites: **1,694 passed / 3 Windows-only skips on macOS ARM64**;
 **1,692 passed / 5 OS-specific skips on Linux ARM64**, zero failures (1,697 tests each).
 The service path fix also passed focused checks and actual launchd/systemd-user lifecycle probes.
 Linux includes the real isolated Chromium case. The installed SDK check exercises all 22 examples,
 strict consumer types and runtime assets. Compiled release gates include the new carryover smoke.
 Retained logs, exact source manifests and artifact hashes are in the private
-`docs/private/post-m11-acceptance/` and `docs/private/roadmap-followup-acceptance/` directories. Artifacts are unsigned and unpublished.
+`docs/private/post-m11-acceptance/` and `docs/private/roadmap-followup-acceptance/` directories. Those were unsigned local development artifacts; the release handoff separately records the tagged production artifacts and publication evidence.
 
 The synchronized comparison inventory is **330 implemented / 71 partial / 15 absent** across 416 rows.
 Those are source-scope classifications, not a production-readiness percentage. All 109 original
