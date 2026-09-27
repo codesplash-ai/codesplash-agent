@@ -1,6 +1,6 @@
 {
   "name": "codesplash-agent",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "description": "Terminal harness for Codex and Claude Code \u2014 your AI accounts, one terminal, credentials stay on your machine.",
   "license": "BUSL-1.1",
   "type": "module",
@@ -23,7 +23,8 @@
     "docs/termux.md",
     "docs/agent-roadmap-status.md",
     "docs/storage-platform-boundaries.md",
-    "docs/agent-carryovers.md"
+    "docs/agent-carryovers.md",
+    "docs/roadmap-release-handoff-2026-09-27.md"
   ],
   "repository": {
     "type": "git",

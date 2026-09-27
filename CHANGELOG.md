@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.2.0 — 2026-09-27
+
+This feature release delivers the native-agent roadmap through M11 and the documented follow-up work. See [the release handoff](docs/roadmap-release-handoff-2026-09-27.md) for completed capabilities, remaining engineering, acceptance limits and deployment instructions. Windows remains experimental; Android, KVM and live-service/device acceptance are not promoted by publication.
+
 ### Additional original-roadmap implementation
 
 - Add reusable prepared worktree pools, model-assisted disabled agent drafts and named persona defaults/overrides.

@@ -14,6 +14,7 @@ const pages = [
   "docs/agent-roadmap-status.md",
   "docs/agent-carryovers.md",
   "docs/storage-platform-boundaries.md",
+  "docs/roadmap-release-handoff-2026-09-27.md",
 ]
 const escapeHtml = (text: string) =>
   text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;")

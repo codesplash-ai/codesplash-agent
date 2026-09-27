@@ -1,8 +1,8 @@
 # Agent roadmap status — 2026-09-27
 
 The original native-agent roadmap ends at **M11**. M11 is committed in `272358c`; the audit is
-committed in `6edaf82`. The subsequent work below is **uncommitted** and closes original feature
-carryovers. It does not introduce M12–M14 or reopen the recorded product no-go decisions.
+committed in `6edaf82`. The subsequent work below is committed in `ce99219` and closes original feature
+carryovers. The [0.2.0 release handoff](roadmap-release-handoff-2026-09-27.md) preserves the full status snapshot and tracks production deployment. It does not introduce M12–M14 or reopen the recorded product no-go decisions.
 
 The complete private inventory covers 109 original roadmap items and 416 historical comparison
 rows. This public record summarizes every remaining workstream, acceptance gate and decision.
