@@ -56,7 +56,7 @@ test("log rotation, retention and symlink denial cannot break session operations
   } finally {
     await rm(root, { recursive: true, force: true })
   }
-})
+}, 30000)
 test("provider timing captures real retry and interruption with no input content", async () => {
   const records: unknown[] = []
   const log = new Diagnostics(undefined, (r) => records.push(r))

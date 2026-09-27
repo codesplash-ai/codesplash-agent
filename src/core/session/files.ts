@@ -18,6 +18,7 @@ import {
 } from "node:fs"
 import { hostname } from "node:os"
 import { basename, dirname, join, parse, resolve } from "node:path"
+import { darwinLocalFilesystem } from "./darwin-native.ts"
 import { WindowsParent, windowsLocalFilesystem } from "./windows-native.ts"
 export const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex")
 export function component(value: string): string {
@@ -142,10 +143,9 @@ export function localFilesystem(path: string): boolean {
   try {
     let parent = hostPath(path)
     while (!existsSync(parent)) parent = dirname(parent)
+    if (process.platform === "darwin") return darwinLocalFilesystem(parent)
     const type = Number(statfsSync(parent).type)
-    return (
-      process.platform === "darwin" ? [0x1a, 0x11] : [0xef53, 0x01021994, 0x794c7630, 0x58465342, 0x9123683e]
-    ).includes(type)
+    return [0xef53, 0x01021994, 0x794c7630, 0x58465342, 0x9123683e].includes(type)
   } catch {
     return false
   }

@@ -119,7 +119,7 @@ function relative(
   const result = api().n.NtCreateFile(
     ptr(out),
     // Every opened handle is inspected below, including write/delete-only callers.
-    access | 0x100000 | 0x80,
+    (access | 0x100000 | 0x80) >>> 0,
     ptr(object),
     ptr(status),
     null,
