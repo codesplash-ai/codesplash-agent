@@ -18,6 +18,7 @@ import {
   registerChildProcess,
   type SessionPolicy,
 } from "../../core/index.ts"
+import { recordToolOperation } from "../../core/operation-telemetry.ts"
 import { workspaceMutations } from "../../core/orchestration/mutations.ts"
 import { compactMessages } from "./compaction.ts"
 import {
@@ -65,6 +66,7 @@ import { boundedJson, jsonObject } from "./mcp/bounds.ts"
 import { BoundedSchemaValidators } from "./mcp/schema.ts"
 import { derivePersistableRule } from "./permissions.ts"
 import type { SandboxRuntime } from "./sandbox/contracts.ts"
+import { RepeatedStreamError, StreamLoopGuard, type StreamPolicy, withoutImages } from "./stream-policy.ts"
 import { READ_TOOL_OUTPUT, ToolOutputStore } from "./tool-output-store.ts"
 import type { ToolRegistry } from "./tools/registry.ts"
 import { parsePermissionRequest, REQUEST_PERMISSIONS_TOOL_NAME } from "./tools/request-permissions.ts"
@@ -148,6 +150,7 @@ export type DiffCollector = (cwd: string, paths: string[]) => Promise<string>
 export type ResolvedModel = { model: ModelInfo; provider: ProviderClient }
 
 export type CodesplashLoopOptions = {
+  streamPolicy?: StreamPolicy
   observeHook?: (event: HookEvent, signal: AbortSignal) => Promise<void>
   extensionsEnabled?: () => boolean
   hooks?: HookManager
@@ -235,7 +238,16 @@ type PendingRequest = {
 }
 
 type StreamResult =
-  | { kind: "error"; error: unknown; sawEvent: boolean }
+  | {
+      kind: "error"
+      error: unknown
+      sawEvent: boolean
+      toolCalls: ToolCallBlock[]
+      messageId: string
+      reasoningId: string
+      text: string
+      reasoning: string
+    }
   | { kind: "aborted"; text: string }
   | {
       kind: "done"
@@ -246,6 +258,9 @@ type StreamResult =
     }
 
 export class CodesplashLoop {
+  readonly #streamPolicy: StreamPolicy
+  #omitImages = false
+  #early = new Map<string, { result: ToolResultBlock; attachments: ContentBlock[] }>()
   #hooks: HookManager | undefined
   replaceIntegrations(hooks: HookManager, registry: ToolRegistry): void {
     if (this.isTurnActive || this.hasPendingInteraction)
@@ -333,6 +348,7 @@ export class CodesplashLoop {
     this.#maxToolRounds = options.maxToolRounds ?? MAX_TOOL_ROUNDS
     this.#collectDiff = options.collectDiff ?? ((cwd, paths) => collectGitDiff(cwd, paths, options.sandbox))
     this.#fallbackModel = options.fallbackModel
+    this.#streamPolicy = { ...options.streamPolicy }
     this.#resolveModel = options.resolveModel
     this.#permissions = options.permissions
     this.#sandbox = options.sandbox
@@ -565,6 +581,8 @@ export class CodesplashLoop {
     let fallbackUsed = false
     let compactionAttempts = 0
     let overflowRecovered = false
+    let emptyRetried = false
+    this.#omitImages = false
     let providerFailed = false
     const continuation = new HookContinuationBudget(
       this.#hooks?.continuationLimits ?? { maxCount: 0, maxDurationMs: 120000, maxTokens: 0 },
@@ -730,6 +748,7 @@ export class CodesplashLoop {
         }
         const usageBefore =
           this.#usageTotals.inputTokens + this.#usageTotals.cachedInputTokens + this.#usageTotals.outputTokens
+        this.#early.clear()
         const response = await this.#streamResponse(
           provider,
           model,
@@ -737,6 +756,7 @@ export class CodesplashLoop {
           continuation.active
             ? AbortSignal.any([abort.signal, AbortSignal.timeout(Math.max(1, continuation.remainingMs))])
             : abort.signal,
+          !continuation.active && executedRounds < this.#maxToolRounds,
         )
         if (continuation.active)
           continuation.chargeExcess(
@@ -748,6 +768,37 @@ export class CodesplashLoop {
           )
         if (response.kind === "error") {
           providerFailed = true
+          if (this.#early.size) {
+            this.#history.push({ role: "assistant", content: response.toolCalls })
+            this.#settleUnexecutedToolCalls(
+              response.toolCalls,
+              "Skipped: provider stream failed before dispatch.",
+            )
+          }
+          if (
+            !abort.signal.aborted &&
+            !continuation.active &&
+            !response.sawEvent &&
+            !this.#omitImages &&
+            this.#streamPolicy.stripImagesOn413 &&
+            response.error instanceof ProviderHttpError &&
+            response.error.status === 413 &&
+            this.#history.some((message) => message.content.some((block) => block.type === "image"))
+          ) {
+            this.#omitImages = true
+            this.#event(
+              "provider/imageRetry",
+              {},
+              {
+                kind: "warning",
+                payload: {
+                  message:
+                    "Retrying once with image blocks replaced by omission notices, as configured. Original attachments remain in session history.",
+                },
+              },
+            )
+            continue
+          }
           if (!continuation.active && !response.sawEvent && isContextOverflow(response.error)) {
             if (overflowRecovered || this.#contextOptions.autoCompact === false)
               throw new Error(
@@ -767,9 +818,20 @@ export class CodesplashLoop {
             continue
           }
           const fallback =
-            fallbackUsed || continuation.active ? undefined : this.#fallbackTarget(response, model)
+            fallbackUsed || continuation.active || abort.signal.aborted
+              ? undefined
+              : this.#fallbackTarget(response, model)
           if (fallback) {
             fallbackUsed = true
+            if (response.sawEvent) {
+              const notice = "[Superseded: incomplete provider output. A fallback response follows.]"
+              this.#finishStreamItems(
+                response.reasoningId,
+                response.reasoning ? notice : "",
+                response.messageId,
+                response.text ? notice : "",
+              )
+            }
             this.#event(
               "loop/fallback",
               {},
@@ -808,6 +870,25 @@ export class CodesplashLoop {
           return
         }
 
+        if (
+          this.#streamPolicy.retryEmptyResponse &&
+          !emptyRetried &&
+          !continuation.active &&
+          response.stopReason === "end_turn" &&
+          response.text.trim() === "" &&
+          response.toolCalls.length === 0
+        ) {
+          emptyRetried = true
+          this.#event(
+            "provider/emptyRetry",
+            {},
+            {
+              kind: "warning",
+              payload: { message: "Provider returned no answer; retrying once as configured." },
+            },
+          )
+          continue
+        }
         const content: ContentBlock[] = []
         // Thinking blocks stay at the head of the assistant message: Anthropic requires them
         // there, unmodified, when the message carries tool_use under extended thinking.
@@ -1055,13 +1136,17 @@ export class CodesplashLoop {
     if (calls.length === 0) return
     this.#history.push({
       role: "user",
-      content: calls.map(
-        (call): ToolResultBlock => ({
-          type: "tool_result",
-          toolCallId: call.id,
-          text: message,
-          isError: true,
-        }),
+      content: calls.flatMap((call): ContentBlock[] =>
+        this.#early.has(call.id)
+          ? [this.#early.get(call.id)!.result, ...this.#early.get(call.id)!.attachments]
+          : [
+              {
+                type: "tool_result",
+                toolCallId: call.id,
+                text: message,
+                isError: true,
+              },
+            ],
       ),
     })
   }
@@ -1177,6 +1262,7 @@ export class CodesplashLoop {
     model: ModelInfo,
     request: TurnRequest,
     signal: AbortSignal,
+    allowEarly = false,
   ): Promise<StreamResult> {
     const messageId = crypto.randomUUID()
     const reasoningId = crypto.randomUUID()
@@ -1186,13 +1272,16 @@ export class CodesplashLoop {
     const toolCalls: ToolCallBlock[] = []
     let stopReason: StopReason | undefined
     let sawEvent = false
+    let earlyBarrier = false
+    const guard = new StreamLoopGuard()
+    const seenIds = new Set<string>()
     /** Latest usage snapshot for THIS request; committed into the session totals on exit. */
     let requestUsage: ProviderUsage = {}
 
     const providerRequest: ProviderRequest = {
       model,
       system: request.system,
-      messages: [...this.#history],
+      messages: this.#omitImages ? withoutImages(this.#history) : [...this.#history],
       tools: this.#registry.specs().filter((t) => this.#modelToolAllowed?.(t.name) !== false),
       reasoningEffort: request.reasoningEffort,
     }
@@ -1207,6 +1296,7 @@ export class CodesplashLoop {
       for await (const event of provider.stream(providerRequest, signal)) {
         sawEvent = true
         if (event.type === "text_delta") {
+          if (this.#streamPolicy.detectStreamLoops) guard.push(event.text)
           text += event.text
           this.#event(
             "provider/textDelta",
@@ -1231,7 +1321,35 @@ export class CodesplashLoop {
         } else if (event.type === "redacted_thinking") {
           thinking.push({ type: "redacted_thinking", data: event.data })
         } else if (event.type === "tool_call") {
-          toolCalls.push({ type: "tool_call", id: event.id, name: event.name, input: event.input })
+          if (seenIds.has(event.id)) throw new Error("Provider repeated a tool call id")
+          seenIds.add(event.id)
+          const call: ToolCallBlock = {
+            type: "tool_call",
+            id: event.id,
+            name: event.name,
+            input: event.input,
+          }
+          toolCalls.push(call)
+          if (
+            this.#streamPolicy.incrementalTools &&
+            allowEarly &&
+            !earlyBarrier &&
+            !request.hasSteering?.()
+          ) {
+            const tool = this.#registry.get(call.name)
+            // Only reviewed local builtins; third-party readOnly annotations are not execution guarantees.
+            if (
+              tool &&
+              ["read_file", "glob", "grep", "read_tool_output"].includes(tool.name) &&
+              (!tool.source || tool.source.id === "builtin") &&
+              this.#canRunConcurrently(tool, call, signal)
+            ) {
+              const round = await this.#runToolRound([call], signal, request.hasSteering)
+              if (round.results[0])
+                this.#early.set(call.id, { result: round.results[0], attachments: round.attachments })
+              if (round.doomEnded) earlyBarrier = true
+            } else earlyBarrier = true
+          }
         } else if (event.type === "usage") {
           requestUsage = event.usage
           this.#emitUsage(event.usage, model)
@@ -1242,7 +1360,7 @@ export class CodesplashLoop {
       }
     } catch (error) {
       this.#finishStreamItems(reasoningId, reasoning, messageId, text)
-      return { kind: "error", error, sawEvent }
+      return { kind: "error", error, sawEvent, toolCalls, messageId, reasoningId, text, reasoning }
     } finally {
       // Adapters emit request-scoped snapshots; the last one folds into the session totals.
       this.#commitRequestUsage(requestUsage, model)
@@ -1258,7 +1376,13 @@ export class CodesplashLoop {
 
     this.#finishStreamItems(reasoningId, reasoning, messageId, text)
     if (stopReason === undefined) stopReason = signal.aborted ? "aborted" : "end_turn"
-    if (stopReason === "aborted") return { kind: "aborted", text }
+    if (stopReason === "aborted") {
+      if (this.#early.size) {
+        this.#history.push({ role: "assistant", content: toolCalls })
+        this.#settleUnexecutedToolCalls(toolCalls, "Skipped: provider stream interrupted.")
+      }
+      return { kind: "aborted", text }
+    }
     return { kind: "done", stopReason, text, thinking, toolCalls }
   }
 
@@ -1379,7 +1503,12 @@ export class CodesplashLoop {
       return 0
     }
     const cachedRate = pricing.cachedInputPerMTok ?? pricing.inputPerMTok / 10
-    return (input * pricing.inputPerMTok + cached * cachedRate + output * pricing.outputPerMTok) / 1_000_000
+    return (
+      ((input + (usage.cacheWriteInputTokens ?? 0) * 0.25) * pricing.inputPerMTok +
+        cached * cachedRate +
+        output * pricing.outputPerMTok) /
+      1_000_000
+    )
   }
 
   /**
@@ -1389,11 +1518,16 @@ export class CodesplashLoop {
    * session and is ignored from then on.
    */
   #fallbackTarget(
-    response: { error: unknown; sawEvent: boolean },
+    response: { error: unknown; sawEvent: boolean; toolCalls: ToolCallBlock[] },
     currentModel: ModelInfo,
   ): ResolvedModel | undefined {
-    if (response.sawEvent) return undefined
-    if (!(response.error instanceof ProviderHttpError) && !(response.error instanceof TypeError)) {
+    if (response.sawEvent && (!this.#streamPolicy.partialFallback || response.toolCalls.length > 0))
+      return undefined
+    if (
+      !(response.error instanceof ProviderHttpError) &&
+      !(response.error instanceof TypeError) &&
+      !(response.error instanceof RepeatedStreamError)
+    ) {
       return undefined
     }
     const fallbackId = this.#fallbackModel
@@ -1468,7 +1602,8 @@ export class CodesplashLoop {
     const attachments = new Map<number, ContentBlock[]>()
     const resolved = new Map<number, { call: ToolCallBlock; tool: HarnessTool }>()
     const mutated = new Set<string>()
-    const decisions = this.#doomLoopDecisions(calls)
+    const pendingDecisions = this.#doomLoopDecisions(calls.filter((call) => !this.#early.has(call.id)))
+    const decisions = calls.map((call) => (this.#early.has(call.id) ? "run" : pendingDecisions.shift()))
     let doomEnded = false
 
     const run = async (index: number): Promise<void> => {
@@ -1505,6 +1640,12 @@ export class CodesplashLoop {
     for (let index = 0; index < calls.length; index += 1) {
       const call = calls[index]
       if (!call) continue
+      const early = this.#early.get(call.id)
+      if (early) {
+        results[index] = early.result
+        attachments.set(index, early.attachments)
+        continue
+      }
       const decision = decisions[index] ?? "run"
       if (decision === "end") {
         // Calls the model ordered before the loop trigger still run; the trigger call and
@@ -2005,6 +2146,7 @@ export class CodesplashLoop {
           signal.throwIfAborted()
         }
         executionStarted = true
+        recordToolOperation(call.name, call.input)
         outcome =
           call.name === "skill" && this.#guardianRequest?.invokeSkill
             ? {

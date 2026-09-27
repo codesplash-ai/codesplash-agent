@@ -18,6 +18,7 @@ import type { AgentEvent } from "./core/events.ts"
 import { bytes as boundedFileBytes } from "./core/session/files.ts"
 import type { SessionRecorder } from "./core/session-recorder.ts"
 import type { SessionMeta, SessionStore } from "./core/sessions.ts"
+import { beginStartupPhase, measureStartup } from "./core/startup-timing.ts"
 import type { ProviderId, ReasoningEffort } from "./engines/codesplash/contracts.ts"
 import type { HeadlessOutputFormat, HeadlessSink } from "./engines/codesplash/runner.ts"
 import { validateEnvironments } from "./engines/codesplash/tools/environments.ts"
@@ -27,7 +28,8 @@ function printHelp() {
   process.stdout.write(`${brand.name}
 
 Usage:
-  codesplash [path] [--no-history] [--sandbox <mode>] [--full-access] [--permission-mode <mode>]
+  codesplash [path] [prompt words...] [-p TEXT] [--file PATH] [--resume ID_OR_TITLE|--search TEXT|--continue]
+             [--no-history] [--sandbox <mode>] [--full-access] [--permission-mode <mode>]
              [--allow <rule>] [--ask <rule>] [--deny <rule>] [--bypass-approvals] [-c <key=value>]
   codesplash login <anthropic|openai> [--keyring] [--api-key <key>]
   codesplash identity <login|logout> <provider>
@@ -35,6 +37,7 @@ Usage:
   codesplash fleet <status|refresh FILE --apply>
   codesplash features [list|announcements|set NAME on|off|default --apply]
   codesplash disk
+  codesplash relay --socket PRIVATE_SOCKET [--timeout-ms N] [--max-bytes N]
   codesplash key-proxy --config FILE
   codesplash wrap [--clipboard] -- CMD [ARGS...]
   codesplash isolate PROFILE.json -- COMMAND [ARGS...]
@@ -98,12 +101,13 @@ Commands:
   mcp            Manage native MCP servers, trust, connection checks and OAuth login
   shell-state    Capture, review and trust explicit shell definitions
   peer           Send data to or listen on an authenticated local peer mailbox
+  projection     Create or expand an explicit local Git sparse projection
   worktree       Create, inspect, apply and clean up owned Git worktrees
-  agents         List, show, create and enable reviewed native child definitions (alias: agent)
+  agents         List, draft, create and enable reviewed native child definitions (alias: agent)
   workflows      Create, review, enable and import saved native workflows
   automation     Run bounded goals/workflows; inspect or resume durable journals
   teams          Run finite native teams, inspect rosters and view optional tmux panes
-  scheduler      Review recurring prompts, inspect occurrences and run a finite local worker
+  scheduler      Review recurring prompts, inspect occurrences and run workers or install a user service
   hooks          Review native lifecycle handlers, trust and execution receipts
   plugin         Install, inspect and activate pinned plugins/marketplaces
   extensions     Review and trust native TS/JS extensions
@@ -343,7 +347,30 @@ export function parseAppArguments(args: string[]): { path?: string; options: App
 
   for (let index = 0; index < args.length; index++) {
     const argument = args[index] as string
-    if (argument === "--no-history") {
+    if (["-p", "--prompt", "--file", "--resume", "--search", "--path"].includes(argument.split("=")[0]!)) {
+      const flag = argument.split("=")[0]!,
+        value = argument.includes("=") ? argument.slice(flag.length + 1) : args[++index]
+      if (!value) throw new UsageError(`${flag} requires a value`)
+      options.launch ??= { files: [] }
+      const launch = options.launch
+      if (flag === "--file") launch.files.push(value)
+      else if (flag === "--path") {
+        if (path !== undefined) throw new UsageError("Project path was specified twice")
+        path = value
+      } else if (flag === "--resume") launch.resume = value
+      else if (flag === "--search") launch.search = value
+      else {
+        if (launch.prompt !== undefined) throw new UsageError("Prompt was specified twice")
+        launch.prompt = value
+      }
+    } else if (argument === "--continue") {
+      options.launch ??= { files: [] }
+      options.launch.continue = true
+    } else if (argument === "--") {
+      options.launch ??= { files: [] }
+      options.launch.prompt = args.slice(index + 1).join(" ")
+      break
+    } else if (argument === "--no-history") {
       options.noHistory = true
     } else if (argument === "--full-access") {
       options.fullAccess = true
@@ -386,10 +413,19 @@ export function parseAppArguments(args: string[]): { path?: string; options: App
     } else if (path === undefined) {
       path = argument
     } else {
-      throw new Error("Expected at most one project path")
+      options.launch ??= { files: [] }
+      const launch = options.launch
+      launch.prompt = launch.prompt ? `${launch.prompt} ${argument}` : argument
     }
   }
 
+  if (options.launch) {
+    const count = [options.launch.resume, options.launch.search, options.launch.continue].filter(
+      Boolean,
+    ).length
+    if (count > 1) throw new UsageError("Choose one of --resume, --search or --continue")
+    if (count && options.noHistory) throw new UsageError("--no-history cannot resume a session")
+  }
   return { path, options }
 }
 
@@ -544,6 +580,7 @@ function readSecretFromTty(prompt: string, stderr: HeadlessSink): Promise<string
 /* ------------------------------------- run subcommand ------------------------------------- */
 
 export type RunCommand = {
+  files?: string[]
   agent?: string
   inputFormat?: "text" | "stream-json"
   outputSchema?: string
@@ -604,6 +641,7 @@ export function parseRunArguments(
     RunCommand,
     "execution" | "inputFormat" | "outputSchema" | "outputLastMessage" | "agent"
   > = {}
+  const files: string[] = []
   let promptFlag: string | undefined
   let model: string | undefined
   let effort: ReasoningEffort | undefined
@@ -624,7 +662,12 @@ export function parseRunArguments(
 
   for (let index = 0; index < args.length; index++) {
     const argument = args[index] as string
-    if (
+    if (argument === "--file" || argument.startsWith("--file=")) {
+      const value = argument.includes("=") ? argument.slice(7) : args[++index]
+      if (!value || files.length >= 32)
+        throw new UsageError("--file requires a literal path; at most 32 attachments")
+      files.push(value)
+    } else if (
       [
         "--browser-origins",
         "--features",
@@ -777,6 +820,7 @@ export function parseRunArguments(
 
   return {
     ...executionOptions,
+    ...(files.length ? { files } : {}),
     path,
     prompt,
     model,
@@ -820,7 +864,11 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
   let prompt = command.prompt
   let inputs: AsyncIterable<string> | undefined
   if (command.inputFormat === "stream-json") {
-    if (prompt !== undefined || (overrides.stdinIsTty ?? process.stdin.isTTY === true))
+    if (
+      prompt !== undefined ||
+      command.files?.length ||
+      (overrides.stdinIsTty ?? process.stdin.isTTY === true)
+    )
       throw new UsageError("stream-json requires piped stdin and no prompt argument")
     const { ndjson } = await import("./server/transport.ts")
     const source = overrides.readStdinText
@@ -863,8 +911,10 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
   }
 
   const { applyStoredCredentials, hydrateKeyringCredentials } = await import("./engines/codesplash/auth.ts")
-  await hydrateKeyringCredentials(env)
-  applyStoredCredentials(env)
+  await measureStartup("startup.credentials", async () => {
+    await hydrateKeyringCredentials(env)
+    applyStoredCredentials(env)
+  })
 
   const { inspectProject } = await import("./core/preflight.ts")
   let requestedPath = command.path ?? process.cwd()
@@ -875,16 +925,18 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
       .catch(() => undefined)
     if (target?.effectiveProjectId) requestedPath = target.projectPath
   }
-  const project = await inspectProject(requestedPath)
+  const project = await measureStartup("startup.project", () => inspectProject(requestedPath))
 
   const { configDirectory, configFilePath, loadConfig } = await import("./core/config.ts")
-  const config = await loadConfig(configFilePath(configDirectory(env)), command.configOverrides, {
-    cwd: project.cwd,
-    env,
-    workspaceTrusted: command.trust || undefined,
-    profile: command.profile,
-    strict: command.strictConfig,
-  })
+  const config = await measureStartup("startup.configuration", () =>
+    loadConfig(configFilePath(configDirectory(env)), command.configOverrides, {
+      cwd: project.cwd,
+      env,
+      workspaceTrusted: command.trust || undefined,
+      profile: command.profile,
+      strict: command.strictConfig,
+    }),
+  )
 
   if (command.model !== undefined && !command.model.startsWith("ext_")) {
     // Validate against the static built-in catalog first (availability-agnostic, like always),
@@ -1022,7 +1074,14 @@ export async function runRunCommand(args: string[], overrides: RunCommandOverrid
   }
 
   const { runHeadless } = await import("./engines/codesplash/runner.ts")
+  const attachmentInput = (await import("./core/launch-input.ts")).launchInput(
+    project.cwd,
+    prompt,
+    command.files,
+  )
   const exitCode = await runHeadless({
+    images: attachmentInput?.images,
+    files: attachmentInput?.files,
     agent: command.agent,
     inputs,
     execution: command.execution,
@@ -1125,6 +1184,7 @@ async function main(): Promise<void> {
   const { installSignalHandlers } = await import("./core/lifecycle.ts")
   installSignalHandlers()
 
+  const finishArguments = beginStartupPhase("startup.arguments")
   let args = process.argv.slice(2)
   let requestedHardening = process.env.CODESPLASH_HARDEN === "1"
   while (args[0] === "--offline" || args[0] === "--harden") {
@@ -1132,9 +1192,12 @@ async function main(): Promise<void> {
     else requestedHardening = true
   }
   args = dispatchArguments(process.argv0, args)
+  finishArguments()
   let hardening: Awaited<ReturnType<typeof import("./core/hardening.ts").hardenProcess>> | undefined
   if (requestedHardening) {
-    hardening = await (await import("./core/hardening.ts")).hardenProcess()
+    hardening = await measureStartup("startup.hardening", async () =>
+      (await import("./core/hardening.ts")).hardenProcess(),
+    )
   }
   if (args[0] === "--build-info") {
     process.stdout.write(
@@ -1165,6 +1228,10 @@ async function main(): Promise<void> {
     process.exitCode = await (await import("./commands/disk.ts")).runDiskCommand(args.slice(1))
     return
   }
+  if (args[0] === "relay") {
+    process.exitCode = await (await import("./commands/relay.ts")).runRelayCommand(args.slice(1))
+    return
+  }
   if (args[0] === "key-proxy") {
     process.exitCode = await (await import("./commands/key-proxy.ts")).runKeyProxyCommand(args.slice(1))
     return
@@ -1181,7 +1248,9 @@ async function main(): Promise<void> {
     return
   }
   if (!args[0]?.startsWith("--internal-") && !args.includes("--doctor") && !args.includes("--version"))
-    (await import("./core/distribution/update.ts")).assertInstallationReady()
+    await measureStartup("startup.installation", async () =>
+      (await import("./core/distribution/update.ts")).assertInstallationReady(),
+    )
   if (
     !args.includes("--no-history") &&
     !args[0]?.startsWith("--internal-") &&
@@ -1284,6 +1353,10 @@ async function main(): Promise<void> {
   }
   if (args[0] === "peer") {
     process.exitCode = await (await import("./commands/peer.ts")).runPeerCommand(args.slice(1))
+    return
+  }
+  if (args[0] === "projection") {
+    process.exitCode = await (await import("./commands/projection.ts")).runProjectionCommand(args.slice(1))
     return
   }
   if (args[0] === "worktree") {
@@ -1443,14 +1516,33 @@ async function main(): Promise<void> {
 
   const { path, options } = parseAppArguments(args)
 
+  if (!process.stdin.isTTY) {
+    const { readLaunchPipe } = await import("./core/launch-input.ts")
+    const piped = await readLaunchPipe(process.stdin)
+    if (piped.trim()) {
+      options.launch ??= { files: [] }
+      const launch = options.launch
+      launch.prompt = [launch.prompt, piped].filter(Boolean).join("\n\n")
+    }
+    const { openSync } = await import("node:fs"),
+      { ReadStream } = await import("node:tty")
+    const terminal = new ReadStream(openSync(process.platform === "win32" ? "CONIN$" : "/dev/tty", "r"))
+    Object.defineProperty(process, "stdin", { value: terminal, configurable: true })
+    ;(await import("./core/lifecycle.ts")).registerCleanup(() => {
+      terminal.destroy()
+    })
+  }
+
   // Stored native-engine credentials feed the interactive session too (env vars still win).
   const { applyStoredCredentials, hydrateKeyringCredentials } = await import("./engines/codesplash/auth.ts")
-  await hydrateKeyringCredentials()
-  applyStoredCredentials()
+  await measureStartup("startup.credentials", async () => {
+    await hydrateKeyringCredentials()
+    applyStoredCredentials()
+  })
 
   const { inspectProject } = await import("./core/preflight.ts")
-  const project = await inspectProject(path ?? process.cwd())
-  const { runWelcome } = await import("./tui/run-welcome.tsx")
+  const project = await measureStartup("startup.project", () => inspectProject(path ?? process.cwd()))
+  const { runWelcome } = await measureStartup("startup.tui-import", () => import("./tui/run-welcome.tsx"))
   await runWelcome(project, options)
 }
 

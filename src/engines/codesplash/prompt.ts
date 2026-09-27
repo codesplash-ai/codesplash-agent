@@ -5,6 +5,7 @@ import { brand } from "../../core/distribution/brand.ts"
 import { registerChildProcess, type SessionPolicy } from "../../core/index.ts"
 import { shellDialect } from "../../core/platform.ts"
 import type { ProjectRulesFile, SystemPromptOptions } from "./contracts.ts"
+import { familyPrompt } from "./prompt-families.ts"
 
 /** Per-file cap for a single AGENTS.md/CLAUDE.md. */
 export const PROJECT_RULES_FILE_CAP_BYTES = 24 * 1024
@@ -75,11 +76,7 @@ export async function buildSystemPrompt(options: SystemPromptOptions): Promise<s
   ]
 
   if (options.permissionMode === "plan") sections.push(planModeSection())
-  sections.push(
-    options.model.protocol === "openai"
-      ? "For edits, use apply_patch when a patch expresses the change clearly; inspect the result and verify it."
-      : "Read the relevant files before editing; use precise edits and verify the changed behavior.",
-  )
+  sections.push(familyPrompt(options.model))
   if (options.personality === "concise")
     sections.push("Communication style: be concise; lead with the result and essential evidence.")
   if (options.personality === "explanatory")

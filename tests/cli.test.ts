@@ -160,7 +160,7 @@ describe("parseAppArguments", () => {
       "Use --full-access to run without a sandbox",
     )
     expect(() => parseAppArguments(["--frobnicate"])).toThrow("Unknown option --frobnicate")
-    expect(() => parseAppArguments(["a", "b"])).toThrow("Expected at most one project path")
+    expect(parseAppArguments(["a", "b"]).options.launch?.prompt).toBe("b")
   })
 })
 

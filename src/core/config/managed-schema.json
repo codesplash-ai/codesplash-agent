@@ -132,6 +132,21 @@
             },
             "compactionStrategy": {
               "enum": ["summary", "prune"]
+            },
+            "stripImagesOn413": {
+              "type": "boolean"
+            },
+            "partialFallback": {
+              "type": "boolean"
+            },
+            "detectStreamLoops": {
+              "type": "boolean"
+            },
+            "retryEmptyResponse": {
+              "type": "boolean"
+            },
+            "incrementalTools": {
+              "type": "boolean"
             }
           }
         },
@@ -204,6 +219,12 @@
                           "minimum": 0
                         }
                       }
+                    },
+                    "promptFamily": {
+                      "enum": ["generic", "openai", "anthropic", "gemini", "deepseek", "qwen", "llama"]
+                    },
+                    "promptCache": {
+                      "enum": ["off", "prefix", "conversation"]
                     }
                   }
                 },
@@ -273,6 +294,43 @@
                   },
                   "authMode": {
                     "enum": ["device"]
+                  }
+                }
+              },
+              "browserAuth": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["clientId", "authorizationUrl", "tokenUrl", "scope", "resourceOrigin"],
+                "properties": {
+                  "clientId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048
+                  },
+                  "authorizationUrl": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048
+                  },
+                  "tokenUrl": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048
+                  },
+                  "scope": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048
+                  },
+                  "resourceOrigin": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048
+                  },
+                  "revocationUrl": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048
                   }
                 }
               }
@@ -1004,13 +1062,29 @@
                         "additionalProperties": false
                       }
                     ]
+                  },
+                  "persona": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"
                   }
                 },
                 "required": ["description", "prompt"]
               }
+            },
+            "personas": {
+              "type": "object",
+              "maxProperties": 64,
+              "propertyNames": {
+                "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              }
             }
           },
-          "required": ["definitions"]
+          "required": []
         }
       },
       "additionalProperties": false

@@ -10,7 +10,7 @@ import { createAgentSession } from "../sdk/index.ts"
 import { UsageError } from "./usage-error.ts"
 
 const usage =
-  "codesplash scheduler list | create SPEC.json [--write] | import native|grok|claude SOURCE --budgets BUDGETS.json [--write] | enable ID --fingerprint HASH --apply --trust [--model ID] [--approve] | delete ID --apply | review OCCURRENCE --apply | worker --duration-ms N --apply --trust [--approve] [--model ID] | run ID --apply --trust [--approve] [--model ID]"
+  "codesplash scheduler service install|start|stop|status|uninstall | list | create SPEC.json [--write] | import native|grok|claude SOURCE --budgets BUDGETS.json [--write] | enable ID --fingerprint HASH --apply --trust [--model ID] [--approve] | delete ID --apply | review OCCURRENCE --apply | worker --duration-ms N --apply --trust [--approve] [--model ID] | run ID --apply --trust [--approve] [--model ID]"
 export function importSchedules(
   vendor: string,
   raw: unknown,
@@ -80,6 +80,8 @@ export async function runSchedulerCommand(
   args: string[],
   options: { cwd?: string; dataRoot?: string; configPath?: string; output?: (text: string) => void } = {},
 ) {
+  if (args[0] === "service")
+    return (await import("./scheduler-service.ts")).runSchedulerService(args.slice(1), options)
   const cwd = options.cwd ?? process.cwd(),
     output = options.output ?? ((text) => process.stdout.write(text)),
     root = options.dataRoot ?? dataDirectory()

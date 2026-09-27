@@ -419,6 +419,7 @@ type OverlayState =
   | { kind: "models"; state: ModelOverlayState }
 
 type CodexSessionAppProps = {
+  initialInput?: import("../core/engine.ts").UserInput
   config?: AgentConfig
   controller: SessionController
   palette: BrandPalette
@@ -434,6 +435,7 @@ type CodexSessionAppProps = {
 }
 
 export function CodexSessionApp({
+  initialInput,
   config,
   controller,
   palette: basePalette,
@@ -477,6 +479,12 @@ export function CodexSessionApp({
   const [state, setState] = useState(controller.state)
   const [project, setProject] = useState(initialProject)
   const [commandError, setCommandError] = useState<string>()
+  const launchSent = useRef(false)
+  useEffect(() => {
+    if (!initialInput || launchSent.current) return
+    launchSent.current = true
+    void controller.sendLaunchInput(initialInput).catch((error) => setCommandError(String(error)))
+  }, [controller, initialInput])
   const scrollback = useRef(new TranscriptScrollback())
   useEffect(() => {
     try {

@@ -14,6 +14,7 @@ export type AgentDefinition = {
   description: string
   prompt: string
   enabled: boolean
+  persona?: string
   model?: string
   mode: "plan" | "default" | "accept-edits"
   tools?: string[]
@@ -25,7 +26,7 @@ export type AgentDefinition = {
   budgetTokens: number
   timeoutMs: number
 }
-export type AgentsConfig = { definitions: Record<string, AgentDefinition> }
+export type AgentsConfig = { definitions: Record<string, AgentDefinition>; personas?: Record<string, string> }
 export type ResolvedAgent = AgentDefinition & {
   name: string
   id: string
@@ -34,6 +35,7 @@ export type ResolvedAgent = AgentDefinition & {
 }
 const keys = [
   "description",
+  "persona",
   "prompt",
   "enabled",
   "model",
@@ -88,6 +90,11 @@ export function validateAgentDefinition(raw: unknown): AgentDefinition {
     budgetTokens: number("budgetTokens", 65536, 1000, 1000000),
     timeoutMs: number("timeoutMs", 120000, 100, 3600000),
   }
+  if (raw.persona !== undefined) {
+    if (typeof raw.persona !== "string" || !RESOURCE_NAME.test(raw.persona))
+      throw new Error("Invalid named persona")
+    result.persona = raw.persona
+  }
   if (raw.model !== undefined) result.model = text("model", 256)
   for (const key of ["tools", "readRoots", "writeRoots", "allowedHosts"] as const)
     if (raw[key] !== undefined) result[key] = strings(raw[key], key)
@@ -108,17 +115,33 @@ export function validateAgentDefinition(raw: unknown): AgentDefinition {
 export function validateAgentsConfig(raw: unknown): AgentsConfig {
   if (
     !isTable(raw) ||
-    Object.keys(raw).some((k) => k !== "definitions") ||
-    !isTable(raw.definitions) ||
-    Object.keys(raw.definitions).length > 64
+    Object.keys(raw).some((k) => !["definitions", "personas"].includes(k)) ||
+    (raw.definitions !== undefined && !isTable(raw.definitions)) ||
+    Object.keys(raw.definitions ?? {}).length > 64
   )
     throw new Error("[agents]: expected at most 64 named definitions")
   const definitions: Record<string, AgentDefinition> = Object.create(null)
-  for (const [name, value] of Object.entries(raw.definitions)) {
+  for (const [name, value] of Object.entries(raw.definitions ?? {})) {
     if (!RESOURCE_NAME.test(name)) throw new Error("Invalid agent name")
     definitions[name] = validateAgentDefinition(value)
   }
-  return { definitions }
+  const personas: Record<string, string> = Object.create(null)
+  if (raw.personas !== undefined) {
+    if (!isTable(raw.personas) || Object.keys(raw.personas).length > 64)
+      throw new Error("Expected at most 64 named personas")
+    for (const [name, text] of Object.entries(raw.personas)) {
+      if (
+        !RESOURCE_NAME.test(name) ||
+        typeof text !== "string" ||
+        !text.trim() ||
+        Buffer.byteLength(text) > 4096 ||
+        text.includes("\0")
+      )
+        throw new Error("Invalid named persona text")
+      personas[name] = text
+    }
+  }
+  return { definitions, ...(raw.personas !== undefined ? { personas } : {}) }
 }
 export function parseAgentMarkdown(source: string, name: string): AgentDefinition {
   if (!RESOURCE_NAME.test(name) || Buffer.byteLength(source) > 65536)

@@ -20,6 +20,7 @@ import {
   type StopReason,
   type ToolSpec,
 } from "../contracts.ts"
+import { WireCacheTracker } from "./cache-diagnostics.ts"
 import { withRetries } from "./retry.ts"
 import { parseSseStream } from "./sse.ts"
 
@@ -93,6 +94,7 @@ export type AnthropicProviderOptions = {
 
 export class AnthropicProvider implements ProviderClient {
   readonly id = "anthropic" as const
+  readonly cacheTracker = new WireCacheTracker()
   readonly models: ModelInfo[]
 
   constructor(readonly options: AnthropicProviderOptions = {}) {
@@ -102,7 +104,7 @@ export class AnthropicProvider implements ProviderClient {
   async *stream(request: ProviderRequest, signal: AbortSignal): AsyncIterable<ProviderStreamEvent> {
     let response: Response
     try {
-      response = await connect(request, signal, this.options)
+      response = await connect(request, signal, this.options, this.cacheTracker)
     } catch (error) {
       if (signal.aborted) {
         yield { type: "done", stopReason: "aborted" }
@@ -110,7 +112,10 @@ export class AnthropicProvider implements ProviderClient {
       }
       throw error
     }
-    yield* mapMessagesStream(response, signal)
+    for await (const event of mapMessagesStream(response, signal)) {
+      if (event.type === "usage") this.cacheTracker.usage(event.usage.cachedInputTokens)
+      yield event
+    }
   }
 }
 
@@ -122,6 +127,7 @@ async function connect(
   request: ProviderRequest,
   signal: AbortSignal,
   options: AnthropicProviderOptions,
+  tracker: WireCacheTracker,
 ): Promise<Response> {
   const keyEnvVar = options.keyEnvVar ?? "ANTHROPIC_API_KEY"
   const apiKey = process.env[keyEnvVar]
@@ -138,7 +144,9 @@ async function connect(
   }
   if (apiKey) headers["x-api-key"] = apiKey
   if (apiKey) assertIdentityAllowed("api-key", undefined, options.authProvider ?? "anthropic")
-  const body = JSON.stringify(buildRequestBody(request))
+  const wire = buildRequestBody(request)
+  tracker.inspect(wire)
+  const body = JSON.stringify(wire)
   return withRetries(
     async () => {
       const response = await networkFetch(`${baseUrl}/v1/messages`, {
@@ -197,6 +205,14 @@ export function buildRequestBody(request: ProviderRequest): Record<string, unkno
   if (thinkingEnabled && request.reasoningEffort !== undefined) {
     body.thinking = { type: "enabled", budget_tokens: THINKING_BUDGETS[request.reasoningEffort] }
   }
+  const cache = request.model.promptCache
+  if (cache === "prefix" || cache === "conversation") {
+    if (request.system)
+      body.system = [{ type: "text", text: request.system, cache_control: { type: "ephemeral" } }]
+    const tools = body.tools as Array<Record<string, unknown>> | undefined
+    if (tools?.length) tools[tools.length - 1]!.cache_control = { type: "ephemeral" }
+    if (cache === "conversation") body.cache_control = { type: "ephemeral" }
+  }
   return body
 }
 
@@ -248,6 +264,7 @@ function toWireTool(tool: ToolSpec): WireBlock {
 /* ------------------------------- stream event mapping ------------------------------- */
 
 type WireUsage = {
+  cache_creation_input_tokens?: number
   input_tokens?: number
   output_tokens?: number
   cache_read_input_tokens?: number
@@ -405,7 +422,10 @@ function parseToolInput(open: { inputJson: string }): { ok: true; value: unknown
 
 function mergeUsage(target: ProviderUsage, wire: WireUsage | undefined): void {
   if (!wire) return
-  if (typeof wire.input_tokens === "number") target.inputTokens = wire.input_tokens
+  if (typeof wire.cache_creation_input_tokens === "number")
+    target.cacheWriteInputTokens = wire.cache_creation_input_tokens
+  if (typeof wire.input_tokens === "number")
+    target.inputTokens = wire.input_tokens + (target.cacheWriteInputTokens ?? 0)
   if (typeof wire.cache_read_input_tokens === "number")
     target.cachedInputTokens = wire.cache_read_input_tokens
   if (typeof wire.output_tokens === "number") target.outputTokens = wire.output_tokens

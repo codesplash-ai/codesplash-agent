@@ -3,7 +3,12 @@ import { join } from "node:path"
 import { configDirectory } from "../config.ts"
 import { atomic, digest, directory, json, lease } from "../session/files.ts"
 
-export type SecretStore = Pick<typeof Bun.secrets, "get" | "set" | "delete">
+/** Runtime-neutral SDK boundary; Bun.secrets structurally implements this contract. */
+export type SecretStore = {
+  get(options: { service: string; name: string }): Promise<string | null>
+  set(options: { service: string; name: string; value: string }): Promise<void>
+  delete(options: { service: string; name: string }): Promise<boolean>
+}
 export function secretAccount(name: string, root = configDirectory()): { service: string; name: string } {
   return { service: "codesplash-agent", name: `${digest(root).slice(0, 24)}:${name}` }
 }

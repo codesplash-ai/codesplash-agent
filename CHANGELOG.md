@@ -2,7 +2,28 @@
 
 ## Unreleased
 
-### Distribution and enterprise controls (M11, in progress)
+### Additional original-roadmap implementation
+
+- Add reusable prepared worktree pools, model-assisted disabled agent drafts and named persona defaults/overrides.
+- Add paginated child transcript inspection, owned launchd/systemd scheduler service lifecycle and bounded Unix stdio relay.
+- Include current feature guides in the offline docs site and render safe links, tables, lists and code.
+
+### Original roadmap carryovers after M11
+
+- Add seeded/piped interactive launch, scoped resume selectors and literal file/image arguments.
+- Add opt-in early read-tool dispatch, explicit 413 image adaptation, partial-output fallback,
+  exact streamed-loop detection and bounded empty-response recovery.
+- Add model-family prompts, Anthropic cache policy/write accounting and native wire-cache diagnosis.
+- Add exact semantic extension-tool versions, persistent reviewed workspace symbol/reference indexing,
+  named startup timing and content-free Git/indexing categories.
+- Add checksum-preserving ETag catalogs, inert metadata review artifacts, compatible discovery and
+  reviewed single-executable runtime installation.
+- Add registered-client browser PKCE with OS-store refresh/logout, search result domain filters,
+  explicit Git sparse projection, three installed Git workflow SDK examples and Windows sleep code.
+- Keep direct NFS/SMB live persistence, transparent kernel projection, Windows startup confinement/
+  ARM64 storage, live-account acceptance and publication explicitly open; see the roadmap status.
+
+### Distribution and enterprise controls (M11)
 
 - Add signed standalone update staging/recovery/rollback, fleet policy and version ceilings,
   feature preferences, live kill switches and bounded announcements.

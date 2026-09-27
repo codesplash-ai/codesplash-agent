@@ -14,10 +14,14 @@ import {
 import { join } from "node:path"
 import { dataDirectory } from "./config.ts"
 import type { AgentEvent } from "./events.ts"
+import { operationKinds } from "./operation-kinds.ts"
 import { atomic, bytes, component, directory, json } from "./session/files.ts"
+import { attachStartupTiming, startupKinds } from "./startup-timing.ts"
 import { Telemetry } from "./telemetry.ts"
 
 export const diagnosticKinds = [
+  ...operationKinds,
+  ...startupKinds,
   "app.start",
   "app.exit",
   "app.crash",
@@ -36,6 +40,13 @@ export const diagnosticKinds = [
   "provider.delta",
   "provider.end",
   "provider.retry",
+  "cache.break.model",
+  "cache.break.tools",
+  "cache.break.system",
+  "cache.break.parameters",
+  "cache.break.policy",
+  "cache.break.history",
+  "cache.hit-loss",
   "compaction.start",
   "compaction.end",
   "compaction.error",
@@ -284,10 +295,12 @@ export function startAppDiagnostics(root = diagnosticRoot()): () => void {
     }
     atomic(marker, JSON.stringify({ pid: process.pid, time: Date.now() }))
   } catch {}
+  const detachTiming = attachStartupTiming(({ kind, ...values }) => log.record(kind, values))
   log.record("app.start", { durationMs: performance.now() })
   const crash = () => log.record("app.crash")
   process.on("uncaughtExceptionMonitor", crash)
   const exit = (code: number) => {
+    detachTiming()
     log.record("app.exit", { status: code })
     if (code === 0)
       try {

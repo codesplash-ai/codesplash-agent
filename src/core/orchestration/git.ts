@@ -1,4 +1,6 @@
 import { spawn } from "bun"
+import { diagnosticContext } from "../diagnostics.ts"
+import { classifyInvocation } from "../operation-telemetry.ts"
 
 /** Fixed native Git plumbing; never consult credential helpers, hooks, pagers or fsmonitor. */
 export async function git(
@@ -7,6 +9,8 @@ export async function git(
   input?: Uint8Array | string,
   extra: Record<string, string> = {},
 ): Promise<Buffer> {
+  for (const kind of classifyInvocation(["git", ...args]))
+    diagnosticContext.getStore()?.record(kind, { count: 1 })
   const child = spawn(
     [
       "/usr/bin/git",

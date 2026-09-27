@@ -165,3 +165,10 @@ share reservations with child work, fail closed on missing pricing/usage, and di
 
 `19-advanced-tools.ts` opts into anchors and code mode, approves a bounded native code call,
 and verifies an anchored edit plus vendored search through the installed SDK.
+
+Examples 20–22 add a dirty tracked-file guard, opt-in exact-staged-content auto-commit on graceful
+exit, and a merge/conflict workflow. They use disposable repositories, literal Git argv, bounded
+execution and extension approvals. Auto-commit creates a commit from the approved tree and updates
+the exact branch with an expected-parent comparison; it never stages later user changes or pushes.
+The merge example leaves conflict choices to explicit review. `git-example-helpers.ts` is shared
+fixture infrastructure, not a separate runnable example. There are now 22 runnable examples.

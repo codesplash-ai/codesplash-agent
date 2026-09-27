@@ -186,3 +186,38 @@ test("worktree CLI honors configured denial before creating persistent work", as
     await f.close()
   }
 }, 30000)
+
+test("prepared pool assigns each clean slot once and refuses changed bases, policy and content", async () => {
+  const f = await fixture()
+  try {
+    const prepared = await f.store.fillPool(2)
+    expect(prepared.every((t) => t.pooled)).toBe(true)
+    expect((await f.store.fillPool(2)).map((t) => t.id)).toEqual(prepared.map((t) => t.id))
+    const first = await f.store.takePool()
+    expect(first.pooled).toBeUndefined()
+    expect(first.id).toBe(prepared[0]!.id)
+    await Bun.write(join(prepared[1]!.cwd, "file.txt"), "preserve me\n")
+    await expect(f.store.takePool()).rejects.toThrow("Dirty")
+    expect(await Bun.file(join(prepared[1]!.cwd, "file.txt")).text()).toBe("preserve me\n")
+    await Bun.write(join(prepared[1]!.cwd, "file.txt"), "base\n")
+    const claim = await f.store.claim(prepared[1]!.id)
+    try {
+      await expect(f.store.takePool()).rejects.toThrow("No prepared")
+    } finally {
+      claim.release()
+    }
+    await f.store.fillPool(1)
+    const denied = await WorktreeStore.open(f.repo, join(f.root, "data"), {
+      readable: () => false,
+      writable: () => false,
+    })
+    await expect(denied.takePool()).rejects.toThrow()
+    await Bun.write(join(f.repo, "new.txt"), "next")
+    await git(f.repo, ["add", "new.txt"])
+    await git(f.repo, ["commit", "-qm", "new base"])
+    await expect(f.store.takePool()).rejects.toThrow("No prepared")
+    expect((await f.store.fillPool(1))[0]?.base).not.toBe(first.base)
+  } finally {
+    await f.close()
+  }
+}, 30000)

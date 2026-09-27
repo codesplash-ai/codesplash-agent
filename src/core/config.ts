@@ -12,10 +12,13 @@ import { type PluginConfig, validatePlugins } from "../engines/codesplash/plugin
 import type { NativeSandboxConfig } from "../engines/codesplash/sandbox/contracts.ts"
 import { validateEnvironmentName } from "../engines/codesplash/sandbox/env-policy.ts"
 import { validateResourceLimits } from "../engines/codesplash/sandbox/resources.ts"
+import type { StreamPolicy } from "../engines/codesplash/stream-policy.ts"
 import type { ConfigResolution, ConfigResolutionOptions } from "./config/contracts.ts"
 import { checkConfigBounds } from "./config/source.ts"
 import { type TuiConfig, validateTuiConfig } from "./config/tui.ts"
+import { type BrowserIdentity, browserIdentity } from "./identity/browser.ts"
 import { type CloudIdentity, validateIdentity } from "./identity/credentials.ts"
+import { type ModelFamily, validModelFamily } from "./model-family.ts"
 import { type OrchestrationConfig, validateOrchestration } from "./orchestration/config.ts"
 import { redactSensitiveText } from "./redaction.ts"
 import { stringifyToml, type TomlTable } from "./toml.ts"
@@ -59,6 +62,8 @@ export type CustomModelPricing = {
 }
 
 export type CustomModelConfig = {
+  promptCache?: "off" | "prefix" | "conversation"
+  promptFamily?: ModelFamily
   id: string
   displayName: string
   contextWindow: number
@@ -70,6 +75,7 @@ export type CustomModelConfig = {
 
 /** One `[providers.<id>]` table, fully resolved (defaults applied). Keys never live here. */
 export type CustomProviderConfig = {
+  browserAuth?: BrowserIdentity
   identity?: CloudIdentity
   api?: "chat" | "responses"
   transport?: "sse" | "websocket"
@@ -93,7 +99,11 @@ export type AgentConfig = {
   history: { enabled: boolean }
   codex: { sandbox: ConfigSandboxMode; approvalPolicy: ApprovalPolicy }
   permissions: PermissionsConfig
-  codesplash: { fallbackModel?: string; autoCompact?: boolean; compactionStrategy?: "summary" | "prune" }
+  codesplash: StreamPolicy & {
+    fallbackModel?: string
+    autoCompact?: boolean
+    compactionStrategy?: "summary" | "prune"
+  }
   providers: CustomProviderConfig[]
   memory?: MemoryConfig
   context?: ContextInputConfig
@@ -371,6 +381,19 @@ export function validateConfig(parsed: unknown, path: string): AgentConfig {
   }
 
   if (isRecord(parsed.codesplash)) {
+    for (const key of [
+      "stripImagesOn413",
+      "partialFallback",
+      "detectStreamLoops",
+      "retryEmptyResponse",
+      "incrementalTools",
+    ] as const) {
+      const value = parsed.codesplash[key]
+      if (value !== undefined) {
+        if (typeof value === "boolean") config.codesplash[key] = value
+        else problems.push(`[codesplash].${key}: expected true or false`)
+      }
+    }
     const { autoCompact, compactionStrategy } = parsed.codesplash
     if (autoCompact !== undefined) {
       if (typeof autoCompact === "boolean") config.codesplash.autoCompact = autoCompact
@@ -703,6 +726,22 @@ function validateProvider(
       problems.push("Invalid provider identity or protocol")
     }
   }
+  let browserAuth: BrowserIdentity | undefined
+  if (table.browserAuth !== undefined) {
+    try {
+      browserAuth = browserIdentity(table.browserAuth)
+      if (
+        identity ||
+        protocol !== "openai" ||
+        !baseUrl ||
+        new URL(baseUrl).origin !== browserAuth.resourceOrigin
+      )
+        throw new Error("Identity mismatch")
+      requiresKey = false
+    } catch {
+      problems.push("Invalid browser identity or resource origin")
+    }
+  }
   const models = validateModels(id, table.models, keyEnvVar, seenModelIds, problems)
 
   if (problems.length > before || protocol === undefined || baseUrl === undefined || !models) {
@@ -717,6 +756,7 @@ function validateProvider(
     requiresKey,
     models,
     ...(identity ? { identity } : {}),
+    ...(browserAuth ? { browserAuth } : {}),
     ...(table.api ? { api: table.api as CustomProviderConfig["api"] } : {}),
     ...(table.transport ? { transport: table.transport as CustomProviderConfig["transport"] } : {}),
     ...(table.serviceTier ? { serviceTier: table.serviceTier as CustomProviderConfig["serviceTier"] } : {}),
@@ -804,6 +844,15 @@ function validateModels(
       sawDefault = true
     }
 
+    if (entry.promptCache !== undefined) {
+      if (["off", "prefix", "conversation"].includes(String(entry.promptCache)))
+        model.promptCache = entry.promptCache as CustomModelConfig["promptCache"]
+      else problems.push(`${label}.promptCache: expected off, prefix or conversation`)
+    }
+    if (entry.promptFamily !== undefined) {
+      if (validModelFamily(entry.promptFamily)) model.promptFamily = entry.promptFamily
+      else problems.push(`${label}.promptFamily: invalid model family`)
+    }
     if (entry.pricing !== undefined) {
       const pricing = validatePricing(label, entry.pricing, problems)
       if (pricing) model.pricing = pricing
@@ -917,6 +966,7 @@ function providerTable(provider: CustomProviderConfig): TomlTable {
     displayName: provider.displayName,
     keyEnvVar: provider.keyEnvVar,
     requiresKey: provider.requiresKey,
+    ...(provider.browserAuth ? { browserAuth: { ...provider.browserAuth } } : {}),
     ...(provider.identity ? { identity: { ...provider.identity } } : {}),
     ...(provider.api ? { api: provider.api } : {}),
     ...(provider.transport ? { transport: provider.transport } : {}),
@@ -929,6 +979,8 @@ function providerTable(provider: CustomProviderConfig): TomlTable {
         maxOutputTokens: model.maxOutputTokens,
         supportsReasoning: model.supportsReasoning,
         default: model.isDefault,
+        ...(model.promptCache ? { promptCache: model.promptCache } : {}),
+        ...(model.promptFamily ? { promptFamily: model.promptFamily } : {}),
       }
       if (model.pricing) {
         const pricing: TomlTable = {

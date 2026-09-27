@@ -1,3 +1,4 @@
+import { browserToken } from "../../core/identity/browser.ts"
 /**
  * Model catalog and provider registry for the CodeSplash engine. The registry composes the
  * built-in adapters with custom [providers.*] entries from the harness config; the thin static
@@ -179,6 +180,8 @@ function customRuntime(custom: CustomProviderConfig): ProviderRuntime {
     maxOutputTokens: model.maxOutputTokens,
     isDefault: model.isDefault,
     supportsReasoning: model.supportsReasoning,
+    ...(model.promptCache ? { promptCache: model.promptCache } : {}),
+    ...(model.promptFamily ? { promptFamily: model.promptFamily } : {}),
     ...(model.pricing ? { pricing: { ...model.pricing } } : {}),
   }))
   const factory = custom.identity
@@ -194,6 +197,7 @@ function customRuntime(custom: CustomProviderConfig): ProviderRuntime {
     requiresKey: custom.requiresKey,
     baseUrl: custom.baseUrl,
     client: factory({
+      ...(custom.browserAuth ? { token: () => browserToken(custom.browserAuth!) } : {}),
       authProvider: custom.id,
       baseUrl: custom.baseUrl,
       keyEnvVar: custom.keyEnvVar,

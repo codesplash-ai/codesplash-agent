@@ -3,6 +3,7 @@ import { networkFetch, networkSocketOptions } from "../../../core/network.ts"
 import { redactSensitiveText } from "../../../core/redaction.ts"
 import type { ProviderClient, ProviderRequest, ProviderStreamEvent } from "../contracts.ts"
 import { ProviderHttpError } from "../contracts.ts"
+import { WireCacheTracker } from "./cache-diagnostics.ts"
 import type { OpenAiProviderOptions } from "./openai.ts"
 import { withRetries } from "./retry.ts"
 import { parseSseStream } from "./sse.ts"
@@ -144,6 +145,7 @@ async function* websocketFrames(
   }
 }
 export function createResponsesProvider(options: OpenAiProviderOptions): ProviderClient {
+  const tracker = new WireCacheTracker()
   return {
     id: "openai",
     models: options.models ?? [],
@@ -155,6 +157,7 @@ export function createResponsesProvider(options: OpenAiProviderOptions): Provide
         },
         body = responsesBody(request, options)
       if (key && !options.token) assertIdentityAllowed("api-key", undefined, options.authProvider ?? "openai")
+      tracker.inspect({ ...body, transport: options.transport ?? "sse" })
       let finished = false,
         tools = 0
       try {
@@ -236,6 +239,7 @@ export function createResponsesProvider(options: OpenAiProviderOptions): Provide
                   throw new Error("Invalid Responses usage")
               if (u.input_tokens !== undefined && cached > u.input_tokens)
                 throw new Error("Invalid Responses cached usage")
+              tracker.usage(cached)
               yield {
                 type: "usage",
                 usage: {

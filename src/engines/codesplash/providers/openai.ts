@@ -19,6 +19,7 @@ import {
   type StopReason,
   type ToolSpec,
 } from "../contracts.ts"
+import { WireCacheTracker } from "./cache-diagnostics.ts"
 import { createResponsesProvider } from "./responses.ts"
 import { withRetries } from "./retry.ts"
 import { parseSseStream } from "./sse.ts"
@@ -69,11 +70,12 @@ export type OpenAiProviderOptions = {
 export function createOpenAiProvider(options: OpenAiProviderOptions = {}): ProviderClient {
   if (options.api === "responses")
     return createResponsesProvider({ ...options, models: options.models ?? openaiModels })
+  const tracker = new WireCacheTracker()
   return {
     id: "openai",
     models: options.models ?? openaiModels,
     stream(request: ProviderRequest, signal: AbortSignal): AsyncIterable<ProviderStreamEvent> {
-      return streamCompletion(request, signal, options)
+      return streamCompletion(request, signal, options, tracker)
     },
   }
 }
@@ -108,10 +110,11 @@ async function* streamCompletion(
   request: ProviderRequest,
   signal: AbortSignal,
   options: OpenAiProviderOptions,
+  tracker: WireCacheTracker,
 ): AsyncGenerator<ProviderStreamEvent> {
   let response: Response
   try {
-    response = await withRetries(() => connect(request, signal, options), { signal })
+    response = await withRetries(() => connect(request, signal, options, tracker), { signal })
   } catch (error) {
     if (signal.aborted) {
       yield { type: "done", stopReason: "aborted" }
@@ -148,7 +151,11 @@ async function* streamCompletion(
         stopReason ??= mapFinishReason(choice.finish_reason)
         yield* flushToolCalls(pending)
       }
-      if (chunk.usage) yield { type: "usage", usage: mapUsage(chunk.usage) }
+      if (chunk.usage) {
+        const usage = mapUsage(chunk.usage)
+        tracker.usage(usage.cachedInputTokens)
+        yield { type: "usage", usage }
+      }
     }
   } catch (error) {
     if (signal.aborted) {
@@ -174,6 +181,7 @@ async function connect(
   request: ProviderRequest,
   signal: AbortSignal,
   options: OpenAiProviderOptions,
+  tracker: WireCacheTracker,
 ): Promise<Response> {
   const key = options.token ? await options.token() : process.env[options.keyEnvVar ?? "OPENAI_API_KEY"]
   // The default provider requires its key; a custom provider is only constructed when available,
@@ -185,13 +193,15 @@ async function connect(
   const headers: Record<string, string> = { "content-type": "application/json" }
   if (key && !options.token) assertIdentityAllowed("api-key", undefined, options.authProvider ?? "openai")
   if (key) headers.authorization = `Bearer ${key}`
+  const body = {
+    ...buildBody(request),
+    ...(options.serviceTier ? { service_tier: options.serviceTier } : {}),
+  }
+  tracker.inspect(body)
   const response = await networkFetch(`${base.replace(/\/v1$/, "")}/v1/chat/completions`, {
     method: "POST",
     headers,
-    body: JSON.stringify({
-      ...buildBody(request),
-      ...(options.serviceTier ? { service_tier: options.serviceTier } : {}),
-    }),
+    body: JSON.stringify(body),
     signal,
   })
   if (!response.ok) {

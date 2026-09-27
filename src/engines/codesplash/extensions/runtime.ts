@@ -27,6 +27,7 @@ import type {
   HostExtension,
 } from "./api.ts"
 import { EXTENSION_ID, validateExtensions } from "./config.ts"
+import { toolVersion } from "./identifiers.ts"
 import { snapshotExtension } from "./loader.ts"
 import { type ExtensionReview, extensionTrusted, reviewExtension } from "./trust.ts"
 import { validateExtensionForm, validateExtensionSchema, validateExtensionTargets } from "./validation.ts"
@@ -246,7 +247,8 @@ export class ExtensionRuntime {
         state: owner.state,
         tools: owner.tools.map((tool) => ({
           name: tool.name,
-          id: tool.override ?? extensionToolId(owner.review.id, tool.name),
+          version: tool.version,
+          id: tool.override ?? extensionToolId(owner.review.id, tool.name, tool.version),
           override: tool.override,
         })),
         providers: owner.providers.map((provider) => this.#providerId(owner, provider)),
@@ -265,7 +267,8 @@ export class ExtensionRuntime {
       validators = new BoundedSchemaValidators()
     for (const owner of this.#owners)
       for (const definition of owner.tools) {
-        const name = definition.override ?? extensionToolId(owner.review.id, definition.name)
+        const name =
+          definition.override ?? extensionToolId(owner.review.id, definition.name, definition.version)
         const original = definition.override ? base.get(name) : undefined
         if (byName.has(name) || (!definition.override && base.get(name)))
           throw new Error(`Extension tool collision: ${name}`)
@@ -292,9 +295,12 @@ export class ExtensionRuntime {
         }
         const tool: HarnessTool = {
           name,
-          description: `[Extension ${owner.review.id}/${definition.name}] ${definition.description}`,
+          description: `[Extension ${owner.review.id}/${definition.name}${definition.version ? `@${definition.version}` : ""}] ${definition.description}`,
           inputSchema: structuredClone(definition.inputSchema),
-          source: { id: `${owner.review.source}/tool/${definition.name}`, generation: owner.generation },
+          source: {
+            id: `${owner.review.source}/tool/${definition.name}${definition.version ? `@${definition.version}` : ""}`,
+            generation: owner.generation,
+          },
           permissionName: extensionToolId(owner.review.id, definition.name),
           ...(original ? { permissionFloor: original } : {}),
           effects:
@@ -815,9 +821,12 @@ export class ExtensionRuntime {
           !tool.description ||
           tool.description.length > 4096 ||
           typeof tool.run !== "function" ||
-          owner.tools.some((item) => item.name === tool.name)
+          owner.tools.some((item) => item.name === tool.name && item.version === tool.version)
         )
           throw new Error("Invalid or duplicate extension tool")
+        if (tool.version !== undefined) toolVersion(tool.version)
+        if (tool.version !== undefined && tool.override)
+          throw new Error("Versioned tools cannot override a builtin name")
         validateExtensionSchema(tool.inputSchema)
         if (tool.inputSchema.type !== "object")
           throw new Error("Extension tool schema must describe an object")

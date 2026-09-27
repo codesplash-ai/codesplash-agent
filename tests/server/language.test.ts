@@ -54,11 +54,20 @@ test("reviewed LSP runs through the native sandbox, synchronizes versions and re
     const review = await reviewDescriptor(path)
     await expect(installDescriptor(services, path, "wrong")).rejects.toThrow("changed")
     await installDescriptor(services, path, review.fingerprint)
+    const graph = language.workspaceTool()
+    await graph.run({ operation: "index", paths: [file], references: true }, context)
+    expect(
+      JSON.parse((await graph.run({ operation: "query", query: "example" }, context)).text).results[0]
+        .references.length,
+    ).toBe(1)
     const hover = await language.query({ operation: "hover", path: file }, context)
     expect(JSON.stringify(hover)).toContain("const example = 1")
     const diagnostics = await language.query({ operation: "diagnostics", path: file }, context)
     expect(JSON.stringify(diagnostics)).toContain("fixture diagnostic")
     await writeFile(file, "const updated = 2\n")
+    const stale = JSON.parse((await graph.run({ operation: "query", query: "example" }, context)).text)
+    expect(stale.results).toEqual([])
+    expect(stale.stale).toBe(1)
     expect(JSON.stringify(await language.query({ operation: "hover", path: file }, context))).toContain(
       "updated",
     )

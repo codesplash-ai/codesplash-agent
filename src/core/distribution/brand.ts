@@ -33,6 +33,7 @@ export function dispatchArguments(argv0: string, args: string[]): string[] {
     [`${brand.command}-sandbox`]: "sandbox",
     [`${brand.command}-key-proxy`]: "key-proxy",
     [`${brand.command}-wrap`]: "wrap",
+    [`${brand.command}-relay`]: "relay",
   }
   return name && dispatch[name] ? [dispatch[name]!, ...args] : args
 }

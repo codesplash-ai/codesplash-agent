@@ -11,6 +11,8 @@ export async function runSessionCommand(
   const output = options.output ?? ((text) => process.stdout.write(text))
   const repository =
     options.repository ?? new SessionRepository(sessionsRootDirectory(dataDirectory(options.env)))
+  if (args[0] === "children")
+    return (await import("./session-children.ts")).sessionChildrenCommand(repository, args.slice(1), output)
   if (
     ["info", "recap", "outcomes"].includes(args[0] ?? "") ||
     (args[0] === "rename" && (args.includes("--auto") || args.includes("--generate")))

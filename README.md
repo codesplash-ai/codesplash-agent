@@ -1299,3 +1299,5 @@ Windows native isolation and real Windows/Termux acceptance remain open.
 Use `codesplash tools list`, `tools presets`, `tools doctor`, `models --help`, and
 `eval --help` to inspect the installed capabilities. New external tools require explicit feature
 selection and operator configuration; per-action approval remains in force.
+
+Current native-agent progress and remaining release decisions: [roadmap status](docs/agent-roadmap-status.md). New launcher, recovery, catalog and navigation controls are described in [agent feature controls](docs/agent-carryovers.md).

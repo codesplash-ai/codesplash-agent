@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process"
 import { writeSync } from "node:fs"
+import { win32 } from "node:path"
 import { useRenderer } from "@opentui/react"
 import { useEffect, useRef, useState } from "react"
 import type { TuiConfig } from "../core/config/tui.ts"
@@ -8,6 +9,21 @@ import { registerChildProcess, registerCleanup } from "../core/lifecycle.ts"
 import type { BrandPalette } from "./brand.ts"
 import { reviewTerminalIntegrations, runTerminalCommand, terminalText } from "./terminal-integrations.ts"
 
+export const windowsSleepScript = `
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class CodeSplashSleep {
+  [DllImport("kernel32.dll")] static extern uint SetThreadExecutionState(uint flags);
+  public static void Hold() {
+    if (SetThreadExecutionState(0x80000001) == 0) throw new Exception("Sleep inhibition failed");
+    try { Console.In.ReadToEnd(); } finally { SetThreadExecutionState(0x80000000); }
+  }
+}
+'@
+[CodeSplashSleep]::Hold()
+`
 export function inhibitSleep(onFailure: (message: string) => void = () => {}): {
   stop(): void
   diagnostic?: string
@@ -24,13 +40,33 @@ export function inhibitSleep(onFailure: (message: string) => void = () => {}): {
             "sleep",
             "infinity",
           ]
-        : []
+        : process.platform === "win32"
+          ? [
+              win32.join(
+                process.env.SystemRoot ?? "C:\\Windows",
+                "System32",
+                "WindowsPowerShell",
+                "v1.0",
+                "powershell.exe",
+              ),
+              "-NoLogo",
+              "-NoProfile",
+              "-NonInteractive",
+              "-EncodedCommand",
+              Buffer.from(windowsSleepScript, "utf16le").toString("base64"),
+            ]
+          : []
   if (!argv[0] || !Bun.which(argv[0]))
     return { stop() {}, diagnostic: "Sleep inhibition is unavailable on this host" }
-  const child = spawn(argv[0], argv.slice(1), { stdio: "ignore", detached: process.platform !== "win32" })
+  const child = spawn(argv[0], argv.slice(1), {
+    stdio: ["pipe", "ignore", "ignore"],
+    detached: process.platform !== "win32",
+    windowsHide: true,
+  })
   let stopped = false
   const stop = () => {
     stopped = true
+    child.stdin?.end()
     try {
       if (child.pid && process.platform !== "win32") process.kill(-child.pid, "SIGKILL")
       else child.kill("SIGKILL")

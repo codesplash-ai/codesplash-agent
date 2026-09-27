@@ -19,6 +19,7 @@ const SUBCOMMANDS = [
   "identity",
   "disk",
   "key-proxy",
+  "relay",
   "wrap",
   "models",
   "tools",

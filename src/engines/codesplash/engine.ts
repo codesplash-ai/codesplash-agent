@@ -1066,6 +1066,7 @@ class CodesplashSession implements EngineSession {
     )
     this.#language = new LanguageServices({
       root: join(options.trustDataDirectory ?? dataDirectory(), "language-services"),
+      persistent: options.nativeTranscriptPath !== undefined,
       cwd: options.cwd,
       sandbox,
       permissions,
@@ -1100,6 +1101,7 @@ class CodesplashSession implements EngineSession {
           options.execution?.features?.some((feature) => advancedFeatures[feature]?.includes(tool.name)),
         ),
         this.#language.tool(),
+        this.#language.workspaceTool(),
         ...this.#commands.tools(),
         ...this.#children.tools(),
         ...this.#automation.tools(),
@@ -1196,6 +1198,7 @@ class CodesplashSession implements EngineSession {
       events: this.#factory,
       emit: (event) => this.#push(event),
       fallbackModel: config.codesplash.fallbackModel,
+      streamPolicy: config.codesplash,
       context: config.codesplash,
       outputStore: outputs,
       permissions,

@@ -652,3 +652,69 @@ test("live identity reuse is refused and Ctrl+B releases a foreground child wait
     await f.close()
   }
 }, 30000)
+
+test("named persona defaults, explicit names and inline overrides survive admission and recorded resume", async () => {
+  const f = await fixture(),
+    prompts: string[] = []
+  await Bun.write(
+    f.options.config.path,
+    `[agents.personas]\nreviewer="REVIEW_PERSONA_CANARY"\nplanner="PLAN_PERSONA_CANARY"\n[agents.definitions.persona-test]\ndescription="Persona fixture"\nprompt="Complete the task"\nmode="plan"\npersona="reviewer"\n`,
+  )
+  const session = await createAgentSession({
+    ...f.options,
+    persistence: { root: join(f.root, "sessions") },
+    respond: async () => ({ choice: "accept" }),
+    providers: [
+      provider(async function* (request) {
+        prompts.push(request.system)
+        yield { type: "text_delta", text: "Complete" }
+        yield { type: "usage", usage: { inputTokens: 2, outputTokens: 1 } }
+        yield { type: "done", stopReason: "end_turn" }
+      }),
+    ],
+  })
+  try {
+    taskOf(await session.spawnAgent({ agent: "persona-test", prompt: "Default", yieldMs: 30000 }))
+    expect(prompts.at(-1)).toContain("REVIEW_PERSONA_CANARY")
+    taskOf(
+      await session.spawnAgent({
+        agent: "persona-test",
+        personaName: "planner",
+        prompt: "Named",
+        yieldMs: 30000,
+      }),
+    )
+    expect(prompts.at(-1)).toContain("PLAN_PERSONA_CANARY")
+    const inline = taskOf(
+      await session.spawnAgent({
+        agent: "persona-test",
+        persona: "INLINE_PERSONA_CANARY",
+        prompt: "Inline",
+        yieldMs: 30000,
+      }),
+    )
+    expect(prompts.at(-1)).toContain("INLINE_PERSONA_CANARY")
+    taskOf(
+      await session.spawnAgent({
+        agent: "persona-test",
+        resume: inline.task.id,
+        prompt: "Resume",
+        yieldMs: 30000,
+      }),
+    )
+    expect(prompts.at(-1)).toContain("INLINE_PERSONA_CANARY")
+    const denied = (await session.spawnAgent({
+      agent: "persona-test",
+      personaName: "unknown",
+      prompt: "No",
+    })) as { isError?: boolean }
+    expect(denied.isError).toBe(true)
+    const { recordedChildren, childTranscript } = await import("../../src/core/session/children.ts")
+    const children = recordedChildren(session.historyDirectory!, session.id)
+    expect(children).toHaveLength(3)
+    expect(childTranscript(children[0]!).rows.some((r) => r.text.includes("Complete"))).toBe(true)
+  } finally {
+    await session.close()
+    await f.close()
+  }
+}, 30000)

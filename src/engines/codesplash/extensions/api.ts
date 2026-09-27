@@ -14,6 +14,8 @@ export type ExtensionToolContext = {
   progress(text: string): void
 }
 export type ExtensionTool = {
+  /** Exact immutable semantic version; versions coexist under distinct wire ids and shared policy. */
+  version?: string
   name: string
   description: string
   inputSchema: Record<string, unknown>

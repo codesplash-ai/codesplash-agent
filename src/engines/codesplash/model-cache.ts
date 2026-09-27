@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs"
 import { join } from "node:path"
 import { dataDirectory } from "../../core/config.ts"
+import { validModelFamily } from "../../core/model-family.ts"
 import { networkFetch } from "../../core/network.ts"
 import { atomic, bytes, digest } from "../../core/session/files.ts"
 import type { ModelInfo } from "./contracts.ts"
@@ -30,7 +31,9 @@ export function modelManifest(raw: unknown): { version: 1; models: ModelInfo[] }
       m.maxOutputTokens < 16 ||
       m.maxOutputTokens > m.contextWindow ||
       typeof m.supportsReasoning !== "boolean" ||
-      typeof m.isDefault !== "boolean"
+      typeof m.isDefault !== "boolean" ||
+      (m.promptFamily !== undefined && !validModelFamily(m.promptFamily)) ||
+      (m.promptCache !== undefined && !["off", "prefix", "conversation"].includes(m.promptCache))
     )
       throw new Error("Invalid model catalog entry")
     if (
@@ -55,6 +58,8 @@ export function modelManifest(raw: unknown): { version: 1; models: ModelInfo[] }
       maxOutputTokens: m.maxOutputTokens,
       supportsReasoning: m.supportsReasoning,
       isDefault: m.isDefault,
+      ...(m.promptCache ? { promptCache: m.promptCache } : {}),
+      ...(m.promptFamily ? { promptFamily: m.promptFamily } : {}),
       ...(m.pricing
         ? {
             pricing: {
@@ -87,7 +92,34 @@ export async function refreshModels(url: string, sha256: string, path = modelCac
     !/^[a-f0-9]{64}$/.test(sha256)
   )
     throw new Error("Catalog refresh requires HTTPS and an exact reviewed SHA256")
-  const response = await networkFetch(target, { redirect: "error", signal: AbortSignal.timeout(15000) })
+  let previous: { source: string; sha256: string; url?: string; etag?: string } | undefined
+  if (existsSync(path)) {
+    try {
+      const record = JSON.parse(bytes(path, 8 * 1024 * 1024 + 4096).toString())
+      if (
+        record.sha256 === sha256 &&
+        record.url === target.href &&
+        typeof record.source === "string" &&
+        digest(record.source) === sha256 &&
+        typeof record.etag === "string" &&
+        record.etag.length <= 512 &&
+        !/[\r\n]/.test(record.etag)
+      )
+        previous = record
+    } catch {
+      /* Invalid cache cannot authorize a 304; exact reviewed replacement is still allowed. */
+    }
+  }
+  const response = await networkFetch(target, {
+    redirect: "error",
+    signal: AbortSignal.timeout(15000),
+    ...(previous ? { headers: { "if-none-match": previous.etag! } } : {}),
+  })
+  if (response.status === 304) {
+    await response.body?.cancel()
+    if (!previous) throw new Error("Catalog returned 304 without a verified matching cached source")
+    return { models: modelManifest(JSON.parse(previous.source)).models.length, sha256, notModified: true }
+  }
   if (!response.ok) {
     await response.body?.cancel()
     throw new Error(`Catalog HTTP ${response.status}`)
@@ -110,6 +142,16 @@ export async function refreshModels(url: string, sha256: string, path = modelCac
   const source = Buffer.concat(chunks).toString()
   if (digest(source) !== sha256) throw new Error("Catalog checksum mismatch")
   const manifest = modelManifest(JSON.parse(source))
-  atomic(path, JSON.stringify({ version: 1, source, sha256, fetched: new Date().toISOString() }))
+  atomic(
+    path,
+    JSON.stringify({
+      version: 1,
+      source,
+      sha256,
+      url: target.href,
+      etag: response.headers.get("etag")?.slice(0, 512),
+      fetched: new Date().toISOString(),
+    }),
+  )
   return { models: manifest.models.length, sha256 }
 }

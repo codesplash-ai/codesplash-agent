@@ -1,3 +1,5 @@
+> Current native-agent continuation: [status, remaining work and decisions](agent-roadmap-status.md). This older harness plan is historical.
+
 # AI Agent CLI Implementation Plan
 
 > Historical harness plan, August 2026. Its Milestones 0–5 are separate from the later

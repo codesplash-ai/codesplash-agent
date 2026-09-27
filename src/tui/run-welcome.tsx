@@ -16,7 +16,9 @@ import {
   type SessionMeta,
   type ThemePreference,
 } from "../core/index.ts"
+import { launchInput, selectLaunchSession } from "../core/launch-input.ts"
 import { SessionRepository } from "../core/session/repository.ts"
+import { measureStartup } from "../core/startup-timing.ts"
 import { launchClaude } from "./run-claude.ts"
 import { type HarnessEngineId, permissionLaunchOptionsFrom, runCodexSession } from "./run-codex-session.tsx"
 import { renderSessionPicker } from "./session-picker.tsx"
@@ -27,8 +29,14 @@ export async function runWelcome(
   options: AppOptions = defaultAppOptions,
 ): Promise<void> {
   const configOptions = { cwd: project.cwd, profile: options.profile, strict: options.strictConfig }
-  let config = await loadConfig(undefined, options.configOverrides, configOptions)
+  let config = await measureStartup("startup.configuration", () =>
+    loadConfig(undefined, options.configOverrides, configOptions),
+  )
 
+  if (options.launch) {
+    await openEngine("codesplash", project, config, options)
+    return
+  }
   while (true) {
     const action = await renderWelcome(config.theme, async (theme) => {
       config = { ...config, theme }
@@ -88,8 +96,15 @@ async function openEngine(
   const policy = effectiveSessionPolicy(config, options)
   const historyEnabled = effectiveHistoryEnabled(config, options)
 
-  let resume: SessionMeta | undefined
-  let skipPicker = !historyEnabled
+  const selection = options.launch
+  if (selection && (selection.resume || selection.search || selection.continue) && !historyEnabled)
+    throw new Error("Session resume requires history to be enabled")
+  let resume: SessionMeta | undefined =
+    selection && (selection.resume || selection.search || selection.continue)
+      ? await selectLaunchSession(project.cwd, selection)
+      : undefined
+  let initialInput = selection ? launchInput(project.cwd, selection.prompt, selection.files) : undefined
+  let skipPicker = !historyEnabled || !!selection
 
   while (true) {
     if (!skipPicker) {
@@ -115,9 +130,11 @@ async function openEngine(
       historyEnabled,
       sandboxExplicit: options.fullAccess || options.sandboxOverride !== undefined,
       resume,
+      initialInput,
       // Only codesplash has the first-party permission layer; codex keeps its own approvals.
       permissions: engine === "codesplash" ? permissionLaunchOptionsFrom(options) : undefined,
     })
+    initialInput = undefined
     if (outcome === "quit") return "quit"
     if (outcome === "new") {
       // Skip the picker and open a fresh session directly.
@@ -134,11 +151,13 @@ async function renderWelcome(
   themePreference: ThemePreference,
   onThemePreferenceChange: (theme: ThemePreference) => Promise<void>,
 ): Promise<WelcomeAction> {
-  const renderer = await createCliRenderer({
-    exitOnCtrlC: false,
-    targetFps: 60,
-    useKittyKeyboard: { disambiguate: true, alternateKeys: true },
-  })
+  const renderer = await measureStartup("startup.renderer", () =>
+    createCliRenderer({
+      exitOnCtrlC: false,
+      targetFps: 60,
+      useKittyKeyboard: { disambiguate: true, alternateKeys: true },
+    }),
+  )
   const detectedTheme: ThemeMode = (await renderer.waitForThemeMode(300)) ?? "dark"
   const unregisterRenderer = registerCleanup(() => renderer.destroy())
 

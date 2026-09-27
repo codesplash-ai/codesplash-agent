@@ -1,5 +1,6 @@
 import { openEngineSession } from "../core/session/open.ts"
 import { clearTransientState, usageSnapshotOf } from "../core/session/replay.ts"
+import { measureStartup } from "../core/startup-timing.ts"
 
 export { usageSnapshotOf } from "../core/session/replay.ts"
 
@@ -128,6 +129,7 @@ export function replayedPermissionMode(state: AppViewState): PermissionMode | un
 }
 
 export type CodexSessionRunOptions = {
+  initialInput?: import("../core/engine.ts").UserInput
   disableExtensions?: boolean
   /** Engine to run through the shared controller/recorder/session-screen flow. */
   engine?: HarnessEngineId
@@ -454,7 +456,9 @@ export async function runCodexSession(
           engine,
           permissionsUi,
           options.config ?? defaultConfig,
+          options.initialInput,
         )
+        options.initialInput = undefined
         if (action !== "reconnect") return action
       } finally {
         unregisterCleanup()
@@ -509,12 +513,15 @@ async function renderCodexSession(
   engine: HarnessEngineId,
   permissions: SessionPermissionsUi | undefined,
   config: AgentConfig,
+  initialInput?: import("../core/engine.ts").UserInput,
 ): Promise<CodexSessionAction> {
-  const renderer = await createCliRenderer({
-    exitOnCtrlC: false,
-    targetFps: 60,
-    useKittyKeyboard: codexKeyboardOptions,
-  })
+  const renderer = await measureStartup("startup.renderer", () =>
+    createCliRenderer({
+      exitOnCtrlC: false,
+      targetFps: 60,
+      useKittyKeyboard: codexKeyboardOptions,
+    }),
+  )
   const detectedTheme: ThemeMode = (await renderer.waitForThemeMode(300)) ?? "dark"
   const theme = themePreference === "system" ? detectedTheme : themePreference
   const unregisterRenderer = registerCleanup(() => renderer.destroy())
@@ -531,6 +538,7 @@ async function renderCodexSession(
 
     createRoot(renderer).render(
       <CodexSessionApp
+        initialInput={initialInput}
         config={config}
         controller={controller}
         palette={brandThemes[theme]}

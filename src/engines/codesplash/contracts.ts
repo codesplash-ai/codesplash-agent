@@ -5,6 +5,7 @@
  * modules can be built and tested in isolation.
  */
 import type { PermissionMode, SessionPolicy } from "../../core/index.ts"
+import type { ModelFamily } from "../../core/model-family.ts"
 
 /** Re-exported so permission modules can stay contracts-only importers. */
 export type { PermissionMode }
@@ -23,6 +24,8 @@ export type ModelPricing = {
 }
 
 export type ModelInfo = {
+  promptCache?: "off" | "prefix" | "conversation"
+  promptFamily?: ModelFamily
   id: string
   displayName: string
   /** Runtime provider id: "anthropic", "openai", or a custom [providers.*] config key. */
@@ -100,6 +103,8 @@ export type ProviderRequest = {
 }
 
 export type ProviderUsage = {
+  /** Included in inputTokens; 5-minute Anthropic writes add a 25% input-price surcharge. */
+  cacheWriteInputTokens?: number
   inputTokens?: number
   cachedInputTokens?: number
   outputTokens?: number

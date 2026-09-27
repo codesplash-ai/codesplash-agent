@@ -20,7 +20,10 @@
     "docs/integrations.md",
     "docs/observability-and-tools.md",
     "docs/distribution.md",
-    "docs/termux.md"
+    "docs/termux.md",
+    "docs/agent-roadmap-status.md",
+    "docs/storage-platform-boundaries.md",
+    "docs/agent-carryovers.md"
   ],
   "repository": {
     "type": "git",

@@ -9,7 +9,7 @@ import { discoverAgents, selectAgent } from "../engines/codesplash/orchestration
 import { UsageError } from "./usage-error.ts"
 
 const usage =
-  "codesplash agents list [--trust] | show NAME [--trust] | create NAME [--write] | enable NAME --fingerprint HASH [--trust]"
+  "codesplash agents list [--trust] | show NAME [--trust] | create NAME [--write] | generate NAME BRIEF --model ID [--write] | personas [--trust] | enable NAME --fingerprint HASH [--trust]"
 export async function runAgentsCommand(
   args: string[],
   options: {
@@ -27,6 +27,8 @@ export async function runAgentsCommand(
     return 0
   }
   const [action, ...rest] = args
+  if (action === "generate")
+    return (await import("./agent-draft.ts")).generateAgentCommand(rest, { ...options, cwd, output })
   if (action === "create") {
     const [name, flag, ...extra] = rest
     if (!name || !RESOURCE_NAME.test(name) || (flag && flag !== "--write") || extra.length)
@@ -44,7 +46,7 @@ export async function runAgentsCommand(
   const flags = rest.filter((arg) => arg !== "--trust"),
     [name] = flags
   if (
-    action === "list"
+    action === "list" || action === "personas"
       ? flags.length > 0
       : !name ||
         (action === "show"
@@ -57,6 +59,10 @@ export async function runAgentsCommand(
     workspaceTrusted: trusted,
     dataDir: options.dataDir,
   })
+  if (action === "personas") {
+    output(`${JSON.stringify(config.agents?.personas ?? {}, null, 2)}\n`)
+    return 0
+  }
   const catalog = await discoverAgents({
     cwd,
     trusted,

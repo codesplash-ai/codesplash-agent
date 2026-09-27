@@ -462,3 +462,41 @@ test("trusted tool cancellation exposes the original callback settlement fence",
     await f.close()
   }
 })
+
+test("semantic tool versions coexist with shared policy identity and distinct source bindings", async () => {
+  const f = await fixture(
+    `export default api => { for(const version of ['1.0.0','2.0.0']) api.registerTool({name:'format',version,description:'Version '+version,readOnly:true,inputSchema:{type:'object'},async run(){return {label:version,text:version}}}) }`,
+  )
+  try {
+    await f.trust()
+    const runtime = f.runtime()
+    await runtime.stage()
+    runtime.activate(f.host)
+    const registry = runtime.registry(createToolRegistry([])),
+      tools = registry.specs().map((s) => registry.get(s.name)!)
+    expect(tools.length).toBe(2)
+    expect(tools[0]!.name).not.toBe(tools[1]!.name)
+    expect(tools[0]!.permissionName).toBe(tools[1]!.permissionName)
+    expect(tools[0]!.source?.id).not.toBe(tools[1]!.source?.id)
+    expect(
+      new Set(
+        await Promise.all(
+          tools.map((t) =>
+            t
+              .run(
+                {},
+                {
+                  cwd: f.root,
+                  policy: { sandbox: "read-only", approvalPolicy: "on-request" },
+                  signal: AbortSignal.timeout(2000),
+                },
+              )
+              .then((r) => r.text),
+          ),
+        ),
+      ),
+    ).toEqual(new Set(["1.0.0", "2.0.0"]))
+  } finally {
+    await f.close()
+  }
+})

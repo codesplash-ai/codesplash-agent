@@ -28,6 +28,7 @@ const load = () => {
     source: diskSource,
     define: process.platform === "darwin" ? { CODESPLASH_DARWIN: "1" } : {},
     symbols: {
+      cs_fcntl: { args: ["i32", "i32", "i32"], returns: "i32" },
       cs_openat: { args: ["i32", "ptr", "i32", "i32"], returns: "i32" },
       cs_mkdirat: { args: ["i32", "ptr"], returns: "i32" },
       cs_renameat: { args: ["i32", "ptr", "ptr"], returns: "i32" },
@@ -42,6 +43,12 @@ function api() {
     throw new Error("Safe file restore is supported on macOS and Linux")
   library ??= load()
   return library.symbols
+}
+/** Fixed-arity native wrapper is required for variadic fcntl on Apple ARM64. */
+export function configureNonblockingDescriptor(fd: number): void {
+  const flags = checked(api().cs_fcntl(fd, 3, 0))
+  checked(api().cs_fcntl(fd, 4, flags | (process.platform === "darwin" ? 4 : 2048)))
+  checked(api().cs_fcntl(fd, 2, 1))
 }
 function name(value: string): Buffer {
   if (!value || value.includes("/") || value.includes("\0") || value === "." || value === "..")

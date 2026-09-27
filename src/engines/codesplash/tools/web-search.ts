@@ -1,4 +1,4 @@
-import { networkFetch } from "../../../core/network.ts"
+import { networkFetch, responseBytes } from "../../../core/network.ts"
 /**
  * `web_search` harness tool: queries the DuckDuckGo HTML endpoint and returns numbered results
  * with titles, URLs, and snippets behind an untrusted-content notice (result text is externally
@@ -13,6 +13,7 @@ import {
   type ToolOutcome,
   type ToolPermission,
 } from "../contracts.ts"
+import { searchDomainAllowed, searchDomains } from "./search-domains.ts"
 import { truncateToolOutput } from "./truncate.ts"
 
 export const DEFAULT_RESULT_COUNT = 5
@@ -31,6 +32,9 @@ const DESKTOP_USER_AGENT =
   "Chrome/126.0.0.0 Safari/537.36"
 
 export type WebSearchToolOptions = {
+  /** Operator ceilings; tool arguments can only narrow these lists. */
+  allowedDomains?: string[]
+  blockedDomains?: string[]
   /** Search endpoint override for tests; defaults to the DuckDuckGo HTML endpoint. */
   endpoint?: string
   fetchImpl?: typeof fetch
@@ -39,6 +43,8 @@ export type WebSearchToolOptions = {
 type WebSearchInput = {
   query: string
   count: number
+  allowedDomains?: string[]
+  blockedDomains?: string[]
 }
 
 function parseInput(input: unknown): WebSearchInput {
@@ -56,7 +62,13 @@ function parseInput(input: unknown): WebSearchInput {
     }
     resultCount = Math.min(count, MAX_RESULT_COUNT)
   }
-  return { query: query.trim(), count: resultCount }
+  const fields = input as Record<string, unknown>
+  return {
+    query: query.trim(),
+    count: resultCount,
+    allowedDomains: searchDomains(fields.allowed_domains),
+    blockedDomains: searchDomains(fields.blocked_domains),
+  }
 }
 
 /* ------------------------------- result parsing ------------------------------- */
@@ -172,6 +184,8 @@ export function parseSearchResults(html: string): SearchResult[] {
 /* ---------------------------------- the tool ---------------------------------- */
 
 export function createWebSearchTool(options: WebSearchToolOptions = {}): HarnessTool {
+  const operatorAllow = searchDomains(options.allowedDomains),
+    operatorDeny = searchDomains(options.blockedDomains)
   const endpoint = options.endpoint ?? DEFAULT_SEARCH_ENDPOINT
   const fetchImpl = options.fetchImpl ?? networkFetch
 
@@ -201,13 +215,22 @@ export function createWebSearchTool(options: WebSearchToolOptions = {}): Harness
     }
     let html: string
     try {
-      html = await response.text()
+      html = (await responseBytes(response, 2 * 1024 * 1024)).toString()
     } catch {
       return unavailable
     }
 
-    const results = parseSearchResults(html).slice(0, input.count)
-    if (results.length === 0) return unavailable
+    const results = parseSearchResults(html)
+      .filter(
+        (result) =>
+          searchDomainAllowed(result.url, operatorAllow, operatorDeny) &&
+          searchDomainAllowed(result.url, input.allowedDomains, input.blockedDomains),
+      )
+      .slice(0, input.count)
+    if (results.length === 0)
+      return input.allowedDomains || input.blockedDomains || operatorAllow || operatorDeny
+        ? { text: "No search results matched the domain policy.", label }
+        : unavailable
 
     const lines: string[] = []
     for (const [index, result] of results.entries()) {
@@ -228,6 +251,18 @@ export function createWebSearchTool(options: WebSearchToolOptions = {}): Harness
     inputSchema: {
       type: "object",
       properties: {
+        allowed_domains: {
+          type: "array",
+          maxItems: 64,
+          items: { type: "string", maxLength: 253 },
+          description: "Return only these domains and their subdomains; an empty list permits no results.",
+        },
+        blocked_domains: {
+          type: "array",
+          maxItems: 64,
+          items: { type: "string", maxLength: 253 },
+          description: "Exclude these domains and their subdomains; exclusions take precedence.",
+        },
         query: {
           type: "string",
           description: "The search query.",

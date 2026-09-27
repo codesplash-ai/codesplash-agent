@@ -17,6 +17,7 @@ export type SessionControllerOptions = {
 
 /** Owns the engine event stream and exposes only provider-independent view state to renderers. */
 export class SessionController {
+  #launchSubmitted = false
   readonly #listeners = new Set<SessionStateListener>()
   readonly #session: EngineSession
   readonly #onEvent: ((event: AgentEvent) => void) | undefined
@@ -56,6 +57,13 @@ export class SessionController {
 
   get inputQueue() {
     return this.#session.inputQueue
+  }
+  /** Launcher admission belongs to the session controller, so UI remounts cannot replay it. */
+  async sendLaunchInput(input: UserInput): Promise<void> {
+    if (this.#launchSubmitted) return
+    this.#launchSubmitted = true
+    this.start()
+    await this.send(input)
   }
   async send(input: UserInput): Promise<void> {
     await this.submit(input)

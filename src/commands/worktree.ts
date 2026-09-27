@@ -10,7 +10,7 @@ export async function runWorktreeCommand(
   options: { cwd?: string; dataDir?: string; configPath?: string; output?: (text: string) => void } = {},
 ) {
   const usage =
-    "codesplash worktree list | create [BASE] --apply --trust | preview ID | apply ID --fingerprint HASH --apply --trust | remove ID --apply --trust | gc --apply --trust | recover ID | rollback ID --apply --trust"
+    "codesplash worktree list | create [BASE] --apply --trust | pool-fill COUNT [--base REF] --apply --trust | pool-take [BASE] --apply --trust | preview ID | apply ID --fingerprint HASH --apply --trust | remove ID --apply --trust | gc --apply --trust | recover ID | rollback ID --apply --trust"
   const output = options.output ?? ((text) => process.stdout.write(text))
   if (args.length === 1 && ["-h", "--help"].includes(args[0]!)) {
     output(`${usage}\n`)
@@ -21,20 +21,33 @@ export async function runWorktreeCommand(
   const positional: string[] = []
   let apply = false,
     trust = false,
+    base: string | undefined,
     fingerprint: string | undefined
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!
     if (arg === "--apply") apply = true
     else if (arg === "--trust") trust = true
-    else if (arg === "--fingerprint") fingerprint = args[++i]
+    else if (arg === "--base") {
+      base = args[++i]
+      if (!base) throw new UsageError(usage)
+    } else if (arg === "--fingerprint") fingerprint = args[++i]
     else if (arg.startsWith("--")) throw new UsageError(usage)
     else positional.push(arg)
   }
   const [action = "list", value, ...extra] = positional
   if (extra.length || (["list", "gc"].includes(action) && value)) throw new UsageError(usage)
+  if (base && action !== "pool-fill") throw new UsageError(usage)
   const request = worktreeInput({
     action,
-    ...(action === "create" ? (value ? { base: value } : {}) : value ? { id: value } : {}),
+    ...(action === "pool-fill"
+      ? { count: Number(value), ...(base ? { base } : {}) }
+      : ["create", "pool-take"].includes(action)
+        ? value
+          ? { base: value }
+          : {}
+        : value
+          ? { id: value }
+          : {}),
     ...(fingerprint ? { fingerprint } : {}),
   })
   const mutable = !["list", "preview", "recover"].includes(action)

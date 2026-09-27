@@ -107,3 +107,53 @@ test("Esc-Esc previews retained branches; explicit rewind preserves descendants 
     setup.renderer.destroy()
   }
 })
+
+test("launcher seed is submitted once with literal attachments after controller event consumption starts", async () => {
+  const events = new AsyncQueue<AgentEvent>(),
+    sent: import("../../src/core/engine.ts").UserInput[] = []
+  const session: EngineSession = {
+    localSessionId: "launch",
+    capabilities: CODESPLASH_CAPABILITIES,
+    events,
+    async send(input) {
+      sent.push(input)
+    },
+    async interrupt() {},
+    async resolveRequest() {},
+    async close() {
+      events.end()
+    },
+  }
+  const controller = new SessionController(session),
+    setup = await createTestRenderer({ width: 100, height: 30 }),
+    root = createRoot(setup.renderer)
+  const input = { text: "seed", files: ["/project/a file.ts"], images: ["/project/image.png"] }
+  const render = () =>
+    root.render(
+      <CodexSessionApp
+        controller={controller}
+        engine="codesplash"
+        palette={brandThemes.dark}
+        project={{
+          cwd: "/project",
+          name: "project",
+          git: { available: false, repository: false, changedFiles: 0 },
+        }}
+        initialInput={input}
+        onAction={() => {}}
+      />,
+    )
+  try {
+    render()
+    await setup.flush()
+    await Bun.sleep(15)
+    await setup.flush()
+    render()
+    await setup.flush()
+    expect(sent).toEqual([input])
+  } finally {
+    root.unmount()
+    setup.renderer.destroy()
+    await controller.close()
+  }
+})

@@ -13,6 +13,8 @@ export function worktreeInput(raw: unknown): WorktreeRequest {
     list: ["action"],
     gc: ["action"],
     create: ["action", "base"],
+    "pool-fill": ["action", "base", "count"],
+    "pool-take": ["action", "base"],
     preview: ["action", "id"],
     remove: ["action", "id"],
     recover: ["action", "id"],
@@ -23,8 +25,18 @@ export function worktreeInput(raw: unknown): WorktreeRequest {
     throw new Error("Invalid worktree request")
   if ("id" in value && (typeof value.id !== "string" || !/^[a-f0-9-]{36}$/.test(value.id)))
     throw new Error("Worktree ID required")
-  if (value.action === "create" && value.base !== undefined && typeof value.base !== "string")
+  if (
+    ["create", "pool-fill", "pool-take"].includes(value.action) &&
+    "base" in value &&
+    value.base !== undefined &&
+    typeof value.base !== "string"
+  )
     throw new Error("Invalid base reference")
+  if (
+    value.action === "pool-fill" &&
+    (!Number.isSafeInteger(value.count) || value.count < 1 || value.count > 8)
+  )
+    throw new Error("Pool capacity must be between 1 and 8")
   return structuredClone(value)
 }
 export async function controlWorktree(store: WorktreeStore, request: WorktreeRequest) {
@@ -33,6 +45,10 @@ export async function controlWorktree(store: WorktreeStore, request: WorktreeReq
       return store.list()
     case "create":
       return store.create(request.base)
+    case "pool-fill":
+      return store.fillPool(request.count, request.base)
+    case "pool-take":
+      return store.takePool(request.base)
     case "preview":
       return store.preview(request.id)
     case "apply":
@@ -135,17 +151,29 @@ export class NativeWorktrees {
       name: "worktree",
       alwaysAsk: (raw) => !["list", "recover"].includes((raw as { action: string })?.action),
       description:
-        "Manage owned Git worktrees: list/create/preview/apply/remove/gc/recover/rollback. Apply requires an exact reviewed fingerprint. Conflicts preserve destination and recovery refs; dirty or active worktrees cannot be removed.",
+        "Manage owned Git worktrees: list/create/pool-fill/pool-take/preview/apply/remove/gc/recover/rollback. Apply requires an exact reviewed fingerprint. Conflicts preserve destination and recovery refs; dirty or active worktrees cannot be removed.",
       effects: "external",
       inputSchema: {
         type: "object",
         properties: {
           action: {
             type: "string",
-            enum: ["list", "create", "preview", "apply", "remove", "gc", "recover", "rollback"],
+            enum: [
+              "list",
+              "create",
+              "pool-fill",
+              "pool-take",
+              "preview",
+              "apply",
+              "remove",
+              "gc",
+              "recover",
+              "rollback",
+            ],
           },
           id: { type: "string" },
           base: { type: "string" },
+          count: { type: "integer", minimum: 1, maximum: 8 },
           fingerprint: { type: "string" },
         },
         required: ["action"],

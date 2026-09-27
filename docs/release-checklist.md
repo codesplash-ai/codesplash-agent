@@ -1,3 +1,5 @@
+> Post-M11 candidate: see [current feature and acceptance status](agent-roadmap-status.md). New compiled carryover and three Git SDK example gates are required; platform and live-account gates remain explicit.
+
 # Release checklist
 
 Run top to bottom for every tagged release. A release ships only when every box is checked.

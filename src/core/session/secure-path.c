@@ -26,3 +26,8 @@ int cs_linkat(int fd, const char *from, const char *to) {
 int cs_unlinkat(int fd, const char *name) {
   int result = unlinkat(fd, name, 0); return result < 0 ? -cs_errno : result;
 }
+/* fcntl has the same variadic ARM64 ABI requirement; the relay owns the supplied descriptor. */
+extern int fcntl(int, int, ...);
+int cs_fcntl(int fd, int command, int value) {
+  int result = fcntl(fd, command, value); return result < 0 ? -cs_errno : result;
+}

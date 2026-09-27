@@ -18,11 +18,13 @@ export type WorktreeRecord = {
   error?: string
   excluded: string[]
   metadata?: string
+  pooled?: boolean
   applyRows?: ApplyRow[]
 }
 export type WorktreeRequest =
   | { action: "list" | "gc" }
-  | { action: "create"; base?: string }
+  | { action: "create" | "pool-take"; base?: string }
+  | { action: "pool-fill"; base?: string; count: number }
   | { action: "preview" | "remove" | "recover" | "rollback"; id: string }
   | { action: "apply"; id: string; fingerprint: string }
 export type WorktreePolicy = { readable(path: string): boolean; writable(path: string): boolean }
@@ -82,6 +84,7 @@ export class WorktreeStore {
           !idPattern.test(t.id) ||
           t.cwd !== join(this.repo, ".codesplash-worktrees", t.id) ||
           !oidPattern.test(t.base) ||
+          (t.pooled !== undefined && typeof t.pooled !== "boolean") ||
           !Array.isArray(t.excluded) ||
           t.excluded.length > 5000 ||
           t.excluded.some((p) => typeof p !== "string" || snapshotPath(p) !== p) ||
@@ -218,57 +221,107 @@ export class WorktreeStore {
       return { mode: match[1]!, oid: match[2]!, path }
     })
   }
-  async create(base = "HEAD") {
+  async #create(journal: Journal, base: string, pooled = false) {
     if (!base || base.startsWith("-") || base.length > 256 || /[\s\0]/.test(base))
       throw new Error("Invalid worktree base reference")
+    if (journal.trees.length >= 16) throw new Error("Worktree count limit reached")
+    const commit = (await git(this.repo, ["rev-parse", "--verify", "--end-of-options", `${base}^{commit}`]))
+      .toString()
+      .trim()
+    if (!oidPattern.test(commit)) throw new Error("Invalid base commit")
+    const allFiles = await this.#files(commit)
+    const files = allFiles.filter((file) => this.#eligible(file.path)),
+      blobs: Buffer[] = []
+    let size = 0
+    for (const file of files) {
+      this.#checkDeadline()
+      const blob = await git(this.repo, ["cat-file", "blob", file.oid])
+      size += blob.length
+      if (size > 64 * 1024 * 1024) throw new Error("Worktree checkout exceeds 64 MiB")
+      blobs.push(blob)
+    }
+    const id = crypto.randomUUID(),
+      tree: WorktreeRecord = {
+        id,
+        cwd: join(this.repo, ".codesplash-worktrees", id),
+        base: commit,
+        status: "creating",
+        excluded: allFiles.filter((file) => !this.#eligible(file.path)).map((file) => file.path),
+        created: new Date().toISOString(),
+        ...(pooled ? { pooled: true } : {}),
+      }
+    directory(dirname(tree.cwd), true)
+    journal.trees.push(tree)
+    this.#write(journal)
+    await git(this.repo, ["update-ref", `refs/codesplash/worktrees/${id}/base`, commit])
+    await git(this.repo, ["worktree", "add", "--detach", "--no-checkout", "--lock", tree.cwd, commit])
+    for (let i = 0; i < files.length; i++) {
+      this.#checkDeadline()
+      const file = files[i]!,
+        path = join(tree.cwd, file.path)
+      directory(dirname(path), true)
+      writeFileSync(path, blobs[i]!, { flag: "wx", mode: file.mode === "100755" ? 0o755 : 0o644 })
+    }
+    // Populate only the index from the tree; raw hydration deliberately does not invoke filters.
+    await git(tree.cwd, ["read-tree", commit])
+    if (tree.excluded.length)
+      await git(
+        tree.cwd,
+        ["update-index", "--skip-worktree", "-z", "--stdin"],
+        tree.excluded.map((path) => `${path}\0`).join(""),
+      )
+    tree.metadata = digest(bytes(join(tree.cwd, ".git"), 4096))
+    tree.status = "ready"
+    this.#write(journal)
+    return structuredClone(tree)
+  }
+  async create(base = "HEAD") {
+    return this.#transaction((journal) => this.#create(journal, base))
+  }
+  /** Explicit warm capacity; failed preparation leaves the normal recoverable lifecycle journal. */
+  async fillPool(count: number, base = "HEAD") {
+    if (!Number.isSafeInteger(count) || count < 1 || count > 8)
+      throw new Error("Pool capacity must be between 1 and 8")
     return this.#transaction(async (journal) => {
-      if (journal.trees.length >= 16) throw new Error("Worktree count limit reached")
-      const commit = (await git(this.repo, ["rev-parse", "--verify", "--end-of-options", `${base}^{commit}`]))
-        .toString()
-        .trim()
-      if (!oidPattern.test(commit)) throw new Error("Invalid base commit")
-      const allFiles = await this.#files(commit)
-      const files = allFiles.filter((file) => this.#eligible(file.path)),
-        blobs: Buffer[] = []
-      let size = 0
-      for (const file of files) {
-        this.#checkDeadline()
-        const blob = await git(this.repo, ["cat-file", "blob", file.oid])
-        size += blob.length
-        if (size > 64 * 1024 * 1024) throw new Error("Worktree checkout exceeds 64 MiB")
-        blobs.push(blob)
-      }
-      const id = crypto.randomUUID(),
-        tree: WorktreeRecord = {
-          id,
-          cwd: join(this.repo, ".codesplash-worktrees", id),
-          base: commit,
-          status: "creating",
-          excluded: allFiles.filter((file) => !this.#eligible(file.path)).map((file) => file.path),
-          created: new Date().toISOString(),
-        }
-      directory(dirname(tree.cwd), true)
-      journal.trees.push(tree)
-      this.#write(journal)
-      await git(this.repo, ["update-ref", `refs/codesplash/worktrees/${id}/base`, commit])
-      await git(this.repo, ["worktree", "add", "--detach", "--no-checkout", "--lock", tree.cwd, commit])
-      for (let i = 0; i < files.length; i++) {
-        this.#checkDeadline()
-        const file = files[i]!,
-          path = join(tree.cwd, file.path)
-        directory(dirname(path), true)
-        writeFileSync(path, blobs[i]!, { flag: "wx", mode: file.mode === "100755" ? 0o755 : 0o644 })
-      }
-      // Populate only the index from the tree; raw hydration deliberately does not invoke filters.
-      await git(tree.cwd, ["read-tree", commit])
-      if (tree.excluded.length)
-        await git(
-          tree.cwd,
-          ["update-index", "--skip-worktree", "-z", "--stdin"],
-          tree.excluded.map((path) => `${path}\0`).join(""),
-        )
-      tree.metadata = digest(bytes(join(tree.cwd, ".git"), 4096))
-      tree.status = "ready"
+      const commit = await this.#base(base)
+      const available = journal.trees.filter((t) => t.pooled && t.base === commit && t.status === "ready")
+      for (const tree of available) await this.#poolReady(tree)
+      while (available.length < count) available.push(await this.#create(journal, commit, true))
+      return available.map((tree) => structuredClone(tree))
+    })
+  }
+  async #base(base: string) {
+    if (!base || base.startsWith("-") || base.length > 256 || /[\s\0]/.test(base))
+      throw new Error("Invalid worktree base reference")
+    const commit = (await git(this.repo, ["rev-parse", "--verify", "--end-of-options", `${base}^{commit}`]))
+      .toString()
+      .trim()
+    if (!oidPattern.test(commit)) throw new Error("Invalid base commit")
+    return commit
+  }
+  async #poolReady(tree: WorktreeRecord) {
+    const release = lease(join(this.root, tree.id), "active.lease")
+    try {
+      await this.#assertClean(tree)
+      if ((await git(tree.cwd, ["rev-parse", "HEAD"])).toString().trim() !== tree.base)
+        throw new Error("Pooled worktree HEAD changed")
+      const excluded = (await this.#files(tree.base))
+        .filter((f) => !this.#eligible(f.path))
+        .map((f) => f.path)
+      if (JSON.stringify(excluded) !== JSON.stringify(tree.excluded))
+        throw new Error("Pooled worktree read policy changed; retain and remove after review")
+    } finally {
+      release()
+    }
+  }
+  /** Assignment is persisted before returning, so concurrent consumers cannot receive the same tree. */
+  async takePool(base = "HEAD") {
+    return this.#transaction(async (journal) => {
+      const commit = await this.#base(base)
+      const tree = journal.trees.find((t) => t.pooled && t.base === commit && t.status === "ready")
+      if (!tree) throw new Error("No prepared worktree for this base; use pool-fill")
+      await this.#poolReady(tree)
+      delete tree.pooled
       this.#write(journal)
       return structuredClone(tree)
     })
@@ -279,8 +332,18 @@ export class WorktreeStore {
       if (tree.status !== "ready") throw new Error("Worktree has unfinished lifecycle work")
       await this.#identity(tree)
       this.#disk(tree.cwd)
+      if (tree.pooled) await this.#poolReady(tree)
       const release = lease(join(this.root, id), "active.lease")
-      return { tree: structuredClone(tree), release }
+      try {
+        if (tree.pooled) {
+          delete tree.pooled
+          this.#write(journal)
+        }
+        return { tree: structuredClone(tree), release }
+      } catch (error) {
+        release()
+        throw error
+      }
     })
   }
   async #snapshot(cwd: string, base: string, id: string) {
@@ -599,44 +662,45 @@ export class WorktreeStore {
         "Inspect source/recovery refs with git show or git diff. Resolve conflicts explicitly, then generate a fresh preview before apply. No effects are replayed.",
     }
   }
+  async #assertClean(tree: WorktreeRecord) {
+    await this.#identity(tree)
+    this.#disk(tree.cwd)
+    const ignored = await git(tree.cwd, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard"])
+    const hidden = (await git(tree.cwd, ["ls-files", "-v", "-z"]))
+      .toString()
+      .split("\0")
+      .filter(Boolean)
+      .some((line) => line[0] !== "H" && !(line[0] === "S" && tree.excluded.includes(line.slice(2))))
+    const existing = (await git(tree.cwd, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]))
+      .toString()
+      .split("\0")
+      .filter(Boolean)
+    if (
+      existing.some(
+        (path) =>
+          (!this.#eligible(path) || tree.excluded.includes(path)) &&
+          existsSync(join(tree.cwd, snapshotPath(path))),
+      )
+    )
+      throw new Error("Excluded worktree content prevents removal")
+    const currentHead = (await git(tree.cwd, ["rev-parse", "HEAD"])).toString().trim()
+    const snapshot = await this.#snapshot(tree.cwd, currentHead, tree.id)
+    const cleanTree = (await git(tree.cwd, ["rev-parse", `${currentHead}^{tree}`])).toString().trim()
+    const changes = (await git(tree.cwd, ["diff", "--name-only", "-z", currentHead, snapshot, "--"]))
+      .toString()
+      .split("\0")
+      .filter((path) => path && !tree.excluded.includes(path) && this.#eligible(path))
+    const indexTree = (await git(tree.cwd, ["write-tree"])).toString().trim()
+    if (ignored.length || hidden || changes.length || cleanTree !== indexTree)
+      throw new Error("Dirty, ignored or hidden-index worktree content prevents removal")
+  }
   async remove(id: string) {
     return this.#transaction(async (journal) => {
       const tree = this.#record(journal, id),
         release = lease(join(this.root, id), "active.lease")
       try {
         if (tree.status !== "ready") throw new Error("Worktree lifecycle needs recovery before removal")
-        await this.#identity(tree)
-        this.#disk(tree.cwd)
-        const ignored = await git(tree.cwd, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard"])
-        const hidden = (await git(tree.cwd, ["ls-files", "-v", "-z"]))
-          .toString()
-          .split("\0")
-          .filter(Boolean)
-          .some((line) => line[0] !== "H" && !(line[0] === "S" && tree.excluded.includes(line.slice(2))))
-        const existing = (
-          await git(tree.cwd, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
-        )
-          .toString()
-          .split("\0")
-          .filter(Boolean)
-        if (
-          existing.some(
-            (path) =>
-              (!this.#eligible(path) || tree.excluded.includes(path)) &&
-              existsSync(join(tree.cwd, snapshotPath(path))),
-          )
-        )
-          throw new Error("Excluded worktree content prevents removal")
-        const currentHead = (await git(tree.cwd, ["rev-parse", "HEAD"])).toString().trim()
-        const snapshot = await this.#snapshot(tree.cwd, currentHead, tree.id)
-        const cleanTree = (await git(tree.cwd, ["rev-parse", `${currentHead}^{tree}`])).toString().trim()
-        const changes = (await git(tree.cwd, ["diff", "--name-only", "-z", currentHead, snapshot, "--"]))
-          .toString()
-          .split("\0")
-          .filter((path) => path && !tree.excluded.includes(path) && this.#eligible(path))
-        const indexTree = (await git(tree.cwd, ["write-tree"])).toString().trim()
-        if (ignored.length || hidden || changes.length || cleanTree !== indexTree)
-          throw new Error("Dirty, ignored or hidden-index worktree content prevents removal")
+        await this.#assertClean(tree)
         const head = (await git(tree.cwd, ["rev-parse", "HEAD"])).toString().trim()
         await git(this.repo, ["update-ref", `refs/codesplash/worktrees/${id}/retained`, head])
         tree.status = "removing"

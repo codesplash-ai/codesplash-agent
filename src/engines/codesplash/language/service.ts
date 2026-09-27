@@ -9,6 +9,7 @@ import { NativeSandbox } from "../sandbox/runtime.ts"
 import { writeFileTool } from "../tools/write.ts"
 import { managedCommand, reviewedDescriptors } from "./managed.ts"
 import { LanguageRpc } from "./rpc.ts"
+import { indexSymbols, WorkspaceIndex } from "./workspace-index.ts"
 
 const within = (root: string, path: string) => {
   const r = relative(root, path)
@@ -70,6 +71,7 @@ export class LanguageServices {
       sandbox: SandboxRuntime
       permissions: PermissionRuntime
       trusted: boolean
+      persistent?: boolean
     },
   ) {}
   async file(path: string, tool = "lsp") {
@@ -252,6 +254,155 @@ export class LanguageServices {
       this.#symbols.set(key, { hash, result })
     }
     return result
+  }
+  #workspaceIndex?: WorkspaceIndex
+  workspaceTool(): HarnessTool {
+    return {
+      name: "workspace_symbols",
+      description:
+        "Incrementally index explicitly selected workspace files, or query a persistent cross-file symbol/reference graph. Reviewed language services and current read policy are required. Stale entries are excluded.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          operation: { enum: ["index", "query"] },
+          paths: { type: "array", maxItems: 64, items: { type: "string" } },
+          query: { type: "string", maxLength: 256 },
+          references: { type: "boolean" },
+        },
+        required: ["operation"],
+        additionalProperties: false,
+      },
+      isReadOnly: () => true,
+      permission: () => ({ kind: "none" }),
+      permissionTargets: (input) => ({
+        paths: Array.isArray((input as { paths?: unknown }).paths)
+          ? (input as { paths: string[] }).paths.map((path) => resolve(this.options.cwd, path))
+          : [this.options.cwd],
+      }),
+      run: async (input, context) => {
+        if (!this.options.trusted) throw new Error("Workspace indexing requires workspace trust")
+        const p = input as { operation: string; paths?: string[]; query?: string; references?: boolean }
+        if (
+          !["index", "query"].includes(p.operation) ||
+          (p.query !== undefined && (typeof p.query !== "string" || p.query.length > 256)) ||
+          (p.paths !== undefined &&
+            (!Array.isArray(p.paths) ||
+              p.paths.length > 64 ||
+              p.paths.some((path) => typeof path !== "string")))
+        )
+          throw new Error("Invalid workspace index request")
+        const descriptors = digest(
+          JSON.stringify(
+            (await reviewedDescriptors(this.options.root)).map((item) => item.fingerprint).sort(),
+          ),
+        )
+        this.#workspaceIndex ??= new WorkspaceIndex(
+          this.options.root,
+          this.options.cwd,
+          this.options.persistent === true,
+        )
+        const index = this.#workspaceIndex
+        if (p.operation === "index") {
+          if (!p.paths?.length) throw new Error("Index requires explicit paths (at most 64 per request)")
+          const changes: Parameters<WorkspaceIndex["update"]>[0] = {}
+          const previous = index.read()
+          for (const path of p.paths) {
+            context.signal.throwIfAborted()
+            const file = await this.file(path, "workspace_symbols"),
+              hash = digest(file.text)
+            if (
+              this.options.permissions.decide("workspace_symbols", { paths: [file.path] }, true).kind ===
+              "deny"
+            )
+              throw new Error("Workspace index denied by policy")
+            const cached = previous.files[file.path]
+            if (!p.references && cached?.hash === hash && cached.descriptors === descriptors) continue
+            const symbols = indexSymbols(await this.query({ path: file.path, operation: "symbols" }, context))
+            if (p.references)
+              for (const symbol of symbols.slice(0, 32)) {
+                context.signal.throwIfAborted()
+                const refs = await this.query(
+                  { path: file.path, operation: "references", ...symbol.position },
+                  context,
+                )
+                if (Array.isArray(refs)) symbol.references = refs.slice(0, 256)
+              }
+            if (digest((await this.file(path, "workspace_symbols")).text) !== hash)
+              throw new Error("File changed during workspace indexing")
+            changes[file.path] = { hash, descriptors, symbols }
+          }
+          context.signal.throwIfAborted()
+          index.update(changes)
+          return {
+            label: "Workspace index",
+            text: JSON.stringify({
+              indexed: Object.keys(changes).length,
+              persistent: this.options.persistent === true,
+            }),
+          }
+        }
+        const results: unknown[] = []
+        let stale = 0
+        const snapshot = index.read()
+        for (const [path, entry] of Object.entries(snapshot.files)) {
+          context.signal.throwIfAborted()
+          try {
+            const file = await this.file(path, "workspace_symbols")
+            if (
+              entry.descriptors !== descriptors ||
+              entry.hash !== digest(file.text) ||
+              this.options.permissions.decide("workspace_symbols", { paths: [file.path] }, true).kind ===
+                "deny"
+            ) {
+              stale++
+              continue
+            }
+            for (const symbol of entry.symbols)
+              if (!p.query || symbol.name.toLowerCase().includes(p.query.toLowerCase())) {
+                // References are locations supplied by an untrusted server: return only readable, indexed, unchanged targets.
+                const references: unknown[] = []
+                for (const ref of symbol.references ?? []) {
+                  try {
+                    const uri = (ref as { uri?: string }).uri
+                    if (!uri || !uri.startsWith("file:")) continue
+                    const target = await this.file(
+                      (await import("node:url")).fileURLToPath(uri),
+                      "workspace_symbols",
+                    )
+                    const saved = snapshot.files[target.path]
+                    if (
+                      saved?.hash === digest(target.text) &&
+                      saved.descriptors === descriptors &&
+                      this.options.permissions.decide("workspace_symbols", { paths: [target.path] }, true)
+                        .kind !== "deny"
+                    )
+                      references.push(ref)
+                  } catch {}
+                }
+                results.push({
+                  path,
+                  name: symbol.name,
+                  position: symbol.position,
+                  kind: symbol.kind,
+                  references,
+                })
+                if (results.length >= 200) break
+              }
+          } catch {
+            stale++
+          }
+          if (results.length >= 200) break
+        }
+        return {
+          label: "Workspace symbols",
+          text: JSON.stringify({
+            results,
+            stale,
+            note: "Only unchanged readable indexed files are returned; index changed/new paths to refresh.",
+          }).slice(0, 60000),
+        }
+      },
+    }
   }
   tool(): HarnessTool {
     return {

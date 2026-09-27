@@ -49,6 +49,8 @@ export type HeadlessRecorder = Pick<SessionRecorder, "record" | "recordNativeSes
 export const DEFAULT_MAX_TURNS = 40
 
 export type HeadlessRunOptions = {
+  files?: string[]
+  images?: string[]
   resuming?: boolean
   disableExtensions?: boolean
   sessionState?: import("../../core/session/control.ts").SessionStateAccess
@@ -223,7 +225,11 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<number> 
       const inputs = options.inputs?.[Symbol.asyncIterator]()
       const first = inputs ? await nextInput(inputs) : { done: false, value: options.prompt }
       if (first.done) throw new Error("Stream input contained no prompts")
-      await session.send({ text: first.value })
+      await session.send({
+        text: first.value,
+        ...(options.files?.length ? { files: options.files } : {}),
+        ...(options.images?.length ? { images: options.images } : {}),
+      })
       // A SIGINT during send() lands before the engine's turn exists, so interrupt() was a no-op;
       // re-issue it now that the turn has started instead of silently running the turn out.
       if (interrupted) onSigint()

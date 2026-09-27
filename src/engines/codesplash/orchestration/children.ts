@@ -28,6 +28,7 @@ export type SpawnAgentInput = {
   directive?: string
   prompt: string
   persona?: string
+  personaName?: string
   resume?: string
   reviewUncertain?: boolean
   background?: boolean
@@ -46,6 +47,7 @@ export type ChildIdentity = {
   agent: string
   fingerprint: string
   persona: string
+  personaName?: string
   model: string
   cwd: string
   config: string
@@ -112,6 +114,7 @@ function inputOf(input: unknown): SpawnAgentInput {
           "agent",
           "prompt",
           "persona",
+          "personaName",
           "resume",
           "reviewUncertain",
           "background",
@@ -134,6 +137,13 @@ function inputOf(input: unknown): SpawnAgentInput {
     (typeof v.persona !== "string" || Buffer.byteLength(v.persona) > 4096 || v.persona.includes("\0"))
   )
     throw new Error("Invalid agent persona")
+  if (
+    v.personaName !== undefined &&
+    (typeof v.personaName !== "string" || !/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(v.personaName))
+  )
+    throw new Error("Invalid named persona")
+  if (v.persona !== undefined && v.personaName !== undefined)
+    throw new Error("Select inline or named persona, not both")
   if (v.resume !== undefined && (typeof v.resume !== "string" || !/^[a-f0-9-]{36}$/.test(v.resume)))
     throw new Error("Invalid child resume identity")
   for (const key of ["reviewUncertain", "background"] as const)
@@ -257,6 +267,9 @@ export class NativeChildren {
           [r.identity.fingerprint, r.identity.config, r.identity.profile].some(
             (hash) => typeof hash !== "string" || !/^[a-f0-9]{64}$/.test(hash),
           ) ||
+          (r.identity.personaName !== undefined &&
+            (typeof r.identity.personaName !== "string" ||
+              !/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(r.identity.personaName))) ||
           [r.identity.agent, r.identity.model, r.identity.cwd, r.identity.persona].some(
             (text) => typeof text !== "string" || text.length > 4096 || text.includes("\0"),
           ),
@@ -345,7 +358,17 @@ export class NativeChildren {
     const worktreeId = input.worktree ?? prior?.identity.worktree
     const worktree = worktreeId ? await this.host.worktrees.select(worktreeId) : undefined
     const team = membership?.team ?? prior?.identity.team ?? this.host.team?.()
+    const personaName =
+      input.persona !== undefined
+        ? undefined
+        : (input.personaName ?? (prior ? prior.identity.personaName : definition.persona))
+    const persona =
+      personaName !== undefined
+        ? configuration.agents?.personas?.[personaName]
+        : (input.persona ?? prior?.identity.persona ?? "")
+    if (persona === undefined) throw new Error("Unknown named persona; inspect agents personas")
     const identity: ChildIdentity = {
+      ...(personaName ? { personaName } : {}),
       ...(team ? { team, member: membership?.member ?? prior?.identity.member ?? crypto.randomUUID() } : {}),
       ...(worktreeId ? { worktree: worktreeId } : {}),
       ...(fork
@@ -362,7 +385,7 @@ export class NativeChildren {
       root: this.host.root,
       agent: definition.id,
       fingerprint: definition.fingerprint,
-      persona: input.persona ?? prior?.identity.persona ?? "",
+      persona,
       model: definition.model ?? prior?.identity.model ?? this.host.model(),
       cwd: worktree?.cwd ?? this.host.cwd,
       config: configurationIdentity(configuration),
@@ -690,6 +713,7 @@ export class NativeChildren {
         directive: { type: "string", maxLength: 4096 },
         prompt: { type: "string", maxLength: 49152 },
         persona: { type: "string", maxLength: 4096 },
+        personaName: { type: "string", maxLength: 64 },
         resume: { type: "string", maxLength: 36 },
         reviewUncertain: { type: "boolean" },
         background: { type: "boolean" },

@@ -5,6 +5,7 @@ import type { AgentConfig, ConfigSandboxMode, PermissionMode } from "./config.ts
 import type { SessionPolicy } from "./engine.ts"
 
 export type AppOptions = {
+  launch?: { prompt?: string; files: string[]; resume?: string; search?: string; continue?: boolean }
   /** `--no-history`: do not create or write any session files for this run. */
   noHistory: boolean
   /** `--sandbox <mode>`: overrides `[codex].sandbox` from config. */
