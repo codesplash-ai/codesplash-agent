@@ -67,18 +67,31 @@ try {
   await writeFile(
     join(extension, "entry.ts"),
     `export default api => {
-    let stage=0,id;
+    let stage=0,id,deadline,call=0;
     api.registerProvider({name:'local',displayName:'Tasks',protocol:'openai',models:[{id:'model',displayName:'Tasks',contextWindow:32768,maxOutputTokens:1024,isDefault:true,supportsReasoning:false}],async *stream(request){
       const results=request.messages.flatMap(m=>m.content).filter(b=>b.type==='tool_result');
       const last=results.at(-1); if(last?.isError) throw new Error(last.text);
       let name,input;
       if(stage===0){name='exec_command';input={command:'cat',readOnly:true,background:true};stage=1}
-      else if(stage===1){id=JSON.parse(last.text).task.id;name='task_wait';input={ids:[id],timeoutMs:1000};stage=2}
-      else if(stage===2){name='write_stdin';input={id,text:'COMPILED_TASK_INPUT\\n'};stage=3}
-      else if(stage===3){name='task_kill';input={id};stage=4}
-      else if(stage===4){name='task_wait';input={ids:[id],all:true,timeoutMs:3000};stage=5}
+      else if(stage===1){id=JSON.parse(last.text).task.id;deadline=Date.now()+15000;name='task_wait';input={ids:[id],timeoutMs:1000};stage=2}
+      else if(stage===2){name='task_output';input={id};stage=3}
+      else if(stage===3){
+        const page=JSON.parse(last.text);
+        if(!page.terminalReady){
+          if(Date.now()>=deadline || !['queued','running'].includes(page.task.status)) throw new Error('Terminal did not become ready: '+last.text);
+          await new Promise(resolve=>setTimeout(resolve,250));name='task_output';input={id};
+        }else{name='write_stdin';input={id,text:'COMPILED_TASK_INPUT\\n'};stage=4}
+      }
+      else if(stage===4){deadline=Date.now()+15000;name='task_output';input={id};stage=5}
+      else if(stage===5){
+        if(!last.text.includes('COMPILED_TASK_INPUT')){
+          if(Date.now()>=deadline) throw new Error('Missing task output: '+last.text);
+          await new Promise(resolve=>setTimeout(resolve,250));name='task_output';input={id};
+        }else{name='task_kill';input={id};stage=6}
+      }
+      else if(stage===6){name='task_wait';input={ids:[id],all:true,timeoutMs:15000};stage=7}
       else {if(!JSON.stringify(last).includes('COMPILED_TASK_INPUT')) throw new Error('Missing task output');yield {type:'text_delta',text:'COMPILED_TASKS_OK'};yield {type:'done',stopReason:'end_turn'};return}
-      yield {type:'tool_call',id:'stage-'+stage,name,input};yield {type:'done',stopReason:'tool_use'}
+      yield {type:'tool_call',id:'stage-'+(++call),name,input};yield {type:'done',stopReason:'tool_use'}
     }})
   }`,
   )
@@ -99,8 +112,8 @@ try {
     const value = await runProcess([binary, ...args], {
       cwd,
       env,
-      signal: AbortSignal.timeout(30000),
-      timeoutMs: 30000,
+      signal: AbortSignal.timeout(60000),
+      timeoutMs: 60000,
       maxBytes: 2 * 1024 * 1024,
       structured: true,
     })
