@@ -9,7 +9,7 @@ import { installSignalHandlers, registerChildProcess } from "../../../core/lifec
 import { networkEnvironment, networkTLS } from "../../../core/network.ts"
 import type { ExecutionResult, SandboxProfile } from "./contracts.ts"
 import { installationRoot } from "./entrypoint.ts"
-import { childEnvironment } from "./env-policy.ts"
+import { childEnvironment, supervisorEnvironment } from "./env-policy.ts"
 import { assertPrivateInodes } from "./inodes.ts"
 import { hardenLinuxMounts } from "./linux-mounts.ts"
 import { createMacReaper, macCleanupPolicy } from "./macos-reaper.ts"
@@ -170,6 +170,11 @@ export async function runSupervisor(input: SupervisorInput, execute = runProcess
       { commandId: id },
     )
     const env = { ...childEnvironment(input.temp), ...input.workloadEnv, ...wrapped.env, ...input.secrets }
+    if (process.platform === "win32") {
+      // This process is srt-win, which creates a separate-user workload environment.
+      // windowsCommand explicitly installs workloadEnv in the inner shell instead.
+      env.LOCALAPPDATA = supervisorEnvironment(input.temp).LOCALAPPDATA
+    }
     const argv =
       process.platform === "win32"
         ? wrapped.argv

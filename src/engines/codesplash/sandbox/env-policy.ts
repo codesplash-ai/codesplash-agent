@@ -37,6 +37,8 @@ export function childEnvironment(
     env.PATH = `${env.SystemRoot}\\System32;${env.SystemRoot}\\System32\\WindowsPowerShell\\v1.0`
     env.PATHEXT = ".COM;.EXE;.BAT;.CMD"
     env.USERPROFILE = temp
+    env.LOCALAPPDATA = temp
+    env.APPDATA = temp
   }
   for (const name of [...SAFE_NAMES, ...extra]) {
     const value = source[name]
@@ -47,6 +49,16 @@ export function childEnvironment(
       redactSensitiveText(value, source) === value
     )
       env[name] = value
+  }
+  return env
+}
+
+/** The trusted Windows broker needs its own provisioning state, never the workload's profile. */
+export function supervisorEnvironment(temp: string, source = process.env): NodeJS.ProcessEnv {
+  const env = childEnvironment(temp, [], source)
+  if (process.platform === "win32") {
+    if (!source.LOCALAPPDATA) throw new Error("Windows sandbox broker requires LOCALAPPDATA")
+    env.LOCALAPPDATA = source.LOCALAPPDATA
   }
   return env
 }

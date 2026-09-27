@@ -1,5 +1,20 @@
 import { expect, test } from "bun:test"
 import { shellCommand, validateWindowsPath } from "../../src/core/platform.ts"
+import { childEnvironment, supervisorEnvironment } from "../../src/engines/codesplash/sandbox/env-policy.ts"
+
+test.skipIf(process.platform !== "win32")(
+  "Windows broker state stays separate from workload profiles",
+  () => {
+    const source = { ...process.env, LOCALAPPDATA: "C:\\host-state", OPENAI_API_KEY: "credential-canary" }
+    const child = childEnvironment("C:\\owned-temp", [], source)
+    const broker = supervisorEnvironment("C:\\owned-temp", source)
+    expect(child.LOCALAPPDATA).toBe("C:\\owned-temp")
+    expect(child.APPDATA).toBe("C:\\owned-temp")
+    expect(broker.LOCALAPPDATA).toBe("C:\\host-state")
+    expect(child.OPENAI_API_KEY).toBeUndefined()
+    expect(broker.OPENAI_API_KEY).toBeUndefined()
+  },
+)
 
 test.skipIf(process.platform !== "win32")(
   "real Windows PowerShell preserves literal Unicode, quotes and dollar signs",

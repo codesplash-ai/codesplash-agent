@@ -15,7 +15,7 @@ import { NamedSecrets } from "../secrets.ts"
 import { truncateToolOutput } from "../tools/truncate.ts"
 import type { AccessGrant, ExecutionResult, SandboxProfile, SandboxRuntime } from "./contracts.ts"
 import { installationRoot, internalCommand } from "./entrypoint.ts"
-import { childEnvironment, SENSITIVE_NAME, SecretSanitizer } from "./env-policy.ts"
+import { childEnvironment, SENSITIVE_NAME, SecretSanitizer, supervisorEnvironment } from "./env-policy.ts"
 import { SandboxLog } from "./log.ts"
 import { createMacReaper } from "./macos-reaper.ts"
 import { startNetworkBroker } from "./network-broker.ts"
@@ -363,7 +363,7 @@ export class NativeSandbox implements SandboxRuntime {
         if (Buffer.byteLength(wire) > 8 * 1024 * 1024) throw new Error("Sandbox request exceeds 8 MiB")
         const transport = await runProcess(internalCommand("supervisor"), {
           cwd: profile.cwd,
-          env: childEnvironment(temp),
+          env: supervisorEnvironment(temp),
           signal,
           input: wire,
           timeoutMs: command.timeoutMs + 15_000,
