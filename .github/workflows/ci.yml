@@ -70,12 +70,10 @@ jobs:
       - name: Provision isolated runner account and WFP boundary
         run: bun src/cli.ts windows-sandbox install --apply
       - name: Prove WFP and native filesystem boundary
-        run: |
-          bun src/cli.ts windows-sandbox verify
-          bun scripts/m11-windows-smoke.ts
+        run: ./scripts/run-windows-acceptance.ps1 -Mode Verify
       - name: Remove runner sandbox account and filters
         if: always()
-        run: bun src/cli.ts windows-sandbox uninstall --apply
+        run: ./scripts/run-windows-acceptance.ps1 -Mode Cleanup
 
   distribution-image:
     name: Distribution CI image and public docs

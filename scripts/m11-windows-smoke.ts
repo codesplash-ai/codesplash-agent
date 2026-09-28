@@ -28,6 +28,9 @@ try {
   assert.equal(result.kind, "success")
   assert.match(result.stdout, /WINDOWS_DENIALS_PASS/)
   assert.equal(readFileSync(join(work, ".git", "protected"), "utf8"), "original")
+  const privileges = await runtime.execute(shellCommand("whoami /priv"), new AbortController().signal)
+  assert.equal(privileges.kind, "success")
+  assert.doesNotMatch(privileges.stdout, /SeRestorePrivilege/, "broker restore privilege leaked to workload")
   const abort = new AbortController(),
     timer = setTimeout(() => abort.abort(), 2000)
   try {
