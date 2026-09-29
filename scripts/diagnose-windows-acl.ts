@@ -78,6 +78,7 @@ console.log("ACL diagnostics collected; native acceptance has NOT been run by th
 for (const phase of ["combined-grant", "combined-deny"] as const) {
   console.log(`ACL_PROBE_START ${phase}`)
   const started = Date.now()
+  let cleanupConfirmed = false
   let error: string | undefined
   try {
     if (phase === "combined-grant")
@@ -110,6 +111,7 @@ for (const phase of ["combined-grant", "combined-deny"] as const) {
       phase === "combined-grant"
         ? revokeWindowsAcl({ sandboxUserSid: user.sid, srtWin })
         : restoreWindowsAcl({ sandboxUserSid: user.sid, srtWin })
-    if (!restored) throw new Error("Combined ACL cleanup was not confirmed")
+    cleanupConfirmed = Boolean(restored)
   }
+  if (!cleanupConfirmed) throw new Error("Combined ACL cleanup was not confirmed")
 }
