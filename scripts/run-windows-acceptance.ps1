@@ -1,4 +1,4 @@
-param([ValidateSet('Verify', 'Cleanup')][string]$Mode = 'Verify')
+param([ValidateSet('Verify', 'Cleanup', 'Diagnose')][string]$Mode = 'Verify')
 $ErrorActionPreference = 'Stop'
 # The CI broker must stamp read-only ACLs on TrustedInstaller-owned Windows
 # directories. Administrators possess SeRestorePrivilege, but it is disabled
@@ -44,6 +44,9 @@ try {
   if ($Mode -eq 'Cleanup') {
     & bun src/cli.ts windows-sandbox uninstall --apply
     if ($LASTEXITCODE -ne 0) { throw 'Sandbox cleanup failed' }
+  } elseif ($Mode -eq 'Diagnose') {
+    & bun scripts/diagnose-windows-acl.ts
+    if ($LASTEXITCODE -ne 0) { throw 'ACL diagnostic collection failed' }
   } else {
     & bun src/cli.ts windows-sandbox verify
     if ($LASTEXITCODE -ne 0) { throw 'WFP verification failed' }
