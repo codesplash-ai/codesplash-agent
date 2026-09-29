@@ -54,7 +54,8 @@ for (const mode of ["read", "write"] as const) {
       const restored = revokeWindowsAcl({ sandboxUserSid: user.sid, srtWin })
       cleanupConfirmed = Boolean(restored)
     }
-    if (!cleanupConfirmed) throw new Error("ACL cleanup was not confirmed; refusing further diagnostic grants")
+    if (!cleanupConfirmed)
+      throw new Error("ACL cleanup was not confirmed; refusing further diagnostic grants")
   }
 }
 console.log("ACL diagnostics collected; native acceptance has NOT been run by this diagnostic.")
