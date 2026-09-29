@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs"
 import { writeFile } from "node:fs/promises"
-import { dirname, join, parse } from "node:path"
+import { dirname, join, parse, win32 } from "node:path"
 import { fileURLToPath } from "node:url"
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime"
 import { digest, lease } from "../../../core/session/files.ts"
@@ -26,6 +26,12 @@ export function verifiedWindowsHelper(): string {
   if (!path || digest(readFileSync(path)) !== hashes[process.arch])
     throw new Error("Windows sandbox helper missing or altered; reinstall the complete package")
   return path
+}
+/** Never stamp the whole Program Files tree: installed SDKs/WindowsApps can
+ * hold ACL propagation indefinitely. Grant supported command runtimes only;
+ * additional toolchains still require explicit profile read roots. */
+export function windowsToolReadRoots(programFiles: string): string[] {
+  return ["Git", "PowerShell", "nodejs"].map((tool) => win32.join(programFiles, tool))
 }
 export function windowsRuntimeConfig(input: SupervisorInput): SandboxRuntimeConfig {
   const p = input.profile,
@@ -57,7 +63,7 @@ export function windowsRuntimeConfig(input: SupervisorInput): SandboxRuntimeConf
       denyRead: [...roots, ...p.deniedReadPaths],
       allowRead: [
         system,
-        process.env.ProgramFiles ?? "C:\\Program Files",
+        ...windowsToolReadRoots(process.env.ProgramFiles ?? "C:\\Program Files"),
         process.execPath,
         installationRoot(),
         input.temp,

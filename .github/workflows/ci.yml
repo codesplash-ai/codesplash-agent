@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      windows_acceptance_only:
+        description: Run the actual Windows enforcement gate without the other platform jobs
+        type: boolean
+        default: false
       windows_diagnostics:
         description: Collect per-path Windows ACL timings without rerunning the platform matrix
         type: boolean
@@ -16,7 +20,7 @@ permissions:
 
 jobs:
   check:
-    if: ${{ !inputs.windows_diagnostics }}
+    if: ${{ !inputs.windows_diagnostics && !inputs.windows_acceptance_only }}
     name: check & sandbox (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -84,7 +88,7 @@ jobs:
         run: ./scripts/run-windows-acceptance.ps1 -Mode Cleanup
 
   distribution-image:
-    if: ${{ !inputs.windows_diagnostics }}
+    if: ${{ !inputs.windows_diagnostics && !inputs.windows_acceptance_only }}
     name: Distribution CI image and public docs
     runs-on: ubuntu-latest
     steps:
