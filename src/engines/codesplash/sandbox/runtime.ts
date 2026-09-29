@@ -366,7 +366,9 @@ export class NativeSandbox implements SandboxRuntime {
           env: supervisorEnvironment(temp),
           signal,
           input: wire,
-          timeoutMs: command.timeoutMs + 15_000,
+          // Four bounded Windows ACL phases (grant/stamp/restore/revoke) surround
+          // the workload. Its own timeout is still enforced inside the supervisor.
+          timeoutMs: command.timeoutMs + (process.platform === "win32" ? 4 * 600_000 + 15_000 : 15_000),
           structured: true,
           maxBytes: (command.outputLimit ?? 1024 * 1024) + 2 * 1024 * 1024,
           cleanup: () => reaper?.kill(),

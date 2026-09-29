@@ -3,6 +3,7 @@ USER root
 RUN apt-get update && apt-get install -y --no-install-recommends bubblewrap socat ripgrep git npm ca-certificates tini && rm -rf /var/lib/apt/lists/*
 WORKDIR /workspace
 COPY package.json bun.lock ./
+COPY patches ./patches
 RUN bun install --frozen-lockfile --backend=copyfile
 COPY src ./src
 COPY scripts ./scripts
