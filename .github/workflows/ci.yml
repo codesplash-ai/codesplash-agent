@@ -10,6 +10,10 @@ on:
         description: Run the actual Windows enforcement gate without the other platform jobs
         type: boolean
         default: false
+      windows_extended_acl_diagnostic:
+        description: Measure ACL propagation with a bounded five-minute helper deadline (diagnostics only)
+        type: boolean
+        default: false
       windows_diagnostics:
         description: Collect per-path Windows ACL timings without rerunning the platform matrix
         type: boolean
@@ -105,7 +109,7 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.windows_diagnostics }}
     name: Windows ACL diagnostics (not acceptance)
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
@@ -114,6 +118,8 @@ jobs:
       - run: bun install --frozen-lockfile --backend=copyfile
       - run: bun src/cli.ts windows-sandbox install --apply
       - name: Measure each real read/write grant
+        env:
+          CODESPLASH_EXTENDED_ACL_DIAGNOSTIC: ${{ inputs.windows_extended_acl_diagnostic && '1' || '0' }}
         run: ./scripts/run-windows-acceptance.ps1 -Mode Diagnose
       - uses: actions/upload-artifact@v4
         if: always()
