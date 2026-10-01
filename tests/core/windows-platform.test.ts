@@ -29,6 +29,9 @@ test.skipIf(process.platform !== "win32")(
     expect(child.stdout.toString()).toBe(literal)
     expect(() => validateWindowsPath(process.cwd())).not.toThrow()
   },
+  // The child already has a hard ten-second deadline. Allow the test runner
+  // to observe that result instead of aborting cold PowerShell startup at five.
+  15000,
 )
 test.skipIf(process.platform !== "win32")("real Windows cmd runs with AutoRun disabled", () => {
   const child = Bun.spawnSync(
