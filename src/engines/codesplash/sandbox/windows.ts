@@ -89,7 +89,19 @@ export async function windowsCommand(input: SupervisorInput) {
           throw new Error("Unsupported Windows child environment entry")
         return `[Environment]::SetEnvironmentVariable(${ps(key)},${ps(value)},'Process')`
       }),
-    `Set-Location -LiteralPath ${ps(input.profile.cwd)}`,
+    // Diagnose a failing working-directory transition under the actual child
+    // token. Keep the original failure and every ACL; do not launch the workload.
+    `try { Set-Location -LiteralPath ${ps(input.profile.cwd)} } catch {`,
+    "  $locationError = $_",
+    `  $probePath = ${ps(input.profile.cwd)}`,
+    "  $probe = @{ path = $probePath; exists = [IO.Directory]::Exists($probePath) }",
+    "  try { $probe.itemPath = (Get-Item -LiteralPath $probePath -Force -ErrorAction Stop).FullName } catch { $probe.itemError = $_.Exception.Message }",
+    "  try { $probe.acl = (Get-Acl -LiteralPath $probePath -ErrorAction Stop).Sddl } catch { $probe.aclError = $_.Exception.Message }",
+    "  try { $probe.entryCount = [IO.Directory]::GetFileSystemEntries($probePath).Length } catch { $probe.enumerateError = $_.Exception.Message }",
+    "  try { [IO.Directory]::SetCurrentDirectory($probePath); $probe.nativeCwd = [IO.Directory]::GetCurrentDirectory() } catch { $probe.nativeCwdError = $_.Exception.Message }",
+    "  Write-Output ('WINDOWS_CWD_PROBE ' + ($probe | ConvertTo-Json -Compress))",
+    "  throw $locationError",
+    "}",
     `& ${input.argv.map(ps).join(" ")}`,
     "if ($null -eq $LASTEXITCODE) { exit 0 }; exit $LASTEXITCODE",
   ]
