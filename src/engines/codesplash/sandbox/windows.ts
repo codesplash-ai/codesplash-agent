@@ -99,7 +99,7 @@ export async function windowsCommand(input: SupervisorInput) {
     "  try { $probe.acl = (Get-Acl -LiteralPath $probePath -ErrorAction Stop).Sddl } catch { $probe.aclError = $_.Exception.Message }",
     "  try { $probe.entryCount = [IO.Directory]::GetFileSystemEntries($probePath).Length } catch { $probe.enumerateError = $_.Exception.Message }",
     "  try { [IO.Directory]::SetCurrentDirectory($probePath); $probe.nativeCwd = [IO.Directory]::GetCurrentDirectory() } catch { $probe.nativeCwdError = $_.Exception.Message }",
-    "  Write-Output ('WINDOWS_CWD_PROBE ' + ($probe | ConvertTo-Json -Compress))",
+    "  foreach ($key in $probe.Keys) { [Console]::WriteLine('WINDOWS_CWD_PROBE ' + $key + '=' + [string]$probe[$key]) }",
     "  throw $locationError",
     "}",
     `& ${input.argv.map(ps).join(" ")}`,
