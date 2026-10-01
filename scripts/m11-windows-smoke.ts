@@ -1,14 +1,14 @@
 import assert from "node:assert/strict"
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { shellCommand } from "../src/core/platform.ts"
-import { createProfile } from "../src/engines/codesplash/sandbox/profile.ts"
+import { createProfile, physicalPath } from "../src/engines/codesplash/sandbox/profile.ts"
 import { NativeSandbox } from "../src/engines/codesplash/sandbox/runtime.ts"
 
 if (process.platform !== "win32" || process.arch !== "x64")
   throw Error("This gate requires actual Windows x64")
-const root = realpathSync(mkdtempSync(join(tmpdir(), "m11-native-"))),
+const root = physicalPath(mkdtempSync(join(tmpdir(), "m11-native-"))),
   work = join(root, "work"),
   outside = join(root, "outside")
 mkdirSync(work)

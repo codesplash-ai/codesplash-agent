@@ -1,8 +1,19 @@
 import { expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { atomic, bytes, lease, localFilesystem } from "../../src/core/session/files.ts"
+import { windowsLongPath } from "../../src/core/session/windows-native.ts"
+import { physicalPath } from "../../src/engines/codesplash/sandbox/profile.ts"
 import { SafeParent } from "../../src/core/session/secure-path.ts"
 
 test.skipIf(process.platform !== "win32" || process.arch !== "x64")(
@@ -36,6 +47,22 @@ test.skipIf(process.platform !== "win32" || process.arch !== "x64")(
       symlinkSync(join(root, "outside"), join(root, "junction"), "junction")
       expect(() => SafeParent.open(root, "junction/file", true)).toThrow("Reparse")
       expect(readFileSync(join(root, "child", "file"), "utf8")).toBe("new")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  },
+)
+
+test.skipIf(process.platform !== "win32" || process.arch !== "x64")(
+  "broker expands short aliases without granting parent discovery to the workload",
+  () => {
+    const root = mkdtempSync(join(tmpdir(), "codesplash-long-path-"))
+    try {
+      const expanded = windowsLongPath(root)
+      expect(expanded).not.toMatch(/RUNNER~[0-9]/i)
+      expect(statSync(expanded).ino).toBe(statSync(root).ino)
+      expect(physicalPath(root)).toBe(expanded)
+      expect(physicalPath(join(root, "not-created", "file"))).toBe(join(expanded, "not-created", "file"))
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
