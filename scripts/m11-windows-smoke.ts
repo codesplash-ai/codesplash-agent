@@ -20,13 +20,14 @@ const runtime = new NativeSandbox(createProfile(work, "workspace-write")),
 try {
   const result = await runtime.execute(
     shellCommand(
-      `$ErrorActionPreference='Stop'; Set-Content -LiteralPath ${ps(join(work, "owned"))} -Value 'allowed'; try { Get-Content -LiteralPath ${ps(outside)}; exit 31 } catch {}; try { Set-Content -LiteralPath ${ps(join(work, ".git", "protected"))} -Value 'changed'; exit 32 } catch {}; Write-Output 'WINDOWS_DENIALS_PASS'`,
+      `$ErrorActionPreference='Stop'; if ($PWD.ProviderPath -ne ${ps(work)}) { throw 'PowerShell cwd differs from profile' }; if ([IO.Directory]::GetCurrentDirectory() -ne ${ps(work)}) { throw 'Native cwd differs from profile' }; Set-Content -LiteralPath './owned' -Value 'allowed'; try { Get-Content -LiteralPath ${ps(outside)}; exit 31 } catch {}; try { Set-Content -LiteralPath ${ps(join(work, ".git", "protected"))} -Value 'changed'; exit 32 } catch {}; Write-Output 'WINDOWS_DENIALS_PASS'`,
     ),
     new AbortController().signal,
   )
   console.log(result)
   assert.equal(result.kind, "success")
   assert.match(result.stdout, /WINDOWS_DENIALS_PASS/)
+  assert.equal(readFileSync(join(work, "owned"), "utf8").trim(), "allowed")
   assert.equal(readFileSync(join(work, ".git", "protected"), "utf8"), "original")
   const privileges = await runtime.execute(shellCommand("whoami /priv"), new AbortController().signal)
   assert.equal(privileges.kind, "success")
