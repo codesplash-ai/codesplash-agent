@@ -5,6 +5,7 @@ import { homedir } from "node:os"
 import { dirname, isAbsolute, join, resolve, sep } from "node:path"
 import { configDirectory, dataDirectory, type SandboxMode } from "../../../core/config.ts"
 import { pathContains, validateWindowsPath } from "../../../core/platform.ts"
+import { windowsLongPath } from "../../../core/session/windows-native.ts"
 import type { AccessGrant, NativeSandboxConfig, SandboxProfile } from "./contracts.ts"
 import { validateEnvironmentName } from "./env-policy.ts"
 import { validateResourceLimits } from "./resources.ts"
@@ -15,7 +16,11 @@ export function physicalPath(path: string): string {
   const tail: string[] = []
   while (true) {
     try {
-      return join(realpathSync(cursor), ...tail.reverse())
+      const physical = realpathSync(cursor)
+      return join(
+        process.platform === "win32" && /~[0-9]/.test(physical) ? windowsLongPath(physical) : physical,
+        ...tail.reverse(),
+      )
     } catch {
       const parent = dirname(cursor)
       if (parent === cursor) throw new Error("Cannot resolve sandbox path")

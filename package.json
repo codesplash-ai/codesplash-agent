@@ -24,7 +24,8 @@
     "docs/agent-roadmap-status.md",
     "docs/storage-platform-boundaries.md",
     "docs/agent-carryovers.md",
-    "docs/roadmap-release-handoff-2026-09-27.md"
+    "docs/roadmap-release-handoff-2026-09-27.md",
+    "patches"
   ],
   "repository": {
     "type": "git",
@@ -97,5 +98,8 @@
     "./config.schema.json": "./dist/core/config/schema.json",
     "./managed.schema.json": "./dist/core/config/managed-schema.json"
   },
-  "types": "./dist/sdk/index.d.ts"
+  "types": "./dist/sdk/index.d.ts",
+  "patchedDependencies": {
+    "@anthropic-ai/sandbox-runtime@0.0.75": "patches/@anthropic-ai%2Fsandbox-runtime@0.0.75.patch"
+  }
 }

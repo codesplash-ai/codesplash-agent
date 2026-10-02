@@ -17,6 +17,7 @@ function load() {
     LocalFree: { args: ["u64"], returns: "u64" },
     CloseHandle: { args: ["u64"], returns: "i32" },
     GetLastError: { args: [], returns: "u32" },
+    GetLongPathNameW: { args: ["ptr", "ptr", "u32"], returns: "u32" },
     GetFileInformationByHandle: { args: ["u64", "ptr"], returns: "i32" },
     ReadFile: { args: ["u64", "ptr", "u32", "ptr", "ptr"], returns: "i32" },
     WriteFile: { args: ["u64", "ptr", "u32", "ptr", "ptr"], returns: "i32" },
@@ -59,6 +60,18 @@ function error(code: number): never {
       >
     )[code] ?? "EIO"
   throw e
+}
+/** Resolve 8.3 aliases while the broker can still discover parent names.
+ * The restricted child must not need parent-directory read access merely to
+ * expand RUNNER~1 when PowerShell normalizes its working directory. */
+export function windowsLongPath(path: string): string {
+  validateWindowsPath(path)
+  const input = wchar(path),
+    output = Buffer.alloc(32768 * 2)
+  const length = api().k.GetLongPathNameW(ptr(input), ptr(output), 32768)
+  if (!length) error(api().k.GetLastError())
+  if (length >= 32768) throw Error("Expanded Windows path exceeds the native limit")
+  return output.subarray(0, length * 2).toString("utf16le")
 }
 function checked(ok: number) {
   if (!ok) error(api().k.GetLastError())

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs"
 import { writeFile } from "node:fs/promises"
-import { dirname, join, parse } from "node:path"
+import { dirname, join, parse, win32 } from "node:path"
 import { fileURLToPath } from "node:url"
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime"
 import { digest, lease } from "../../../core/session/files.ts"
@@ -26,6 +26,12 @@ export function verifiedWindowsHelper(): string {
   if (!path || digest(readFileSync(path)) !== hashes[process.arch])
     throw new Error("Windows sandbox helper missing or altered; reinstall the complete package")
   return path
+}
+/** Never stamp the whole Program Files tree: installed SDKs/WindowsApps can
+ * hold ACL propagation indefinitely. Grant supported command runtimes only;
+ * additional toolchains still require explicit profile read roots. */
+export function windowsToolReadRoots(programFiles: string): string[] {
+  return ["Git", "PowerShell", "nodejs"].map((tool) => win32.join(programFiles, tool))
 }
 export function windowsRuntimeConfig(input: SupervisorInput): SandboxRuntimeConfig {
   const p = input.profile,
@@ -57,7 +63,7 @@ export function windowsRuntimeConfig(input: SupervisorInput): SandboxRuntimeConf
       denyRead: [...roots, ...p.deniedReadPaths],
       allowRead: [
         system,
-        process.env.ProgramFiles ?? "C:\\Program Files",
+        ...windowsToolReadRoots(process.env.ProgramFiles ?? "C:\\Program Files"),
         process.execPath,
         installationRoot(),
         input.temp,
@@ -71,6 +77,38 @@ export function windowsRuntimeConfig(input: SupervisorInput): SandboxRuntimeConf
   }
 }
 const ps = (text: string) => `'${text.replaceAll("'", "''")}'`
+/** PowerShell normalizes every ancestor of a drive-qualified Set-Location.
+ * A private drive rooted at the already-authorized work folder avoids inspecting
+ * denied parents. This changes provider navigation only; no ACL is broadened.
+ * Native programs still inherit the real filesystem path, never the PS alias. */
+export function windowsPowerShellLocation(cwd: string): string[] {
+  return [
+    `New-PSDrive -Name CodeSplashWorkspace -PSProvider FileSystem -Root ${ps(cwd)} -ErrorAction Stop | Out-Null`,
+    "Set-Location -LiteralPath 'CodeSplashWorkspace:\\' -ErrorAction Stop",
+    `[IO.Directory]::SetCurrentDirectory(${ps(cwd)})`,
+    // PathInfo adds a trailing separator at a custom drive root (#12971).
+    `if ($PWD.ProviderPath.TrimEnd([char]92) -ne ${ps(cwd.replace(/\\+$/, ""))} -or [IO.Directory]::GetCurrentDirectory().TrimEnd([char]92) -ne ${ps(cwd.replace(/\\+$/, ""))}) { throw ('Sandbox working directory mismatch: provider=' + $PWD.ProviderPath + '; native=' + [IO.Directory]::GetCurrentDirectory()) }`,
+  ]
+}
+/** The workload shell is a separate PowerShell process and needs the same
+ * provider root. Preserve its executable, arguments and original command. */
+export function windowsWorkloadArgv(argv: string[], cwd: string): string[] {
+  if (!/^(?:powershell|pwsh)(?:\.exe)?$/i.test(win32.basename(argv[0] ?? ""))) return argv
+  if (argv.some((arg) => /^-File$/i.test(arg))) return argv
+  const index = argv.findIndex((arg) => /^(?:-EncodedCommand|-Command)$/i.test(arg))
+  if (index < 0 || index !== argv.length - 2) return argv
+  const value = argv[index + 1]
+  if (value === undefined) return argv
+  const encoded = argv[index]?.toLowerCase() === "-encodedcommand"
+  const command = encoded ? Buffer.from(value, "base64").toString("utf16le") : value
+  const prepared = ["$ErrorActionPreference = 'Stop'", ...windowsPowerShellLocation(cwd), command].join(
+    "\r\n",
+  )
+  return [
+    ...argv.slice(0, index + 1),
+    encoded ? Buffer.from(prepared, "utf16le").toString("base64") : prepared,
+  ]
+}
 /** Private file keeps named secrets off the host's process command line. */
 export async function windowsCommand(input: SupervisorInput) {
   const path = join(input.temp, "invoke.ps1")
@@ -83,8 +121,8 @@ export async function windowsCommand(input: SupervisorInput) {
           throw new Error("Unsupported Windows child environment entry")
         return `[Environment]::SetEnvironmentVariable(${ps(key)},${ps(value)},'Process')`
       }),
-    `Set-Location -LiteralPath ${ps(input.profile.cwd)}`,
-    `& ${input.argv.map(ps).join(" ")}`,
+    ...windowsPowerShellLocation(input.profile.cwd),
+    `& ${windowsWorkloadArgv(input.argv, input.profile.cwd).map(ps).join(" ")}`,
     "if ($null -eq $LASTEXITCODE) { exit 0 }; exit $LASTEXITCODE",
   ]
   await writeFile(path, Buffer.from(`\uFEFF${lines.join("\r\n")}`, "utf16le"), { flag: "wx", mode: 0o600 })
