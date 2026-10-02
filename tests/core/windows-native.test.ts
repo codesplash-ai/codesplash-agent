@@ -12,9 +12,9 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { atomic, bytes, lease, localFilesystem } from "../../src/core/session/files.ts"
+import { SafeParent } from "../../src/core/session/secure-path.ts"
 import { windowsLongPath } from "../../src/core/session/windows-native.ts"
 import { physicalPath } from "../../src/engines/codesplash/sandbox/profile.ts"
-import { SafeParent } from "../../src/core/session/secure-path.ts"
 
 test.skipIf(process.platform !== "win32" || process.arch !== "x64")(
   "Windows handle-relative transactions refuse reparse aliases, pin ancestors, and recover atomic storage",
