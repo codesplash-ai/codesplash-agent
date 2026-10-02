@@ -86,7 +86,8 @@ export function windowsPowerShellLocation(cwd: string): string[] {
     `New-PSDrive -Name CodeSplashWorkspace -PSProvider FileSystem -Root ${ps(cwd)} -ErrorAction Stop | Out-Null`,
     "Set-Location -LiteralPath 'CodeSplashWorkspace:\\' -ErrorAction Stop",
     `[IO.Directory]::SetCurrentDirectory(${ps(cwd)})`,
-    `if ($PWD.ProviderPath -ne ${ps(cwd)} -or [IO.Directory]::GetCurrentDirectory() -ne ${ps(cwd)}) { throw 'Sandbox working directory mismatch' }`,
+    // PathInfo adds a trailing separator at a custom drive root (#12971).
+    `if ($PWD.ProviderPath.TrimEnd([char]92) -ne ${ps(cwd.replace(/\\+$/, ""))} -or [IO.Directory]::GetCurrentDirectory().TrimEnd([char]92) -ne ${ps(cwd.replace(/\\+$/, ""))}) { throw ('Sandbox working directory mismatch: provider=' + $PWD.ProviderPath + '; native=' + [IO.Directory]::GetCurrentDirectory()) }`,
   ]
 }
 /** The workload shell is a separate PowerShell process and needs the same

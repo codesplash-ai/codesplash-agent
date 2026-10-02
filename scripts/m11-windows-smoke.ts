@@ -20,7 +20,7 @@ const runtime = new NativeSandbox(createProfile(work, "workspace-write")),
 try {
   const result = await runtime.execute(
     shellCommand(
-      `$ErrorActionPreference='Stop'; if ($PWD.ProviderPath -ne ${ps(work)}) { throw 'PowerShell cwd differs from profile' }; if ([IO.Directory]::GetCurrentDirectory() -ne ${ps(work)}) { throw 'Native cwd differs from profile' }; Set-Content -LiteralPath './owned' -Value 'allowed'; try { Get-Content -LiteralPath ${ps(outside)}; exit 31 } catch {}; try { Set-Content -LiteralPath ${ps(join(work, ".git", "protected"))} -Value 'changed'; exit 32 } catch {}; Write-Output 'WINDOWS_DENIALS_PASS'`,
+      `$ErrorActionPreference='Stop'; if ($PWD.ProviderPath.TrimEnd([char]92) -ne ${ps(work)}) { throw 'PowerShell cwd differs from profile' }; if ([IO.Directory]::GetCurrentDirectory().TrimEnd([char]92) -ne ${ps(work)}) { throw 'Native cwd differs from profile' }; Set-Content -LiteralPath './owned' -Value 'allowed'; try { Get-Content -LiteralPath ${ps(outside)}; exit 31 } catch {}; try { Set-Content -LiteralPath ${ps(join(work, ".git", "protected"))} -Value 'changed'; exit 32 } catch {}; Write-Output 'WINDOWS_DENIALS_PASS'`,
     ),
     new AbortController().signal,
   )
