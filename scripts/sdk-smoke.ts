@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { runProcess } from "../src/engines/codesplash/sandbox/process.ts"
 import { APP_VERSION } from "../src/version.ts"
+import { packSDK } from "./pack-sdk.ts"
 
 const project = process.cwd(),
   root = await realpath(await mkdtemp(join(tmpdir(), "sdk-package-smoke-")))
@@ -31,7 +32,7 @@ try {
   await run([process.execPath, "run", "build"], project)
   const archive = resolve(`out/codesplash-agent-${APP_VERSION}-sdk.tgz`)
   await mkdir(resolve("out"), { recursive: true })
-  await run([process.execPath, "pm", "pack", "--filename", archive], project)
+  await packSDK(archive, project)
   await writeFile(
     join(root, "package.json"),
     JSON.stringify({
@@ -45,6 +46,12 @@ try {
   await run([process.execPath, "install", "--ignore-scripts"])
   const installed = join(root, "node_modules", "codesplash-agent")
   const manifest = JSON.parse(await readFile(join(installed, "package.json"), "utf8"))
+  assert.equal(manifest.patchedDependencies, undefined)
+  const packedRuntime = join(
+    installed,
+    "node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/windows-sandbox-utils.js",
+  )
+  assert.equal((await readFile(packedRuntime, "utf8")).match(/timeoutMs: 600000/g)?.length, 4)
   assert.ok(manifest.exports["."].types)
   assert.ok(
     (await readFile(join(installed, "dist/core/session/secure-path.c"), "utf8")).includes("cs_openat"),

@@ -24,7 +24,8 @@
     "docs/agent-roadmap-status.md",
     "docs/storage-platform-boundaries.md",
     "docs/agent-carryovers.md",
-    "docs/roadmap-release-handoff-2026-09-27.md"
+    "docs/roadmap-release-handoff-2026-09-27.md",
+    "patches"
   ],
   "repository": {
     "type": "git",

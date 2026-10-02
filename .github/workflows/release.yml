@@ -144,7 +144,8 @@ jobs:
           npm install -g npm@latest
           bun install --frozen-lockfile
           bun run build
-          npm publish --access public
+          bun scripts/pack-sdk.ts
+          npm publish "out/codesplash-agent-${version}-sdk.tgz" --access public
 
       - name: Update Homebrew tap
         if: env.TAP_GITHUB_TOKEN != ''
