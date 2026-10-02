@@ -121,7 +121,7 @@ jobs:
         env:
           CODESPLASH_EXTENDED_ACL_DIAGNOSTIC: ${{ inputs.windows_extended_acl_diagnostic && '1' || '0' }}
         run: ./scripts/run-windows-acceptance.ps1 -Mode Diagnose
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: windows-acl-diagnostic
