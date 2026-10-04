@@ -21,8 +21,8 @@ describe("CodeSplash terminal brand", () => {
       background: "#F5F7FA",
       panel: "#FFFFFF",
       muted: "#576375",
-      accent: "#0976A5",
-      action: "#BF3918",
+      accent: "#BF3918",
+      action: "#0976A5",
       border: "#D3DAE3",
     })
   })
