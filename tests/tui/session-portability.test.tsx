@@ -70,10 +70,19 @@ test("rendered /pwd, /cd preview/apply and /export use the effective directory w
     await Bun.sleep(50)
     await setup.flush()
   }
-  const command = async (text: string) => {
+  const waitForFrame = async (text: string) => {
+    const deadline = Date.now() + 3000
+    while (!setup.captureCharFrame().includes(text)) {
+      if (Date.now() >= deadline)
+        throw new Error(`Expected rendered state: ${text}\n${setup.captureCharFrame()}`)
+      await settle()
+    }
+  }
+  const command = async (text: string, rendered?: string) => {
     await setup.mockInput.typeText(text)
     setup.mockInput.pressEnter()
     await settle()
+    if (rendered) await waitForFrame(rendered)
   }
   try {
     root.render(
@@ -90,17 +99,17 @@ test("rendered /pwd, /cd preview/apply and /export use the effective directory w
     expect(setup.captureCharFrame()).toContain("/old-project")
     setup.mockInput.pressEscape()
     await settle()
-    await command(`/cd '${destination}'`)
+    await command(`/cd '${destination}'`, "Working-directory preview")
     expect(setup.captureCharFrame()).toContain("Working-directory preview")
     expect(cwd).toBe("/old-project")
     setup.mockInput.pressEscape()
     await settle()
-    await command(`/cd '${destination}' --clear --apply --revision reviewed`)
+    await command(`/cd '${destination}' --clear --apply --revision reviewed`, "Working directory changed")
     expect(calls.at(-1)).toEqual({ path: destination, context: "clear", apply: true, revision: "reviewed" })
     expect(setup.captureCharFrame()).toContain("Working directory changed")
     setup.mockInput.pressEscape()
     await settle()
-    await command("/export --output exported.html --format html")
+    await command("/export --output exported.html --format html", "Session export")
     expect(await readFile(join(destination, "exported.html"), "utf8")).toContain("default-src 'none'")
     expect(submissions).toBe(0)
   } finally {

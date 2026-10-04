@@ -40,7 +40,19 @@ const defaultRespond = () => new Response("unexpected request", { status: 500 })
 
 beforeAll(() => {
   respond = defaultRespond
-  server = Bun.serve({ port: 0, fetch: (request) => respond(request) })
+  server = Bun.serve({
+    port: 0,
+    fetch: async (request) => {
+      const response = await respond(request)
+      // Error fixtures may return before reading the POST body. Drain it before
+      // responding, and isolate connections between independent wire tests.
+      // Otherwise Bun's Intel macOS server can close/reset a retrying client
+      // or interpret remaining request bytes as another request.
+      if (!request.bodyUsed) await request.arrayBuffer()
+      response.headers.set("connection", "close")
+      return response
+    },
+  })
   process.env.ANTHROPIC_API_KEY = "test-api-key"
   process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${server.port}`
 })

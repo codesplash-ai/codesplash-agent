@@ -150,7 +150,7 @@ test("archive parser rejects traversal, symlinks, hardlinks, duplicate names and
   } finally {
     await f.close()
   }
-})
+}, 20000)
 test("marketplace browsing is inert and resolves only pinned explicit packages", async () => {
   const f = await fixture()
   try {

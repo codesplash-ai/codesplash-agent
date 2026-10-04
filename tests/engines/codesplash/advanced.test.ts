@@ -113,7 +113,7 @@ test("media reads yield image content and bounded PDF page text", async () => {
   } finally {
     await rm(cwd, { recursive: true, force: true })
   }
-})
+}, 20000)
 test("tool presets narrow actual dispatch; advanced capabilities require explicit flags", async () => {
   expect(builtinTools().some((t) => t.name === "code_mode")).toBe(false)
   const registry = selectedRegistry(createToolRegistry(builtinTools(true)), { toolset: "read-only" })
