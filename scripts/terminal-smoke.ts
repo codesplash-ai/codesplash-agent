@@ -79,17 +79,18 @@ try {
         const page=JSON.parse(last.text);
         if(!page.terminalReady){
           if(Date.now()>=deadline || !['queued','running'].includes(page.task.status)) throw new Error('Terminal did not become ready: '+last.text);
-          await new Promise(resolve=>setTimeout(resolve,250));name='task_output';input={id};
+          name='task_wait';input={ids:[id],timeoutMs:1000};stage=2;
         }else{name='write_stdin';input={id,text:'COMPILED_TASK_INPUT\\n'};stage=4}
       }
       else if(stage===4){deadline=Date.now()+15000;name='task_output';input={id};stage=5}
       else if(stage===5){
         if(!last.text.includes('COMPILED_TASK_INPUT')){
           if(Date.now()>=deadline) throw new Error('Missing task output: '+last.text);
-          await new Promise(resolve=>setTimeout(resolve,250));name='task_output';input={id};
+          name='task_wait';input={ids:[id],timeoutMs:1000};stage=8;
         }else{name='task_kill';input={id};stage=6}
       }
       else if(stage===6){name='task_wait';input={ids:[id],all:true,timeoutMs:15000};stage=7}
+      else if(stage===8){name='task_output';input={id};stage=5}
       else {if(!JSON.stringify(last).includes('COMPILED_TASK_INPUT')) throw new Error('Missing task output');yield {type:'text_delta',text:'COMPILED_TASKS_OK'};yield {type:'done',stopReason:'end_turn'};return}
       yield {type:'tool_call',id:'stage-'+(++call),name,input};yield {type:'done',stopReason:'tool_use'}
     }})
